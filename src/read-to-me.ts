@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenAI } from '@google/genai';
 import { Readability } from '@mozilla/readability';
 import chalk from 'chalk';
 import { parseHTML } from 'linkedom';
@@ -14,6 +15,7 @@ import { createScript, style } from './utils/createScript';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+const genAINew = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const ttsClient = new TextToSpeechClient();
 
 const ENGLISH_DIALECTS = [
@@ -812,21 +814,57 @@ async function generateThumbnail(content: ExtractedContent, outputPath: string):
     const THUMBNAIL_SIZE = 1400; // Standard podcast cover size
     const BORDER_WIDTH = 40;
     const BORDER_COLOR = '#1E90FF'; // Dodger blue - stylish standard blue
+    const TAG_BG_COLOR = '#1E90FF'; // Same blue for consistency
+    const TAG_TEXT_COLOR = '#FFFFFF';
 
-    // Try to use an image from the article as base
     let baseImage: Buffer | null = null;
 
-    if (content.allImages.length > 0 && genAI) {
-        // Try to find the best image using AI
-        console.log(chalk.gray('  Finding best cover image...'));
+    // Try to generate an AI thumbnail using Gemini 2.5 Flash Image (nano-banana)
+    if (genAINew) {
+        console.log(chalk.gray('  Generating AI thumbnail with Gemini...'));
+        try {
+            // Create a prompt based on the article title and content
+            const titleSummary = content.title.slice(0, 100);
+            const contentPreview = content.chapters[0]?.content.slice(0, 200) || '';
+
+            const prompt = `Create a visually striking podcast cover art thumbnail for an article titled "${titleSummary}".
+The image should be artistic, professional, and suitable as a podcast cover.
+Use bold colors and an eye-catching composition that captures the essence of the topic.
+Do NOT include any text in the image.
+Article context: ${contentPreview}`;
+
+            const response = await genAINew.models.generateContent({
+                model: 'gemini-2.5-flash-image',
+                contents: prompt,
+                config: {
+                    responseModalities: ['IMAGE'],
+                },
+            });
+
+            // Extract the generated image
+            if (response.candidates?.[0]?.content?.parts) {
+                for (const part of response.candidates[0].content.parts) {
+                    if (part.inlineData?.data) {
+                        baseImage = Buffer.from(part.inlineData.data, 'base64');
+                        console.log(chalk.green('  AI thumbnail generated successfully'));
+                        break;
+                    }
+                }
+            }
+        } catch (err) {
+            console.log(chalk.yellow(`  AI image generation failed: ${(err as Error).message}`));
+        }
+    }
+
+    // Fall back to using an article image if AI generation failed
+    if (!baseImage && content.allImages.length > 0 && genAI) {
+        console.log(chalk.gray('  Falling back to article image...'));
         try {
             const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-
-            // Score each image for thumbnail suitability
             let bestImage: string | null = null;
             let bestScore = -1;
 
-            for (const imgUrl of content.allImages.slice(0, 5)) { // Check first 5 images
+            for (const imgUrl of content.allImages.slice(0, 5)) {
                 const imageData = await fetchImageAsBase64(imgUrl);
                 if (!imageData) continue;
 
@@ -862,16 +900,29 @@ async function generateThumbnail(content: ExtractedContent, outputPath: string):
         }
     }
 
-    // Generate the thumbnail
+    // Generate the thumbnail with border and R2M tag
     if (baseImage) {
-        // Process existing image: resize and add border
         const innerSize = THUMBNAIL_SIZE - (BORDER_WIDTH * 2);
 
         const resizedImage = await sharp(baseImage)
             .resize(innerSize, innerSize, { fit: 'cover' })
             .toBuffer();
 
-        // Create thumbnail with border
+        // Create the R2M tag SVG overlay
+        const tagWidth = 120;
+        const tagHeight = 50;
+        const tagPadding = 15;
+        const tagSvg = Buffer.from(`
+            <svg width="${tagWidth}" height="${tagHeight}" xmlns="http://www.w3.org/2000/svg">
+                <rect x="0" y="0" width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${TAG_BG_COLOR}"/>
+                <text x="50%" y="55%" font-family="Arial, Helvetica, sans-serif" font-size="28"
+                      fill="${TAG_TEXT_COLOR}" text-anchor="middle" dominant-baseline="middle" font-weight="bold">
+                    R2M
+                </text>
+            </svg>
+        `);
+
+        // Create thumbnail with border and R2M tag
         const thumbnail = await sharp({
             create: {
                 width: THUMBNAIL_SIZE,
@@ -886,16 +937,24 @@ async function generateThumbnail(content: ExtractedContent, outputPath: string):
                     top: BORDER_WIDTH,
                     left: BORDER_WIDTH,
                 },
+                {
+                    input: tagSvg,
+                    top: BORDER_WIDTH + tagPadding,
+                    left: THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth - tagPadding,
+                },
             ])
             .png()
             .toBuffer();
 
         await Bun.write(outputPath, thumbnail);
     } else {
-        // Generate a simple placeholder thumbnail with title
+        // Generate a placeholder thumbnail with title
         console.log(chalk.gray('  Generating placeholder thumbnail...'));
 
-        // Create a gradient-like background with the title
+        const tagWidth = 120;
+        const tagHeight = 50;
+        const tagPadding = 15;
+
         const svg = `
             <svg width="${THUMBNAIL_SIZE}" height="${THUMBNAIL_SIZE}" xmlns="http://www.w3.org/2000/svg">
                 <defs>
@@ -914,7 +973,15 @@ async function generateThumbnail(content: ExtractedContent, outputPath: string):
                 </text>
                 <text x="50%" y="55%" font-family="Arial, sans-serif" font-size="36"
                       fill="#888888" text-anchor="middle">
-                    🎧 Audio Article
+                    Audio Article
+                </text>
+                <!-- R2M Tag -->
+                <rect x="${THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth - tagPadding}" y="${BORDER_WIDTH + tagPadding}"
+                      width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${TAG_BG_COLOR}"/>
+                <text x="${THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth / 2 - tagPadding}" y="${BORDER_WIDTH + tagPadding + tagHeight / 2 + 8}"
+                      font-family="Arial, Helvetica, sans-serif" font-size="28"
+                      fill="${TAG_TEXT_COLOR}" text-anchor="middle" font-weight="bold">
+                    R2M
                 </text>
             </svg>
         `;
