@@ -66,7 +66,7 @@ const argv = yargs(hideBin(process.argv))
     })
     .option('output', {
         alias: 'o',
-        describe: 'Output file path (without extension)',
+        describe: 'Output directory path',
         type: 'string',
     })
     .strict()
@@ -701,8 +701,10 @@ createScript(async () => {
     const chapterAudios = await synthesizeContent(content, voice, dialect);
 
     // Step 6: Save individual chapter files and generate output
-    const outputBase = output || content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
-    const outputDir = path.join(process.cwd(), 'output', outputBase);
+    const outputBase = content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+    const outputDir = output
+        ? path.resolve(output)
+        : path.join(process.cwd(), 'output', outputBase);
     await Bun.write(path.join(outputDir, '.gitkeep'), ''); // Ensure dir exists
 
     console.log();
