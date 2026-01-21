@@ -455,7 +455,7 @@ async function synthesizeChapter(
             input: { text: chunk },
             voice: {
                 languageCode: dialect,
-                name: `${dialect}-Chirp3-HD-${voice}`,
+                name: `${dialect.toLowerCase()}-Chirp3-HD-${voice}`,
             },
             audioConfig: {
                 audioEncoding: 'MP3',
@@ -530,7 +530,7 @@ createScript(async () => {
     console.log(style.header('Read To Me'));
     console.log('Configuration:');
     console.log(`  URL: ${url}`);
-    console.log(`  Voice: ${voice} (${VOICE_GENDERS[voice]})`);
+    console.log(`  Voice: ${dialect.toLowerCase()}-Chirp3-HD-${voice} (${VOICE_GENDERS[voice]})`);
     console.log(`  Dialect: ${dialect}`);
     console.log(`  Output: ${output || '(auto)'}`);
     console.log();
