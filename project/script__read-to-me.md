@@ -3,7 +3,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] use yargs for strongly typed strict cli args
 - [x] a way to extract the main content (markdown)
 - [x] parse each content chunk with gemini 2.5 flash to filter out things like ads, comments, amything that seems to not be part of the article itself
-	- [ ] in the same time, have gemini suggest chapters starting points
+	- [x] in the same time, have gemini suggest chapters starting points
 - [x] parse images with ai to describe them (gemini 2.5 flash)
 - [x] convert content into audio using google's Chirp 3 (use @google-cloud/text-to-speech)
 	- [x] use the `Zephyr` voice by default with English (United Kingdom) dialect

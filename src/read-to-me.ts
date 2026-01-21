@@ -332,6 +332,132 @@ ${chapter.content}
     }
 }
 
+async function suggestChapters(content: ExtractedContent): Promise<ExtractedContent> {
+    if (!genAI) {
+        console.log(chalk.yellow('Skipping AI chapter suggestion (no GEMINI_API_KEY)'));
+        return content;
+    }
+
+    // Combine all content to analyze as a whole
+    const fullContent = content.chapters.map(c => c.content).join('\n\n');
+
+    // Skip for very short content
+    if (fullContent.length < 1000) {
+        console.log(chalk.gray('  Content too short for chapter analysis'));
+        return content;
+    }
+
+    console.log(chalk.blue('Analyzing content for chapter suggestions...'));
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent([
+            `You are analyzing an article to suggest logical chapter divisions for an audio version.
+
+Your task is to identify natural topic breaks where chapters should begin. A good chapter break occurs when:
+- The topic shifts significantly
+- A new section or concept is introduced
+- There's a natural pause point for listeners
+- The narrative moves to a new phase
+
+Aim for chapters that are:
+- Between 500-2000 characters each (roughly 1-4 minutes of audio)
+- Self-contained enough to be meaningful
+- Not too granular (avoid splitting every paragraph)
+
+Respond with a JSON array of chapter suggestions. Each suggestion should have:
+- "title": A short descriptive title (2-5 words) for the chapter
+- "startPhrase": The exact first 50-100 characters where this chapter should start (must match text exactly)
+
+The first chapter should start at the beginning of the content.
+
+Example response format:
+[
+  {"title": "Introduction", "startPhrase": "The history of artificial intelligence"},
+  {"title": "Early Research", "startPhrase": "In the 1950s, researchers at Dartmouth"},
+  {"title": "Modern Advances", "startPhrase": "The breakthrough came in 2012 when"}
+]
+
+IMPORTANT:
+- Return ONLY valid JSON, no other text
+- The startPhrase MUST be copied exactly from the content (including punctuation)
+- Suggest 3-10 chapters depending on content length
+
+CONTENT TO ANALYZE:
+---
+${fullContent}
+---`,
+        ]);
+
+        let responseText = result.response.text().trim();
+        // Remove markdown code block wrapping if present
+        responseText = responseText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+
+        const suggestions = JSON.parse(responseText) as Array<{ title: string; startPhrase: string }>;
+
+        if (!Array.isArray(suggestions) || suggestions.length === 0) {
+            console.log(chalk.yellow('  No chapter suggestions returned'));
+            return content;
+        }
+
+        console.log(chalk.green(`  AI suggested ${suggestions.length} chapters`));
+
+        // Build new chapters based on suggestions
+        const newChapters: Chapter[] = [];
+
+        for (let i = 0; i < suggestions.length; i++) {
+            const suggestion = suggestions[i];
+            const nextSuggestion = suggestions[i + 1];
+
+            // Find start position
+            const startIndex = fullContent.indexOf(suggestion.startPhrase);
+            if (startIndex === -1) {
+                console.log(chalk.yellow(`  Could not find start phrase for "${suggestion.title}", skipping`));
+                continue;
+            }
+
+            // Find end position (start of next chapter or end of content)
+            let endIndex = fullContent.length;
+            if (nextSuggestion) {
+                const nextStart = fullContent.indexOf(nextSuggestion.startPhrase);
+                if (nextStart !== -1) {
+                    endIndex = nextStart;
+                }
+            }
+
+            const chapterContent = fullContent.slice(startIndex, endIndex).trim();
+
+            // Find images in this chapter content
+            const images: string[] = [];
+            const mdImgRegex = /!\[.*?\]\(([^)]+)\)/g;
+            let imgMatch;
+            while ((imgMatch = mdImgRegex.exec(chapterContent)) !== null) {
+                images.push(imgMatch[1]);
+            }
+
+            newChapters.push({
+                title: suggestion.title,
+                content: chapterContent,
+                images,
+            });
+
+            console.log(chalk.gray(`    - ${suggestion.title} (${chapterContent.length} chars)`));
+        }
+
+        // If we couldn't build any chapters from suggestions, keep original
+        if (newChapters.length === 0) {
+            console.log(chalk.yellow('  Could not create chapters from suggestions, keeping original'));
+            return content;
+        }
+
+        return { ...content, chapters: newChapters };
+    } catch (err) {
+        console.log(chalk.yellow(`  Chapter suggestion failed: ${(err as Error).message}`));
+        console.log(chalk.gray('  Keeping original chapter structure'));
+        return content;
+    }
+}
+
 async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
     if (!genAI) {
         console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
@@ -552,25 +678,29 @@ createScript(async () => {
     console.log();
     content = await filterContentWithAI(content);
 
-    // Update summary after filtering
+    // Step 3: Use AI to suggest better chapter divisions
     console.log();
-    console.log(style.header('Content After Filtering'));
+    content = await suggestChapters(content);
+
+    // Update summary after processing
+    console.log();
+    console.log(style.header('Final Chapter Structure'));
     console.log(`  Chapters: ${content.chapters.length}`);
     for (const chapter of content.chapters) {
         console.log(`    - ${chapter.title} (${chapter.content.length} chars)`);
     }
 
-    // Step 3: Process images with Gemini
+    // Step 4: Process images with Gemini
     if (content.allImages.length > 0) {
         console.log();
         content = await processImagesInContent(content);
     }
 
-    // Step 4: Synthesize audio with Google Chirp 3
+    // Step 5: Synthesize audio with Google Chirp 3
     console.log();
     const chapterAudios = await synthesizeContent(content, voice, dialect);
 
-    // Step 5: Save individual chapter files and generate output
+    // Step 6: Save individual chapter files and generate output
     const outputBase = output || content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
     const outputDir = path.join(process.cwd(), 'output', outputBase);
     await Bun.write(path.join(outputDir, '.gitkeep'), ''); // Ensure dir exists
@@ -622,7 +752,7 @@ createScript(async () => {
     }, null, 2));
     console.log(chalk.green(`  ✓ chapters.json`));
 
-    // Step 6: Generate thumbnail
+    // Step 7: Generate thumbnail
     console.log();
     console.log(style.header('Generating Thumbnail'));
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
