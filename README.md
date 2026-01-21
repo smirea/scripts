@@ -1,74 +1,53 @@
 # Scripts
 
-A collection of utility scripts built with Bun and TypeScript.
+Utility scripts built with Bun and TypeScript.
 
-## Scripts
+## read-to-me
 
-### read-to-me
-
-Converts web articles into audio using Google's Chirp 3 HD text-to-speech, similar to NotebookLM's audio feature but focused on reading articles aloud.
-
-**[Project Details](project/script__read-to-me.md)**
-
-#### Features
-
-- Extracts main content from any webpage using Mozilla Readability
-- AI-powered content filtering to remove ads, comments, and non-article content (Gemini 2.0 Flash)
-- Describes images using AI for a richer listening experience
-- Converts text to speech using Google's Chirp 3 HD voices
-- Generates chapter-based audio files with metadata for podcast apps
-- Creates article thumbnails with AI-selected cover images
-- Supports multiple English dialects and 8 different voices
-
-#### Usage
+Converts web articles into audio using Google's Chirp 3 HD text-to-speech. Like NotebookLM but just reads articles aloud.
 
 ```bash
 bun src/read-to-me.ts <url> [options]
 ```
 
-#### Options
+### Features
+
+- Extracts article content via Mozilla Readability
+- AI-powered filtering of ads/comments (Gemini 2.5 Flash)
+- AI image descriptions for richer listening
+- Chapter-based M4A output with embedded metadata
+- AI-generated thumbnails with consistent branding
+
+### Options
 
 | Option | Alias | Description | Default |
 |--------|-------|-------------|---------|
-| `--voice` | `-v` | Voice to use for TTS | `Zephyr` |
+| `--voice` | `-v` | Voice for TTS | `Zephyr` |
 | `--dialect` | `-d` | English dialect | `en-GB` |
-| `--output` | `-o` | Output file path (without extension) | auto |
+| `--output` | `-o` | Output path (no extension) | auto |
 
-#### Available Voices
+**Voices:** `Aoede`, `Charon`, `Fenrir`, `Kore`, `Leda`, `Orus`, `Puck`, `Zephyr`, `random`, `random-male`, `random-female`
 
-- `Aoede` (female), `Charon` (male), `Fenrir` (male), `Kore` (female)
-- `Leda` (female), `Orus` (male), `Puck` (male), `Zephyr` (female)
-- `random`, `random-male`, `random-female`
+**Dialects:** `en-AU`, `en-GB`, `en-IN`, `en-US`
 
-#### Available Dialects
-
-- `en-AU` (Australia)
-- `en-GB` (United Kingdom)
-- `en-IN` (India)
-- `en-US` (United States)
-
-#### Examples
+### Examples
 
 ```bash
-# Basic usage with defaults (Zephyr voice, British English)
 bun src/read-to-me.ts https://example.com/article
-
-# Use a specific voice and American English
 bun src/read-to-me.ts https://example.com/article --voice Charon --dialect en-US
-
-# Random female voice with custom output name
 bun src/read-to-me.ts https://example.com/article -v random-female -o my-article
 ```
 
-#### Output
+### Output
 
-The script creates an output directory containing:
-- Individual chapter MP3 files
-- Combined MP3 file with all chapters
-- `chapters.json` with metadata and timestamps
+Creates an output directory with:
+- Chapter audio files + combined M4A with embedded chapters
+- `chapters.json` with metadata
 - `thumbnail.png` for podcast apps
+- Original markdown and images
 
-#### Requirements
+### Setup
 
-- `GEMINI_API_KEY` environment variable for AI features (content filtering, image descriptions)
-- Google Cloud credentials for Text-to-Speech API (`gcp-key.json`)
+1. Install dependencies: `bun install`
+2. Set `GEMINI_API_KEY` environment variable
+3. Create GCP service account key at `gcp-key.json` with Text-to-Speech API enabled
