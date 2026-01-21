@@ -801,15 +801,19 @@ createScript(async () => {
     const combinedPath = path.join(outputDir, `${outputBase}.m4a`);
     console.log(chalk.gray('  Converting to M4A with embedded chapters...'));
 
-    const ffmpegResult = await Bun.$`ffmpeg -y -i ${tempMp3Path} -i ${ffmetadataPath} -map_metadata 1 -c:a aac -b:a 192k ${combinedPath}`.quiet();
+    // Use -map_chapters 1 to properly map chapter metadata from the ffmetadata file
+    // Use -movflags +faststart for better streaming compatibility
+    // Note: The order of flags matters - -map 0 ensures we take audio from first input,
+    // -map_chapters 1 takes chapters from second input (ffmetadata file)
+    const ffmpegResult = await Bun.$`ffmpeg -y -i ${tempMp3Path} -f ffmetadata -i ${ffmetadataPath} -map 0:a -map_chapters 1 -map_metadata 1 -c:a aac -b:a 192k -movflags +faststart ${combinedPath}`.quiet();
     if (ffmpegResult.exitCode !== 0) {
         console.log(chalk.yellow('  ⚠ ffmpeg conversion failed, keeping MP3 format'));
         const mp3Path = path.join(outputDir, `${outputBase}.mp3`);
         await Bun.$`mv ${tempMp3Path} ${mp3Path}`;
     } else {
         // Clean up temp files
-        await Bun.$`rm ${tempMp3Path}`;
-        await Bun.$`rm ${ffmetadataPath}`;
+        await Bun.$`trash ${tempMp3Path}`;
+        await Bun.$`trash ${ffmetadataPath}`;
         console.log(chalk.green.bold(`  ✓ ${outputBase}.m4a (combined with chapters)`));
     }
 
