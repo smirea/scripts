@@ -11,6 +11,6 @@ this is a typescript script that receives a content (a webpage to start) and con
 	- [x] support `--voice=random|random-male|random-female` entries
 - [x] i want to be able to import this audio in some podcasting app and I want the audio to have chapters - generate separate audio chunks for each chapter, inject appropriate metadata, join at the end into a single audio file
 - [ ] generate a thumbnail for the audio that's ideally embedded with the latest nano banana model (from google) and add a blue standard stylish border on top of it so they'll be consistent with a tag R2M in the top right
-- [ ] store the markdown file, all the images in the output dir. store the final audio in the output dir with the same name as the folder
+- [x] store the markdown file, all the images in the output dir. store the final audio in the output dir with the same name as the folder
 
 note: use the `gcp` cli to create access keys and setup keys and apis as needed under the `personal` project

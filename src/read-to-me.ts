@@ -754,6 +754,45 @@ createScript(async () => {
     }, null, 2));
     console.log(chalk.green(`  ✓ chapters.json`));
 
+    // Save markdown content
+    const markdownContent = generateMarkdown(content, url);
+    const markdownPath = path.join(outputDir, 'article.md');
+    await Bun.write(markdownPath, markdownContent);
+    console.log(chalk.green(`  ✓ article.md`));
+
+    // Save all images from the article
+    if (content.allImages.length > 0) {
+        console.log(chalk.gray(`  Saving ${content.allImages.length} images...`));
+        const imagesDir = path.join(outputDir, 'images');
+        await Bun.write(path.join(imagesDir, '.gitkeep'), ''); // Ensure dir exists
+
+        for (let i = 0; i < content.allImages.length; i++) {
+            const imgUrl = content.allImages[i];
+            try {
+                const response = await fetch(imgUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                    },
+                });
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type') || 'image/jpeg';
+                    const ext = contentType.includes('png') ? 'png'
+                        : contentType.includes('gif') ? 'gif'
+                        : contentType.includes('webp') ? 'webp'
+                        : contentType.includes('svg') ? 'svg'
+                        : 'jpg';
+                    const filename = `${String(i + 1).padStart(2, '0')}-image.${ext}`;
+                    const imagePath = path.join(imagesDir, filename);
+                    const arrayBuffer = await response.arrayBuffer();
+                    await Bun.write(imagePath, Buffer.from(arrayBuffer));
+                    console.log(chalk.green(`  ✓ images/${filename}`));
+                }
+            } catch {
+                console.log(chalk.yellow(`  ⚠ Could not save image: ${imgUrl.slice(0, 50)}...`));
+            }
+        }
+    }
+
     // Step 7: Generate thumbnail
     console.log();
     console.log(style.header('Generating Thumbnail'));
@@ -893,6 +932,23 @@ function escapeXml(text: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
+}
+
+function generateMarkdown(content: ExtractedContent, sourceUrl: string): string {
+    let markdown = `# ${content.title}\n\n`;
+
+    if (content.byline) {
+        markdown += `*By ${content.byline}*\n\n`;
+    }
+
+    markdown += `> Source: ${sourceUrl}\n\n---\n\n`;
+
+    for (const chapter of content.chapters) {
+        markdown += `## ${chapter.title}\n\n`;
+        markdown += chapter.content.trim() + '\n\n';
+    }
+
+    return markdown;
 }
 
 function formatMs(ms: number): string {
