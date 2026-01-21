@@ -16,7 +16,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [ ] parallelize ai calls with a reasonable concurrency to avoid throttling (use a simple npm package)
 
 # bugs
-- [ ] The voice being used seems like a generic TTS model not Chirp 3, I suspect the way it is generated is wrong. lookup how to properly use google's Chirp 3: HD Voices and fix it
-- [ ] Each chapter section starts with the voice saying "Chapter: the title of the chapter". The chapter titles should be purely metadata embedded in the audio. use the M4A (AAC) audio format (consider using `fluent-ffmpeg` package or something similar to help with metadata). The goal of the chapter titles is purely for them to show up in apps such as Overcast
+- [x] The voice being used seems like a generic TTS model not Chirp 3, I suspect the way it is generated is wrong. lookup how to properly use google's Chirp 3: HD Voices and fix it
+- [x] Each chapter section starts with the voice saying "Chapter: the title of the chapter". The chapter titles should be purely metadata embedded in the audio. use the M4A (AAC) audio format (consider using `fluent-ffmpeg` package or something similar to help with metadata). The goal of the chapter titles is purely for them to show up in apps such as Overcast
 
 note: use the `gcp` cli to create access keys and setup keys and apis as needed under the `personal` project

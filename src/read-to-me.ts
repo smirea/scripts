@@ -510,16 +510,14 @@ async function synthesizeChapter(
     console.log(chalk.gray(`  [${chapterIndex + 1}/${totalChapters}] Synthesizing: ${chapter.title}`));
 
     // Clean up markdown for TTS (remove links, code blocks, etc.)
-    let text = chapter.content
+    // Note: Chapter titles are NOT spoken - they are metadata only (embedded in M4A file)
+    const text = chapter.content
         .replace(/```[\s\S]*?```/g, '') // Remove code blocks
         .replace(/`[^`]+`/g, '') // Remove inline code
         .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Replace links with just text
         .replace(/[#*_~]/g, '') // Remove markdown formatting
         .replace(/\n{3,}/g, '\n\n') // Normalize multiple newlines
         .trim();
-
-    // Add chapter title at the beginning
-    text = `Chapter: ${chapter.title}.\n\n${text}`;
 
     // Google TTS has a 5000 byte limit per request and individual sentence limits
     const MAX_BYTES = 4500;
@@ -583,7 +581,7 @@ async function synthesizeChapter(
             input: { text: chunk },
             voice: {
                 languageCode: dialect,
-                name: `${dialect.toLowerCase()}-Chirp3-HD-${voice}`,
+                name: `${dialect}-Chirp3-HD-${voice}`,
             },
             audioConfig: {
                 audioEncoding: 'MP3',
@@ -658,7 +656,7 @@ createScript(async () => {
     console.log(style.header('Read To Me'));
     console.log('Configuration:');
     console.log(`  URL: ${url}`);
-    console.log(`  Voice: ${dialect.toLowerCase()}-Chirp3-HD-${voice} (${VOICE_GENDERS[voice]})`);
+    console.log(`  Voice: ${dialect}-Chirp3-HD-${voice} (${VOICE_GENDERS[voice]})`);
     console.log(`  Dialect: ${dialect}`);
     console.log(`  Output: ${output || '(auto)'}`);
     console.log();
@@ -726,25 +724,47 @@ createScript(async () => {
         console.log(chalk.green(`  ✓ ${filename}`));
     }
 
-    // Create combined audio file
+    // Create combined audio file with embedded chapter metadata (M4A format)
     const combinedBuffer = Buffer.concat(chapterAudios.map(a => a.audioBuffer));
-    const combinedPath = path.join(outputDir, `${outputBase}.mp3`);
-    await Bun.write(combinedPath, combinedBuffer);
-    console.log(chalk.green.bold(`  ✓ ${outputBase}.mp3 (combined)`));
+    const tempMp3Path = path.join(outputDir, `${outputBase}.temp.mp3`);
+    await Bun.write(tempMp3Path, combinedBuffer);
 
-    // Generate chapter metadata file
+    // Calculate chapter timestamps
     let currentTime = 0;
     const chapters = chapterAudios.map((audio, i) => {
         const chapter = {
             index: i + 1,
             title: audio.title,
             startMs: currentTime,
+            endMs: currentTime + audio.durationMs,
             startFormatted: formatMs(currentTime),
         };
         currentTime += audio.durationMs;
         return chapter;
     });
 
+    // Generate ffmetadata file for chapters
+    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime);
+    const ffmetadataPath = path.join(outputDir, 'ffmetadata.txt');
+    await Bun.write(ffmetadataPath, ffmetadataContent);
+
+    // Convert to M4A with embedded chapters using ffmpeg
+    const combinedPath = path.join(outputDir, `${outputBase}.m4a`);
+    console.log(chalk.gray('  Converting to M4A with embedded chapters...'));
+
+    const ffmpegResult = await Bun.$`ffmpeg -y -i ${tempMp3Path} -i ${ffmetadataPath} -map_metadata 1 -c:a aac -b:a 192k ${combinedPath}`.quiet();
+    if (ffmpegResult.exitCode !== 0) {
+        console.log(chalk.yellow('  ⚠ ffmpeg conversion failed, keeping MP3 format'));
+        const mp3Path = path.join(outputDir, `${outputBase}.mp3`);
+        await Bun.$`mv ${tempMp3Path} ${mp3Path}`;
+    } else {
+        // Clean up temp files
+        await Bun.$`rm ${tempMp3Path}`;
+        await Bun.$`rm ${ffmetadataPath}`;
+        console.log(chalk.green.bold(`  ✓ ${outputBase}.m4a (combined with chapters)`));
+    }
+
+    // Generate chapter metadata JSON file
     const metadataPath = path.join(outputDir, 'chapters.json');
     await Bun.write(metadataPath, JSON.stringify({
         title: content.title,
@@ -754,7 +774,12 @@ createScript(async () => {
         sourceUrl: url,
         totalDurationMs: currentTime,
         totalDurationFormatted: formatMs(currentTime),
-        chapters,
+        chapters: chapters.map(c => ({
+            index: c.index,
+            title: c.title,
+            startMs: c.startMs,
+            startFormatted: c.startFormatted,
+        })),
     }, null, 2));
     console.log(chalk.green(`  ✓ chapters.json`));
 
@@ -1025,4 +1050,53 @@ function formatMs(ms: number): string {
     const minutes = Math.floor(seconds / 60);
     const hours = Math.floor(minutes / 60);
     return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+interface ChapterMetadata {
+    index: number;
+    title: string;
+    startMs: number;
+    endMs: number;
+    startFormatted: string;
+}
+
+function generateFfmetadata(
+    content: ExtractedContent,
+    chapters: ChapterMetadata[],
+    totalDurationMs: number,
+): string {
+    // Generate ffmetadata format for ffmpeg chapter embedding
+    // See: https://ffmpeg.org/ffmpeg-formats.html#Metadata-1
+    let metadata = `;FFMETADATA1\ntitle=${escapeMetadata(content.title)}\n`;
+    if (content.byline) {
+        metadata += `artist=${escapeMetadata(content.byline)}\n`;
+    }
+    metadata += `album=Read To Me\n`;
+    metadata += `\n`;
+
+    for (const chapter of chapters) {
+        // TIMEBASE=1/1000 means times are in milliseconds
+        const endMs = chapter.index < chapters.length
+            ? chapters[chapter.index].startMs
+            : totalDurationMs;
+
+        metadata += `[CHAPTER]\n`;
+        metadata += `TIMEBASE=1/1000\n`;
+        metadata += `START=${chapter.startMs}\n`;
+        metadata += `END=${endMs}\n`;
+        metadata += `title=${escapeMetadata(chapter.title)}\n`;
+        metadata += `\n`;
+    }
+
+    return metadata;
+}
+
+function escapeMetadata(text: string): string {
+    // Escape special characters for ffmetadata format
+    return text
+        .replace(/\\/g, '\\\\')
+        .replace(/=/g, '\\=')
+        .replace(/;/g, '\\;')
+        .replace(/#/g, '\\#')
+        .replace(/\n/g, '\\\n');
 }
