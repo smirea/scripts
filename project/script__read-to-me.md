@@ -6,6 +6,9 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] parse each content chunk with gemini 2.5 flash to filter out things like ads, comments, amything that seems to not be part of the article itself
 	- [x] in the same time, have gemini suggest chapters starting points
 - [x] parse images with ai to describe them (gemini 2.5 flash)
+	- [ ] improve image prompt to focus on capturing the meaning of the picture succinctly in the context of the chapter. the goal is for someone reading it to get the gist
+	- [ ] if it's purely a stock photo / visual photo, have the AI mention that and skip it
+	- [ ] if it's a chart the prompt should focus on understand the implication of the chart and the conclusion its trying to convey
 - [x] convert content into audio using google's Chirp 3
 	- [x] use the `Zephyr` voice by default with English (United Kingdom) dialect
 	- [x] allow selecting `--voice` and `--dialect` via cli args (only english language allowed)
@@ -15,6 +18,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] store the markdown file, all the images in the output dir. store the final audio in the output dir with the same name as the folder
 - [x] create a dummy simple website for testing under `fixtures/read-for-me_test.html` that has 2 images, a table with 5 rows and 3 columns, a few links, this image https://waitbutwhy.com/wp-content/uploads/2024/10/nasa-budget_lg.png and 4-5 paragraphs of text talking about rockets
 - [x] parallelize ai calls with a reasonable concurrency to avoid throttling (use a simple npm package)
+- [ ] handle tables - send the table to gemini 2.5 flash with a prompt to generate insights. the text should make someone listening to the explanation understand the gist or highlight important conclusions.
 - [ ] create proper RSS feed format for the audio file - goal is for an app like Overcast to be able to automatically import this
 	- [ ] create a public read-only gcs bucket "stefan-rss-feed" and store under "/read-to-me/"
 	- [ ] create a summary for the audio and set as metadata
@@ -30,3 +34,4 @@ this is a typescript script that receives a content (a webpage to start) and con
 
 # notes
 - use the `gcp` cli to create access keys and setup keys and apis as needed under the `personal` project
+- use `fixtures/read-for-me_test.html` for testing
