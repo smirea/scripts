@@ -81,9 +81,14 @@ const argv = yargs(hideBin(process.argv))
         describe: 'Output directory path',
         type: 'string',
     })
+    .option('skip-upload', {
+        describe: 'Skip uploading to GCS bucket (for testing)',
+        type: 'boolean',
+        default: false,
+    })
     .strict()
     .help()
-    .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string };
+    .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string; 'skip-upload': boolean };
 
 interface Chapter {
     title: string;
@@ -632,6 +637,40 @@ ${fullContent}
     }
 }
 
+async function generateSummary(content: ExtractedContent): Promise<string> {
+    if (!genAI) {
+        return `Audio version of "${content.title}"`;
+    }
+
+    console.log(chalk.blue('Generating article summary...'));
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const fullContent = content.chapters.map(c => c.content).join('\n\n').slice(0, 4000);
+
+        const result = await model.generateContent([
+            `Generate a brief summary (2-3 sentences, max 200 characters) for a podcast episode based on this article.
+The summary should capture the main topic and key insights, suitable for an RSS feed description.
+Write in third person and avoid phrases like "This article" or "The author".
+
+Article title: ${content.title}
+${content.byline ? `Author: ${content.byline}` : ''}
+
+Content:
+${fullContent}
+
+Respond with ONLY the summary text, no quotes or other formatting.`,
+        ]);
+
+        const summary = result.response.text().trim();
+        console.log(chalk.green(`  Summary: ${summary.slice(0, 80)}...`));
+        return summary;
+    } catch (err) {
+        console.log(chalk.yellow(`  Summary generation failed: ${(err as Error).message}`));
+        return `Audio version of "${content.title}"`;
+    }
+}
+
 async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
     if (!genAI) {
         console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
@@ -860,6 +899,7 @@ createScript(async () => {
     const voice = resolveVoice(argv.voice);
     const dialect = argv.dialect;
     const output = argv.output;
+    const noUpload = argv['skip-upload'];
 
     console.log(style.header('Read To Me'));
     console.log('Configuration:');
@@ -867,6 +907,7 @@ createScript(async () => {
     console.log(`  Voice: ${dialect}-Chirp3-HD-${voice} (${VOICE_GENDERS[voice]})`);
     console.log(`  Dialect: ${dialect}`);
     console.log(`  Output: ${output || '(auto)'}`);
+    console.log(`  Upload: ${noUpload ? 'disabled' : 'enabled'}`);
     console.log();
 
     // Step 1: Extract content from webpage
@@ -889,6 +930,10 @@ createScript(async () => {
     // Step 3: Use AI to suggest better chapter divisions
     console.log();
     content = await suggestChapters(content);
+
+    // Step 3.5: Generate a summary for RSS feed and metadata
+    console.log();
+    const summary = await generateSummary(content);
 
     // Update summary after processing
     console.log();
@@ -958,7 +1003,7 @@ createScript(async () => {
     });
 
     // Generate ffmetadata file for chapters
-    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime);
+    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime, summary);
     const ffmetadataPath = path.join(outputDir, 'ffmetadata.txt');
     await Bun.write(ffmetadataPath, ffmetadataContent);
 
@@ -987,6 +1032,7 @@ createScript(async () => {
     await Bun.write(metadataPath, JSON.stringify({
         title: content.title,
         author: content.byline,
+        summary,
         voice,
         dialect,
         sourceUrl: url,
@@ -1053,10 +1099,89 @@ createScript(async () => {
     await generateThumbnail(content, thumbnailPath);
     console.log(chalk.green(`  ✓ thumbnail.png`));
 
+    // Step 9: Upload to GCS and generate RSS feed (unless --no-upload)
+    let podcastUrl: string | null = null;
+    if (!noUpload) {
+        console.log();
+        console.log(style.header('Uploading to GCS'));
+
+        const GCS_BUCKET = 'stefan-rss-feed';
+        const GCS_PATH = `read-to-me/${titleSlug}`;
+        const GCS_BASE_URL = `https://storage.googleapis.com/${GCS_BUCKET}`;
+
+        // Upload M4A audio file
+        const audioGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/${outputBase}.m4a`;
+        console.log(chalk.gray(`  Uploading audio file...`));
+        const audioUploadResult = await Bun.$`gcloud storage cp ${combinedPath} ${audioGcsPath}`.quiet();
+        if (audioUploadResult.exitCode !== 0) {
+            console.log(chalk.yellow(`  ⚠ Failed to upload audio file`));
+        } else {
+            console.log(chalk.green(`  ✓ ${outputBase}.m4a`));
+        }
+
+        // Upload thumbnail
+        const thumbnailGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/thumbnail.png`;
+        console.log(chalk.gray(`  Uploading thumbnail...`));
+        const thumbnailUploadResult = await Bun.$`gcloud storage cp ${thumbnailPath} ${thumbnailGcsPath}`.quiet();
+        if (thumbnailUploadResult.exitCode !== 0) {
+            console.log(chalk.yellow(`  ⚠ Failed to upload thumbnail`));
+        } else {
+            console.log(chalk.green(`  ✓ thumbnail.png`));
+        }
+
+        // Generate and upload RSS feed
+        console.log(chalk.gray(`  Generating RSS feed...`));
+        const audioUrl = `${GCS_BASE_URL}/${GCS_PATH}/${outputBase}.m4a`;
+        const thumbnailUrl = `${GCS_BASE_URL}/${GCS_PATH}/thumbnail.png`;
+
+        // Get audio file size for enclosure
+        const audioStats = await Bun.file(combinedPath).size;
+
+        const rssFeed = generateRssFeed({
+            title: content.title,
+            author: content.byline || 'Read To Me',
+            summary,
+            sourceUrl: url,
+            audioUrl,
+            thumbnailUrl,
+            audioSizeBytes: audioStats,
+            durationMs: currentTime,
+            chapters: chapters.map(c => ({
+                title: c.title,
+                startMs: c.startMs,
+            })),
+        });
+
+        const rssFeedPath = path.join(outputDir, 'feed.xml');
+        await Bun.write(rssFeedPath, rssFeed);
+        console.log(chalk.green(`  ✓ feed.xml (local)`));
+
+        // Upload RSS feed
+        const rssGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/feed.xml`;
+        const rssUploadResult = await Bun.$`gcloud storage cp ${rssFeedPath} ${rssGcsPath}`.quiet();
+        if (rssUploadResult.exitCode !== 0) {
+            console.log(chalk.yellow(`  ⚠ Failed to upload RSS feed`));
+        } else {
+            console.log(chalk.green(`  ✓ feed.xml (uploaded)`));
+        }
+
+        // Set correct content type for RSS feed
+        await Bun.$`gcloud storage objects update ${rssGcsPath} --content-type=application/rss+xml`.quiet();
+
+        podcastUrl = `${GCS_BASE_URL}/${GCS_PATH}/feed.xml`;
+    }
+
     console.log();
     console.log(style.header('Done!'));
     console.log(`  Total duration: ${formatMs(currentTime)}`);
     console.log(`  Output: ${combinedPath}`);
+    if (podcastUrl) {
+        console.log();
+        console.log(chalk.cyan.bold(`  🎧 Podcast RSS Feed:`));
+        console.log(chalk.cyan(`     ${podcastUrl}`));
+        console.log();
+        console.log(chalk.gray(`  Add this URL to Overcast or any podcast app to subscribe.`));
+    }
 });
 
 async function generateThumbnail(content: ExtractedContent, outputPath: string): Promise<void> {
@@ -1295,6 +1420,7 @@ function generateFfmetadata(
     content: ExtractedContent,
     chapters: ChapterMetadata[],
     totalDurationMs: number,
+    summary: string,
 ): string {
     // Generate ffmetadata format for ffmpeg chapter embedding
     // See: https://ffmpeg.org/ffmpeg-formats.html#Metadata-1
@@ -1303,6 +1429,9 @@ function generateFfmetadata(
         metadata += `artist=${escapeMetadata(content.byline)}\n`;
     }
     metadata += `album=Read To Me\n`;
+    metadata += `description=${escapeMetadata(summary)}\n`;
+    metadata += `comment=${escapeMetadata(summary)}\n`;
+    metadata += `genre=Podcast\n`;
     metadata += `\n`;
 
     for (const chapter of chapters) {
@@ -1330,4 +1459,77 @@ function escapeMetadata(text: string): string {
         .replace(/;/g, '\\;')
         .replace(/#/g, '\\#')
         .replace(/\n/g, '\\\n');
+}
+
+interface RssFeedOptions {
+    title: string;
+    author: string;
+    summary: string;
+    sourceUrl: string;
+    audioUrl: string;
+    thumbnailUrl: string;
+    audioSizeBytes: number;
+    durationMs: number;
+    chapters: Array<{ title: string; startMs: number }>;
+}
+
+function generateRssFeed(options: RssFeedOptions): string {
+    const {
+        title,
+        author,
+        summary,
+        sourceUrl,
+        audioUrl,
+        thumbnailUrl,
+        audioSizeBytes,
+        durationMs,
+        chapters,
+    } = options;
+
+    const pubDate = new Date().toUTCString();
+    const durationFormatted = formatMs(durationMs);
+
+    // Generate podcast chapters in PSC format (used by Overcast and other apps)
+    const pscChapters = chapters.map(c => {
+        const timeFormatted = formatMs(c.startMs);
+        return `            <psc:chapter start="${timeFormatted}" title="${escapeXml(c.title)}" />`;
+    }).join('\n');
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+    xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+    xmlns:podcast="https://podcastindex.org/namespace/1.0"
+    xmlns:psc="http://podlove.org/simple-chapters">
+    <channel>
+        <title>${escapeXml(title)}</title>
+        <link>${escapeXml(sourceUrl)}</link>
+        <description>${escapeXml(summary)}</description>
+        <language>en</language>
+        <itunes:author>${escapeXml(author)}</itunes:author>
+        <itunes:summary>${escapeXml(summary)}</itunes:summary>
+        <itunes:image href="${escapeXml(thumbnailUrl)}" />
+        <itunes:category text="Technology" />
+        <itunes:explicit>false</itunes:explicit>
+        <image>
+            <url>${escapeXml(thumbnailUrl)}</url>
+            <title>${escapeXml(title)}</title>
+            <link>${escapeXml(sourceUrl)}</link>
+        </image>
+        <item>
+            <title>${escapeXml(title)}</title>
+            <description>${escapeXml(summary)}</description>
+            <link>${escapeXml(sourceUrl)}</link>
+            <guid isPermaLink="false">${escapeXml(audioUrl)}</guid>
+            <pubDate>${pubDate}</pubDate>
+            <enclosure url="${escapeXml(audioUrl)}" length="${audioSizeBytes}" type="audio/mp4" />
+            <itunes:duration>${durationFormatted}</itunes:duration>
+            <itunes:summary>${escapeXml(summary)}</itunes:summary>
+            <itunes:image href="${escapeXml(thumbnailUrl)}" />
+            <psc:chapters version="1.2">
+${pscChapters}
+            </psc:chapters>
+            <podcast:chapters url="${escapeXml(audioUrl.replace('.m4a', '-chapters.json'))}" type="application/json+chapters" />
+        </item>
+    </channel>
+</rss>`;
 }
