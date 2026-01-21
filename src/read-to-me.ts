@@ -237,16 +237,18 @@ async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mim
     }
 }
 
-async function describeImage(imageUrl: string): Promise<string | null> {
+type ImageDescriptionResult =
+    | { type: 'description'; text: string }
+    | { type: 'skipped'; reason: 'stock_photo' | 'fetch_error' | 'no_api_key' | 'api_error' };
+
+async function describeImage(imageUrl: string): Promise<ImageDescriptionResult> {
     if (!genAI) {
-        console.log(chalk.yellow('  Skipping image (no GEMINI_API_KEY)'));
-        return null;
+        return { type: 'skipped', reason: 'no_api_key' };
     }
 
     const imageData = await fetchImageAsBase64(imageUrl);
     if (!imageData) {
-        console.log(chalk.yellow(`  Could not fetch image: ${imageUrl}`));
-        return null;
+        return { type: 'skipped', reason: 'fetch_error' };
     }
 
     try {
@@ -258,12 +260,40 @@ async function describeImage(imageUrl: string): Promise<string | null> {
                     data: imageData.data,
                 },
             },
-            'Describe this image in 1-2 sentences for someone listening to an audio version of an article. Be concise and descriptive.',
+            `You are helping convert an article to audio format. Analyze this image and determine if it adds meaningful content to the article.
+
+SKIP the image (respond with exactly "SKIP") if it is:
+- A generic stock photo (business people shaking hands, smiling models, abstract tech imagery)
+- A purely decorative/aesthetic image with no informational value
+- A website logo, avatar, or UI element
+- A social media icon or sharing button
+- An advertisement or promotional banner
+
+DESCRIBE the image (1-2 sentences) if it is:
+- A chart, graph, or data visualization - focus on the key insight or trend it shows
+- A diagram or illustration explaining a concept
+- A photo that provides context or evidence for the article's topic
+- An infographic with meaningful information
+- A screenshot demonstrating something relevant
+
+Your description should:
+- Capture the meaning and significance, not just what's visually present
+- Be concise and suitable for spoken audio
+- Help the listener understand the gist without seeing the image
+
+Respond with either "SKIP" or your description (no other text).`,
         ]);
-        return result.response.text().trim();
+        const response = result.response.text().trim();
+
+        // If AI determined this is a stock/decorative image, skip it
+        if (response.toUpperCase() === 'SKIP') {
+            return { type: 'skipped', reason: 'stock_photo' };
+        }
+
+        return { type: 'description', text: response };
     } catch (err) {
         console.log(chalk.yellow(`  Error describing image: ${(err as Error).message}`));
-        return null;
+        return { type: 'skipped', reason: 'api_error' };
     }
 }
 
@@ -358,32 +388,48 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
     const imageDescriptions = new Map<string, string>();
     let completed = 0;
     const total = content.allImages.length;
+    const skippedImages = new Set<string>(); // Track images to remove from content
 
     // Process images in parallel with concurrency limit
     const descriptionPromises = content.allImages.map((imgUrl, i) =>
         geminiLimit(async () => {
-            const description = await describeImage(imgUrl);
+            const result = await describeImage(imgUrl);
             completed++;
-            if (description) {
-                imageDescriptions.set(imgUrl, description);
-                console.log(chalk.green(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → ${description.slice(0, 60)}...`));
+            if (result.type === 'description') {
+                imageDescriptions.set(imgUrl, result.text);
+                console.log(chalk.green(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → ${result.text.slice(0, 60)}...`));
             } else {
-                console.log(chalk.yellow(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → (skipped)`));
+                skippedImages.add(imgUrl);
+                const reasonText = {
+                    'stock_photo': 'stock/decorative photo',
+                    'fetch_error': 'fetch failed',
+                    'no_api_key': 'no API key',
+                    'api_error': 'API error',
+                }[result.reason];
+                console.log(chalk.yellow(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → (skipped: ${reasonText})`));
             }
-            return { imgUrl, description };
+            return { imgUrl, result };
         })
     );
 
     await Promise.all(descriptionPromises);
 
-    // Replace image references in chapter content with descriptions
+    // Replace image references in chapter content with descriptions or remove skipped images
     const updatedChapters = content.chapters.map(chapter => {
         let updatedContent = chapter.content;
+
+        // Replace described images with their descriptions
         for (const [imgUrl, description] of imageDescriptions) {
-            // Replace markdown image syntax with description
             const mdImgRegex = new RegExp(`!\\[.*?\\]\\(${imgUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g');
             updatedContent = updatedContent.replace(mdImgRegex, `[Image: ${description}]`);
         }
+
+        // Remove skipped images (stock photos, failed fetches, etc.) from content
+        for (const imgUrl of skippedImages) {
+            const mdImgRegex = new RegExp(`!\\[.*?\\]\\(${imgUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)\\s*`, 'g');
+            updatedContent = updatedContent.replace(mdImgRegex, '');
+        }
+
         return { ...chapter, content: updatedContent };
     });
 
