@@ -3,10 +3,12 @@ node_modules
 # output
 out
 dist
+output
 *.tgz
 
 # dotenv environment variable files
 .env
+gcp-key.json
 .env.development.local
 .env.test.local
 .env.production.local
