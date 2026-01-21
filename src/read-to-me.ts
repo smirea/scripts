@@ -546,9 +546,15 @@ async function synthesizeChapter(
     const text = chapter.content
         .replace(/```[\s\S]*?```/g, '') // Remove code blocks
         .replace(/`[^`]+`/g, '') // Remove inline code
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Replace links with just text
+        // Replace markdown links with link text (handles nested parens in URLs)
+        .replace(/\[([^\]]*)\]\((?:[^()]*|\([^()]*\))*\)/g, '$1')
+        .replace(/\[\]\s*/g, '') // Remove any remaining empty brackets
+        .replace(/<https?:\/\/[^>]+>/g, '') // Remove autolinks <url>
+        .replace(/https?:\/\/[^\s<>\[\]"']+/g, '') // Remove bare URLs
+        .replace(/\s+([.,!?;:])/g, '$1') // Clean up spaces before punctuation
         .replace(/[#*_~]/g, '') // Remove markdown formatting
         .replace(/\n{3,}/g, '\n\n') // Normalize multiple newlines
+        .replace(/  +/g, ' ') // Normalize multiple spaces
         .trim();
 
     // Google TTS has a 5000 byte limit per request and individual sentence limits

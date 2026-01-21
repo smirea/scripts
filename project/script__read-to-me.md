@@ -30,7 +30,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] The voice being used seems like a generic TTS model not Chirp 3, I suspect the way it is generated is wrong. lookup how to properly use google's Chirp 3: HD Voices and fix it
 - [x] Each chapter section starts with the voice saying "Chapter: the title of the chapter". The chapter titles should be purely metadata embedded in the audio. use the M4A (AAC) audio format (consider using `fluent-ffmpeg` package or something similar to help with metadata). The goal of the chapter titles is purely for them to show up in apps such as Overcast
 - [x] chapters are injected correctly but their titles are showing up as "Chapter 1" ... instead of their actual meaningful titles
-- [ ] links should not be read out loud, instead their link text should be read. if there's no link text just remove the link
+- [x] links should not be read out loud, instead their link text should be read. if there's no link text just remove the link
 
 # notes
 - use the `gcp` cli to create access keys and setup keys and apis as needed under the `personal` project
