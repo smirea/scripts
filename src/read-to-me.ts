@@ -262,6 +262,110 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
     return { ...content, chapters: updatedChapters };
 }
 
+async function filterChapterContent(chapter: Chapter, chapterIndex: number, totalChapters: number): Promise<Chapter> {
+    if (!genAI) {
+        return chapter;
+    }
+
+    // Skip filtering for very short content (likely already clean)
+    if (chapter.content.length < 200) {
+        return chapter;
+    }
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent([
+            `You are a content filter for an article-to-audio converter. Your task is to clean up the following article section by removing content that is NOT part of the main article.
+
+REMOVE these types of content:
+- Advertisements and promotional content
+- User comments and comment sections
+- "Related articles" or "You might also like" sections
+- Social media sharing buttons/text (e.g., "Share on Twitter", "Follow us")
+- Newsletter signup prompts
+- Cookie consent notices
+- Navigation elements (e.g., "Back to top", "Next article")
+- Author bios that are generic (keep if relevant to the article)
+- Subscription/paywall prompts
+- Footer content (copyright notices, site links)
+- Metadata that doesn't add value (e.g., "Posted 3 hours ago", "5 min read")
+
+KEEP these types of content:
+- The main article text
+- Relevant quotes and citations
+- Image descriptions (text in [Image: ...] format)
+- Relevant data, statistics, and examples
+- Author information if it provides context
+- Any content that contributes to understanding the topic
+
+IMPORTANT: Preserve the original text exactly as written. Do not rephrase, summarize, or modify sentences. Only remove non-article content. Keep all punctuation and paragraph breaks intact.
+
+Return ONLY the cleaned content. Do not add any explanations or commentary. If the entire content should be removed, return "EMPTY_CHAPTER".
+
+CONTENT TO FILTER:
+---
+${chapter.content}
+---`,
+        ]);
+
+        let filteredContent = result.response.text().trim();
+
+        // Remove any markdown code block wrapping if Gemini added it
+        filteredContent = filteredContent.replace(/^```(?:markdown)?\n?/, '').replace(/\n?```$/, '');
+
+        // If AI determined the chapter is all non-article content
+        if (filteredContent === 'EMPTY_CHAPTER' || filteredContent.length < 10) {
+            console.log(chalk.yellow(`    → Chapter filtered out (non-article content)`));
+            return { ...chapter, content: '' };
+        }
+
+        // Calculate reduction percentage
+        const reduction = ((chapter.content.length - filteredContent.length) / chapter.content.length * 100).toFixed(1);
+        if (parseFloat(reduction) > 5) {
+            console.log(chalk.green(`    → Filtered ${reduction}% non-article content`));
+        }
+
+        return { ...chapter, content: filteredContent };
+    } catch (err) {
+        console.log(chalk.yellow(`    → Filter error, keeping original: ${(err as Error).message}`));
+        return chapter;
+    }
+}
+
+async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
+    if (!genAI) {
+        console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
+        return content;
+    }
+
+    console.log(chalk.blue(`Filtering ${content.chapters.length} chapters to remove ads/comments...`));
+
+    const filteredChapters: Chapter[] = [];
+
+    for (let i = 0; i < content.chapters.length; i++) {
+        const chapter = content.chapters[i];
+        console.log(chalk.gray(`  [${i + 1}/${content.chapters.length}] Filtering: ${chapter.title}`));
+        const filteredChapter = await filterChapterContent(chapter, i, content.chapters.length);
+
+        // Only include chapters that have content after filtering
+        if (filteredChapter.content.trim().length > 0) {
+            filteredChapters.push(filteredChapter);
+        } else {
+            console.log(chalk.yellow(`    → Removed empty chapter: ${chapter.title}`));
+        }
+    }
+
+    // If all chapters were filtered out, keep at least the first original chapter
+    if (filteredChapters.length === 0 && content.chapters.length > 0) {
+        console.log(chalk.yellow('  Warning: All chapters filtered, keeping first chapter'));
+        filteredChapters.push(content.chapters[0]);
+    }
+
+    console.log(chalk.green(`  Kept ${filteredChapters.length}/${content.chapters.length} chapters after filtering`));
+
+    return { ...content, chapters: filteredChapters };
+}
+
 interface ChapterAudio {
     title: string;
     audioBuffer: Buffer;
@@ -289,12 +393,52 @@ async function synthesizeChapter(
     // Add chapter title at the beginning
     text = `Chapter: ${chapter.title}.\n\n${text}`;
 
-    // Google TTS has a 5000 byte limit per request, split if needed
+    // Google TTS has a 5000 byte limit per request and individual sentence limits
     const MAX_BYTES = 4500;
+    const MAX_SENTENCE_LENGTH = 300; // TTS has strict limits on individual sentence length
     const chunks: string[] = [];
     let currentChunk = '';
 
-    for (const sentence of text.split(/(?<=[.!?])\s+/)) {
+    // Function to split long text at natural break points
+    function splitLongText(text: string, maxLen: number): string[] {
+        const result: string[] = [];
+        // Try splitting at natural break points (commas, semicolons, parentheses)
+        const parts = text.split(/(?<=[,;:\)\]])\s+/);
+
+        for (const part of parts) {
+            if (part.length <= maxLen) {
+                result.push(part);
+            } else {
+                // Force split at word boundaries if still too long
+                const words = part.split(/\s+/);
+                let current = '';
+                for (const word of words) {
+                    if ((current + ' ' + word).length <= maxLen) {
+                        current = current ? current + ' ' + word : word;
+                    } else {
+                        if (current) result.push(current + '.');
+                        current = word;
+                    }
+                }
+                if (current) result.push(current);
+            }
+        }
+        return result;
+    }
+
+    // Split into sentences, then further split long sentences
+    const sentences = text.split(/(?<=[.!?])\s+/);
+    const processedSentences: string[] = [];
+
+    for (const sentence of sentences) {
+        if (sentence.length <= MAX_SENTENCE_LENGTH) {
+            processedSentences.push(sentence);
+        } else {
+            processedSentences.push(...splitLongText(sentence, MAX_SENTENCE_LENGTH));
+        }
+    }
+
+    for (const sentence of processedSentences) {
         if (Buffer.byteLength(currentChunk + sentence, 'utf-8') > MAX_BYTES) {
             if (currentChunk) chunks.push(currentChunk.trim());
             currentChunk = sentence;
@@ -404,17 +548,29 @@ createScript(async () => {
         console.log(`    - ${chapter.title} (${chapter.content.length} chars, ${chapter.images.length} images)`);
     }
 
-    // Step 2: Process images with Gemini
+    // Step 2: Filter content to remove ads, comments, and non-article content
+    console.log();
+    content = await filterContentWithAI(content);
+
+    // Update summary after filtering
+    console.log();
+    console.log(style.header('Content After Filtering'));
+    console.log(`  Chapters: ${content.chapters.length}`);
+    for (const chapter of content.chapters) {
+        console.log(`    - ${chapter.title} (${chapter.content.length} chars)`);
+    }
+
+    // Step 3: Process images with Gemini
     if (content.allImages.length > 0) {
         console.log();
         content = await processImagesInContent(content);
     }
 
-    // Step 3: Synthesize audio with Google Chirp 3
+    // Step 4: Synthesize audio with Google Chirp 3
     console.log();
     const chapterAudios = await synthesizeContent(content, voice, dialect);
 
-    // Step 4: Save individual chapter files and generate output
+    // Step 5: Save individual chapter files and generate output
     const outputBase = output || content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
     const outputDir = path.join(process.cwd(), 'output', outputBase);
     await Bun.write(path.join(outputDir, '.gitkeep'), ''); // Ensure dir exists
@@ -466,7 +622,7 @@ createScript(async () => {
     }, null, 2));
     console.log(chalk.green(`  ✓ chapters.json`));
 
-    // Step 5: Generate thumbnail
+    // Step 6: Generate thumbnail
     console.log();
     console.log(style.header('Generating Thumbnail'));
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
