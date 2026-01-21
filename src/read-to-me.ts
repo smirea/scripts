@@ -701,10 +701,12 @@ createScript(async () => {
     const chapterAudios = await synthesizeContent(content, voice, dialect);
 
     // Step 6: Save individual chapter files and generate output
-    const outputBase = content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
+    const titleSlug = content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
     const outputDir = output
         ? path.resolve(output)
-        : path.join(process.cwd(), 'output', outputBase);
+        : path.join(process.cwd(), 'output', titleSlug);
+    // Use the folder name for the final audio file
+    const outputBase = path.basename(outputDir);
     await Bun.write(path.join(outputDir, '.gitkeep'), ''); // Ensure dir exists
 
     console.log();
