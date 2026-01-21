@@ -18,9 +18,10 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] store the markdown file, all the images in the output dir. store the final audio in the output dir with the same name as the folder
 - [x] create a dummy simple website for testing under `fixtures/read-for-me_test.html` that has 2 images, a table with 5 rows and 3 columns, a few links, this image https://waitbutwhy.com/wp-content/uploads/2024/10/nasa-budget_lg.png and 4-5 paragraphs of text talking about rockets
 - [x] parallelize ai calls with a reasonable concurrency to avoid throttling (use a simple npm package)
-- [ ] handle tables - send the table to gemini 2.5 flash with a prompt to generate insights. the text should make someone listening to the explanation understand the gist or highlight important conclusions.
+- [x] handle tables - send the table to gemini 2.5 flash with a prompt to generate insights. the text should make someone listening to the explanation understand the gist or highlight important conclusions.
 - [ ] create proper RSS feed format for the audio file - goal is for an app like Overcast to be able to automatically import this
 	- [ ] create a public read-only gcs bucket "stefan-rss-feed" and store under "/read-to-me/"
+	- [ ] add a `--no-upload` flag that should be used in testing
 	- [ ] create a summary for the audio and set as metadata
 	- [ ] set all other relevant metadata in the audio file
 	- [ ] upload all the needed assets in the bucket

@@ -91,11 +91,17 @@ interface Chapter {
     images: string[];
 }
 
+interface TableData {
+    html: string;
+    cells: string[];
+}
+
 interface ExtractedContent {
     title: string;
     byline: string | null;
     chapters: Chapter[];
     allImages: string[];
+    allTables: TableData[];
 }
 
 async function fetchWebpage(url: string): Promise<string> {
@@ -136,6 +142,25 @@ function extractContent(html: string, url: string): ExtractedContent {
     while ((match = imgRegex.exec(article.content)) !== null) {
         const imgUrl = new URL(match[1], url).href;
         allImages.push(imgUrl);
+    }
+
+    // Extract tables from the original HTML content
+    const tableRegex = /<table[\s\S]*?<\/table>/gi;
+    const allTables: TableData[] = [];
+    let tableMatch;
+    while ((tableMatch = tableRegex.exec(article.content)) !== null) {
+        const tableHtml = tableMatch[0];
+        // Extract cell contents to use for matching in markdown
+        const cellRegex = /<t[hd][^>]*>([^<]*)</gi;
+        let cellMatch;
+        const cells: string[] = [];
+        while ((cellMatch = cellRegex.exec(tableHtml)) !== null) {
+            const cellText = cellMatch[1].trim();
+            if (cellText) cells.push(cellText);
+        }
+        if (cells.length > 0) {
+            allTables.push({ html: tableHtml, cells });
+        }
     }
 
     // Split content into chapters based on h1/h2 headers
@@ -183,12 +208,14 @@ function extractContent(html: string, url: string): ExtractedContent {
 
     console.log(chalk.green(`  Extracted ${chapters.length} chapter(s)`));
     console.log(chalk.green(`  Found ${allImages.length} image(s)`));
+    console.log(chalk.green(`  Found ${allTables.length} table(s)`));
 
     return {
         title: article.title,
         byline: article.byline,
         chapters,
         allImages,
+        allTables,
     };
 }
 
@@ -238,6 +265,86 @@ async function describeImage(imageUrl: string): Promise<string | null> {
         console.log(chalk.yellow(`  Error describing image: ${(err as Error).message}`));
         return null;
     }
+}
+
+async function describeTable(tableHtml: string): Promise<string | null> {
+    if (!genAI) {
+        console.log(chalk.yellow('  Skipping table (no GEMINI_API_KEY)'));
+        return null;
+    }
+
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent([
+            `You are helping convert an article to audio format. Analyze this HTML table and provide a concise narrative explanation that captures the key insights and conclusions the table conveys.
+
+Your explanation should:
+- Be 2-4 sentences long
+- Highlight the most important data points or patterns
+- Help someone listening to audio understand the gist without seeing the table
+- Use natural language suitable for spoken content
+
+Do NOT:
+- List every row/cell value
+- Use phrases like "This table shows..." - just provide the insight directly
+- Include any markdown or formatting
+
+HTML TABLE:
+${tableHtml}`,
+        ]);
+        return result.response.text().trim();
+    } catch (err) {
+        console.log(chalk.yellow(`  Error describing table: ${(err as Error).message}`));
+        return null;
+    }
+}
+
+async function processTablesInContent(content: ExtractedContent): Promise<ExtractedContent> {
+    if (!genAI) {
+        console.log(chalk.yellow('Skipping table processing (no GEMINI_API_KEY)'));
+        return content;
+    }
+
+    if (content.allTables.length === 0) {
+        return content;
+    }
+
+    console.log(chalk.blue(`Processing ${content.allTables.length} table(s) with Gemini (concurrency: ${GEMINI_CONCURRENCY})...`));
+
+    const tableResults: Array<{ cells: string[]; description: string }> = [];
+    let completed = 0;
+    const total = content.allTables.length;
+
+    // Process tables in parallel with concurrency limit
+    const descriptionPromises = content.allTables.map((table) =>
+        geminiLimit(async () => {
+            const description = await describeTable(table.html);
+            completed++;
+            if (description) {
+                tableResults.push({ cells: table.cells, description });
+                console.log(chalk.green(`  [${completed}/${total}] Table → ${description.slice(0, 60)}...`));
+            } else {
+                console.log(chalk.yellow(`  [${completed}/${total}] Table → (skipped)`));
+            }
+            return { table, description };
+        })
+    );
+
+    await Promise.all(descriptionPromises);
+
+    // Replace table content in chapters using cell-based matching
+    const updatedChapters = content.chapters.map(chapter => {
+        let updatedContent = chapter.content;
+        for (const { cells, description } of tableResults) {
+            // Create a regex pattern from cell contents that matches them in sequence with whitespace between
+            const pattern = cells.map(c => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+            const tableRegex = new RegExp(pattern, 's');
+            updatedContent = updatedContent.replace(tableRegex, `[Table: ${description}]`);
+        }
+        return { ...chapter, content: updatedContent };
+    });
+
+    return { ...content, chapters: updatedChapters };
 }
 
 async function processImagesInContent(content: ExtractedContent): Promise<ExtractedContent> {
@@ -751,11 +858,17 @@ createScript(async () => {
         content = await processImagesInContent(content);
     }
 
-    // Step 5: Synthesize audio with Google Chirp 3
+    // Step 5: Process tables with Gemini
+    if (content.allTables.length > 0) {
+        console.log();
+        content = await processTablesInContent(content);
+    }
+
+    // Step 6: Synthesize audio with Google Chirp 3
     console.log();
     const chapterAudios = await synthesizeContent(content, voice, dialect);
 
-    // Step 6: Save individual chapter files and generate output
+    // Step 7: Save individual chapter files and generate output
     const titleSlug = content.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase();
     const outputDir = output
         ? path.resolve(output)
@@ -887,7 +1000,7 @@ createScript(async () => {
         await Promise.all(imageDownloadPromises);
     }
 
-    // Step 7: Generate thumbnail
+    // Step 8: Generate thumbnail
     console.log();
     console.log(style.header('Generating Thumbnail'));
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
