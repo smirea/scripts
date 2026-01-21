@@ -1,0 +1,6 @@
+﻿pre-commit:
+    commands:
+        js:
+            glob: "*.{js,ts,cjs,mjs,d.cts,d.mts,jsx,tsx,json,jsonc}"
+            run: bun lint --no-error-on-unmatched-pattern --no-warn-ignored --no-color {staged_files}
+            stage_fixed: true
