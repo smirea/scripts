@@ -6,12 +6,22 @@ import { Readability } from '@mozilla/readability';
 import chalk from 'chalk';
 import { parseHTML } from 'linkedom';
 import path from 'path';
+import pLimit from 'p-limit';
 import sharp from 'sharp';
 import TurndownService from 'turndown';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import { createScript, style } from './utils/createScript';
+
+// Concurrency limits for different API types to avoid throttling
+const GEMINI_CONCURRENCY = 5;  // Gemini API calls
+const TTS_CONCURRENCY = 5;     // Google TTS API calls
+const FETCH_CONCURRENCY = 10;  // HTTP fetch requests
+
+const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const ttsLimit = pLimit(TTS_CONCURRENCY);
+const fetchLimit = pLimit(FETCH_CONCURRENCY);
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
@@ -236,19 +246,28 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
         return content;
     }
 
-    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini...`));
+    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini (concurrency: ${GEMINI_CONCURRENCY})...`));
 
     const imageDescriptions = new Map<string, string>();
+    let completed = 0;
+    const total = content.allImages.length;
 
-    for (let i = 0; i < content.allImages.length; i++) {
-        const imgUrl = content.allImages[i];
-        console.log(chalk.gray(`  [${i + 1}/${content.allImages.length}] ${imgUrl.slice(0, 60)}...`));
-        const description = await describeImage(imgUrl);
-        if (description) {
-            imageDescriptions.set(imgUrl, description);
-            console.log(chalk.green(`    → ${description.slice(0, 80)}...`));
-        }
-    }
+    // Process images in parallel with concurrency limit
+    const descriptionPromises = content.allImages.map((imgUrl, i) =>
+        geminiLimit(async () => {
+            const description = await describeImage(imgUrl);
+            completed++;
+            if (description) {
+                imageDescriptions.set(imgUrl, description);
+                console.log(chalk.green(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → ${description.slice(0, 60)}...`));
+            } else {
+                console.log(chalk.yellow(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → (skipped)`));
+            }
+            return { imgUrl, description };
+        })
+    );
+
+    await Promise.all(descriptionPromises);
 
     // Replace image references in chapter content with descriptions
     const updatedChapters = content.chapters.map(chapter => {
@@ -466,22 +485,35 @@ async function filterContentWithAI(content: ExtractedContent): Promise<Extracted
         return content;
     }
 
-    console.log(chalk.blue(`Filtering ${content.chapters.length} chapters to remove ads/comments...`));
+    console.log(chalk.blue(`Filtering ${content.chapters.length} chapters to remove ads/comments (concurrency: ${GEMINI_CONCURRENCY})...`));
 
-    const filteredChapters: Chapter[] = [];
+    let completed = 0;
+    const total = content.chapters.length;
 
-    for (let i = 0; i < content.chapters.length; i++) {
-        const chapter = content.chapters[i];
-        console.log(chalk.gray(`  [${i + 1}/${content.chapters.length}] Filtering: ${chapter.title}`));
-        const filteredChapter = await filterChapterContent(chapter, i, content.chapters.length);
+    // Process chapters in parallel with concurrency limit
+    const filterPromises = content.chapters.map((chapter, i) =>
+        geminiLimit(async () => {
+            const filteredChapter = await filterChapterContent(chapter, i, total);
+            completed++;
 
-        // Only include chapters that have content after filtering
-        if (filteredChapter.content.trim().length > 0) {
-            filteredChapters.push(filteredChapter);
-        } else {
-            console.log(chalk.yellow(`    → Removed empty chapter: ${chapter.title}`));
-        }
-    }
+            const hasContent = filteredChapter.content.trim().length > 0;
+            if (hasContent) {
+                console.log(chalk.green(`  [${completed}/${total}] Filtered: ${chapter.title}`));
+            } else {
+                console.log(chalk.yellow(`  [${completed}/${total}] Removed empty chapter: ${chapter.title}`));
+            }
+
+            return { filteredChapter, hasContent, originalIndex: i };
+        })
+    );
+
+    const results = await Promise.all(filterPromises);
+
+    // Sort by original index to maintain order, then filter out empty chapters
+    const filteredChapters = results
+        .sort((a, b) => a.originalIndex - b.originalIndex)
+        .filter(r => r.hasContent)
+        .map(r => r.filteredChapter);
 
     // If all chapters were filtered out, keep at least the first original chapter
     if (filteredChapters.length === 0 && content.chapters.length > 0) {
@@ -574,25 +606,35 @@ async function synthesizeChapter(
     }
     if (currentChunk.trim()) chunks.push(currentChunk.trim());
 
-    const audioBuffers: Buffer[] = [];
+    // Process TTS chunks in parallel with concurrency limit
+    const audioPromises = chunks.map((chunk, chunkIndex) =>
+        ttsLimit(async () => {
+            const [response] = await ttsClient.synthesizeSpeech({
+                input: { text: chunk },
+                voice: {
+                    languageCode: dialect,
+                    name: `${dialect}-Chirp3-HD-${voice}`,
+                },
+                audioConfig: {
+                    audioEncoding: 'MP3',
+                    speakingRate: 1.0,
+                },
+            });
 
-    for (const chunk of chunks) {
-        const [response] = await ttsClient.synthesizeSpeech({
-            input: { text: chunk },
-            voice: {
-                languageCode: dialect,
-                name: `${dialect}-Chirp3-HD-${voice}`,
-            },
-            audioConfig: {
-                audioEncoding: 'MP3',
-                speakingRate: 1.0,
-            },
-        });
+            return {
+                index: chunkIndex,
+                buffer: response.audioContent ? Buffer.from(response.audioContent as Uint8Array) : null,
+            };
+        })
+    );
 
-        if (response.audioContent) {
-            audioBuffers.push(Buffer.from(response.audioContent as Uint8Array));
-        }
-    }
+    const results = await Promise.all(audioPromises);
+
+    // Sort by index and extract buffers to maintain order
+    const audioBuffers = results
+        .sort((a, b) => a.index - b.index)
+        .filter(r => r.buffer !== null)
+        .map(r => r.buffer as Buffer);
 
     // Concatenate all audio buffers
     const audioBuffer = Buffer.concat(audioBuffers);
@@ -614,22 +656,29 @@ async function synthesizeContent(
     voice: Voice,
     dialect: EnglishDialect,
 ): Promise<ChapterAudio[]> {
-    console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with ${voice} voice...`));
+    console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with ${voice} voice (concurrency: ${TTS_CONCURRENCY})...`));
 
-    const chapterAudios: ChapterAudio[] = [];
+    // Process chapters in parallel with concurrency limit
+    // Note: We use ttsLimit here since chapter synthesis makes multiple TTS calls internally
+    const chapterPromises = content.chapters.map((chapter, i) =>
+        ttsLimit(async () => {
+            const audio = await synthesizeChapter(
+                chapter,
+                voice,
+                dialect,
+                i,
+                content.chapters.length,
+            );
+            return { index: i, audio };
+        })
+    );
 
-    for (let i = 0; i < content.chapters.length; i++) {
-        const audio = await synthesizeChapter(
-            content.chapters[i],
-            voice,
-            dialect,
-            i,
-            content.chapters.length,
-        );
-        chapterAudios.push(audio);
-    }
+    const results = await Promise.all(chapterPromises);
 
-    return chapterAudios;
+    // Sort by index to maintain chapter order
+    return results
+        .sort((a, b) => a.index - b.index)
+        .map(r => r.audio);
 }
 
 function resolveVoice(voice: typeof argv.voice): Voice {
@@ -789,37 +838,43 @@ createScript(async () => {
     await Bun.write(markdownPath, markdownContent);
     console.log(chalk.green(`  ✓ article.md`));
 
-    // Save all images from the article
+    // Save all images from the article (in parallel)
     if (content.allImages.length > 0) {
-        console.log(chalk.gray(`  Saving ${content.allImages.length} images...`));
+        console.log(chalk.gray(`  Saving ${content.allImages.length} images (concurrency: ${FETCH_CONCURRENCY})...`));
         const imagesDir = path.join(outputDir, 'images');
         await Bun.write(path.join(imagesDir, '.gitkeep'), ''); // Ensure dir exists
 
-        for (let i = 0; i < content.allImages.length; i++) {
-            const imgUrl = content.allImages[i];
-            try {
-                const response = await fetch(imgUrl, {
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                    },
-                });
-                if (response.ok) {
-                    const contentType = response.headers.get('content-type') || 'image/jpeg';
-                    const ext = contentType.includes('png') ? 'png'
-                        : contentType.includes('gif') ? 'gif'
-                        : contentType.includes('webp') ? 'webp'
-                        : contentType.includes('svg') ? 'svg'
-                        : 'jpg';
-                    const filename = `${String(i + 1).padStart(2, '0')}-image.${ext}`;
-                    const imagePath = path.join(imagesDir, filename);
-                    const arrayBuffer = await response.arrayBuffer();
-                    await Bun.write(imagePath, Buffer.from(arrayBuffer));
-                    console.log(chalk.green(`  ✓ images/${filename}`));
+        const imageDownloadPromises = content.allImages.map((imgUrl, i) =>
+            fetchLimit(async () => {
+                try {
+                    const response = await fetch(imgUrl, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                        },
+                    });
+                    if (response.ok) {
+                        const contentType = response.headers.get('content-type') || 'image/jpeg';
+                        const ext = contentType.includes('png') ? 'png'
+                            : contentType.includes('gif') ? 'gif'
+                            : contentType.includes('webp') ? 'webp'
+                            : contentType.includes('svg') ? 'svg'
+                            : 'jpg';
+                        const filename = `${String(i + 1).padStart(2, '0')}-image.${ext}`;
+                        const imagePath = path.join(imagesDir, filename);
+                        const arrayBuffer = await response.arrayBuffer();
+                        await Bun.write(imagePath, Buffer.from(arrayBuffer));
+                        console.log(chalk.green(`  ✓ images/${filename}`));
+                        return { success: true, filename };
+                    }
+                    return { success: false, error: 'Response not ok' };
+                } catch {
+                    console.log(chalk.yellow(`  ⚠ Could not save image: ${imgUrl.slice(0, 50)}...`));
+                    return { success: false, error: 'Fetch failed' };
                 }
-            } catch {
-                console.log(chalk.yellow(`  ⚠ Could not save image: ${imgUrl.slice(0, 50)}...`));
-            }
-        }
+            })
+        );
+
+        await Promise.all(imageDownloadPromises);
     }
 
     // Step 7: Generate thumbnail
@@ -883,41 +938,48 @@ Article context: ${contentPreview}`;
 
     // Fall back to using an article image if AI generation failed
     if (!baseImage && content.allImages.length > 0 && genAI) {
-        console.log(chalk.gray('  Falling back to article image...'));
+        console.log(chalk.gray('  Falling back to article image (rating with AI)...'));
         try {
             const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-            let bestImage: string | null = null;
-            let bestScore = -1;
+            const imagesToRate = content.allImages.slice(0, 5);
 
-            for (const imgUrl of content.allImages.slice(0, 5)) {
-                const imageData = await fetchImageAsBase64(imgUrl);
-                if (!imageData) continue;
+            // Rate images in parallel with concurrency limit
+            const ratingPromises = imagesToRate.map((imgUrl) =>
+                geminiLimit(async () => {
+                    const imageData = await fetchImageAsBase64(imgUrl);
+                    if (!imageData) return { imgUrl, score: -1 };
 
-                try {
-                    const result = await model.generateContent([
-                        {
-                            inlineData: {
-                                mimeType: imageData.mimeType,
-                                data: imageData.data,
+                    try {
+                        const result = await model.generateContent([
+                            {
+                                inlineData: {
+                                    mimeType: imageData.mimeType,
+                                    data: imageData.data,
+                                },
                             },
-                        },
-                        'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
-                    ]);
-                    const score = parseInt(result.response.text().trim(), 10);
-                    if (!isNaN(score) && score > bestScore) {
-                        bestScore = score;
-                        bestImage = imgUrl;
+                            'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
+                        ]);
+                        const score = parseInt(result.response.text().trim(), 10);
+                        return { imgUrl, score: isNaN(score) ? -1 : score };
+                    } catch {
+                        return { imgUrl, score: -1 };
                     }
-                } catch {
-                    // Skip images that fail to process
-                }
-            }
+                })
+            );
 
-            if (bestImage) {
-                const imageData = await fetchImageAsBase64(bestImage);
+            const ratings = await Promise.all(ratingPromises);
+
+            // Find the best rated image
+            const bestRating = ratings.reduce((best, current) =>
+                current.score > best.score ? current : best,
+                { imgUrl: null as string | null, score: -1 }
+            );
+
+            if (bestRating.imgUrl && bestRating.score >= 0) {
+                const imageData = await fetchImageAsBase64(bestRating.imgUrl);
                 if (imageData) {
                     baseImage = Buffer.from(imageData.data, 'base64');
-                    console.log(chalk.gray(`  Using article image (score: ${bestScore}/10)`));
+                    console.log(chalk.gray(`  Using article image (score: ${bestRating.score}/10)`));
                 }
             }
         } catch (err) {
