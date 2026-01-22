@@ -29,7 +29,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 	- [x] set all other relevant metadata in the audio file
 	- [x] upload all the needed assets in the bucket
 	- [x] print the "podcast" url once done
-	- [x] include at the top who reads it in format "Read by Google Chirp 3: Zephyr en_gb" (template based on the vendor + model + voice + dialect to be easily changed later)
+	- [x] include at the top who reads it in format "Read by Google Chirp 3: Zephyr en_US" (template based on the vendor + model + voice + dialect to be easily changed later)
 	- [x] include the url where this was imported from
 - [x] add a `--cache-images` option that would store the result of the ai parsing a given image url and read it from cache if it exists (cache key based on url + ai prompt and expires in 1 week).
 	- [ ] this should also cache the thumbnail generated

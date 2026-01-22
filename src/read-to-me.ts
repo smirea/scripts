@@ -1,10 +1,12 @@
 #!/usr/bin/env bun
+import { Storage } from '@google-cloud/storage';
 import { TextToSpeechClient } from '@google-cloud/text-to-speech';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GoogleGenAI } from '@google/genai';
 import { Readability } from '@mozilla/readability';
 import chalk from 'chalk';
 import crypto from 'crypto';
+import { unlink, rename } from 'fs/promises';
 import { XMLParser } from 'fast-xml-parser';
 import { parseHTML } from 'linkedom';
 import path from 'path';
@@ -62,6 +64,7 @@ const geminiTextClient = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY)
 /** Gemini client for image generation (Gemini 2.5 Flash Image) */
 const geminiImageGenClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const ttsClient = new TextToSpeechClient();
+const gcsClient = new Storage();
 
 // =============================================================================
 // Voice Configuration
@@ -258,6 +261,25 @@ function extractImagesFromMarkdown(content: string): string[] {
         images.push(match[1]);
     }
     return images;
+}
+
+/**
+ * Upload a file to Google Cloud Storage.
+ * @param localPath - Local file path to upload
+ * @param gcsPath - Destination path in format "bucket/path/to/file"
+ * @param contentType - Optional content type override
+ */
+async function uploadToGCS(localPath: string, gcsPath: string, contentType?: string): Promise<void> {
+    // Parse gcsPath: first segment is bucket, rest is the object path
+    const parts = gcsPath.split('/');
+    const bucketName = parts[0];
+    const objectPath = parts.slice(1).join('/');
+
+    const bucket = gcsClient.bucket(bucketName);
+    await bucket.upload(localPath, {
+        destination: objectPath,
+        ...(contentType && { contentType }),
+    });
 }
 
 // =============================================================================
@@ -1568,11 +1590,11 @@ createScript(async () => {
     if (ffmpegResult.exitCode !== 0) {
         console.log(chalk.yellow('  ⚠ ffmpeg conversion failed, keeping MP3 format'));
         const mp3Path = path.join(outputDir, `${outputBase}.mp3`);
-        await Bun.$`mv ${tempMp3Path} ${mp3Path}`;
+        await rename(tempMp3Path, mp3Path);
     } else {
         // Clean up temp files
-        await Bun.$`trash ${tempMp3Path}`;
-        await Bun.$`trash ${ffmetadataPath}`;
+        await unlink(tempMp3Path);
+        await unlink(ffmetadataPath);
         console.log(chalk.green.bold(`  ✓ ${outputBase}.m4a (combined with chapters)`));
     }
 
@@ -1653,21 +1675,13 @@ createScript(async () => {
         const gcsPath = `read-to-me/${titleSlug}`;
 
         // Upload M4A audio file
-        const audioGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/${outputBase}.m4a`;
         console.log(chalk.gray(`  Uploading audio file...`));
-        const audioUploadResult = await Bun.$`gcloud storage cp ${combinedPath} ${audioGcsPath}`.quiet();
-        if (audioUploadResult.exitCode !== 0) {
-            throw new Error(`Failed to upload audio file to ${audioGcsPath}`);
-        }
+        await uploadToGCS(combinedPath, `${GCS_BUCKET}/${gcsPath}/${outputBase}.m4a`, 'audio/mp4');
         console.log(chalk.green(`  ✓ ${outputBase}.m4a`));
 
         // Upload thumbnail
-        const thumbnailGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/thumbnail.png`;
         console.log(chalk.gray(`  Uploading thumbnail...`));
-        const thumbnailUploadResult = await Bun.$`gcloud storage cp ${thumbnailPath} ${thumbnailGcsPath}`.quiet();
-        if (thumbnailUploadResult.exitCode !== 0) {
-            throw new Error(`Failed to upload thumbnail to ${thumbnailGcsPath}`);
-        }
+        await uploadToGCS(thumbnailPath, `${GCS_BUCKET}/${gcsPath}/thumbnail.png`, 'image/png');
         console.log(chalk.green(`  ✓ thumbnail.png`));
 
         // Generate and upload RSS feed
@@ -1697,24 +1711,13 @@ createScript(async () => {
         await Bun.write(rssFeedPath, rssFeed);
         console.log(chalk.green(`  ✓ feed.xml (local)`));
 
-        // Upload RSS feed
-        const rssGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/feed.xml`;
-        const rssUploadResult = await Bun.$`gcloud storage cp ${rssFeedPath} ${rssGcsPath}`.quiet();
-        if (rssUploadResult.exitCode !== 0) {
-            throw new Error(`Failed to upload RSS feed to ${rssGcsPath}`);
-        }
+        // Upload RSS feed with correct content type
+        await uploadToGCS(rssFeedPath, `${GCS_BUCKET}/${gcsPath}/feed.xml`, 'application/rss+xml');
         console.log(chalk.green(`  ✓ feed.xml (uploaded)`));
-
-        // Set correct content type for RSS feed
-        const contentTypeResult = await Bun.$`gcloud storage objects update ${rssGcsPath} --content-type=application/rss+xml`.quiet();
-        if (contentTypeResult.exitCode !== 0) {
-            throw new Error(`Failed to set content type for ${rssGcsPath}`);
-        }
 
         // Update master feed with all episodes
         console.log(chalk.gray(`  Updating master feed...`));
         const masterFeedUrl = `${GCS_BASE_URL}/read-to-me/feed.xml`;
-        const masterFeedGcsPath = `gs://${GCS_BUCKET}/read-to-me/feed.xml`;
 
         const newEpisode: EpisodeData = {
             title: content.title,
@@ -1736,14 +1739,8 @@ createScript(async () => {
         const masterFeedPath = path.join(outputDir, 'master-feed.xml');
         await Bun.write(masterFeedPath, masterFeed);
 
-        const masterUploadResult = await Bun.$`gcloud storage cp ${masterFeedPath} ${masterFeedGcsPath}`.quiet();
-        if (masterUploadResult.exitCode !== 0) {
-            throw new Error(`Failed to upload master feed to ${masterFeedGcsPath}`);
-        }
-        const masterContentTypeResult = await Bun.$`gcloud storage objects update ${masterFeedGcsPath} --content-type=application/rss+xml`.quiet();
-        if (masterContentTypeResult.exitCode !== 0) {
-            throw new Error(`Failed to set content type for ${masterFeedGcsPath}`);
-        }
+        // Upload master feed with correct content type
+        await uploadToGCS(masterFeedPath, `${GCS_BUCKET}/read-to-me/feed.xml`, 'application/rss+xml');
         console.log(chalk.green(`  ✓ master feed.xml (uploaded)`));
 
         podcastUrl = masterFeedUrl;
