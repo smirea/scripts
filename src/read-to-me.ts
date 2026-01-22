@@ -4,6 +4,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GoogleGenAI } from '@google/genai';
 import { Readability } from '@mozilla/readability';
 import chalk from 'chalk';
+import crypto from 'crypto';
 import { parseHTML } from 'linkedom';
 import path from 'path';
 import pLimit from 'p-limit';
@@ -32,6 +33,9 @@ const THUMBNAIL_BORDER_COLOR = '#1E90FF';
 const THUMBNAIL_TAG_COLOR = '#FFFFFF';
 
 const MD_IMAGE_REGEX = /!\[.*?\]\(([^)]+)\)/g;
+
+const IMAGE_CACHE_DIR = path.join(process.cwd(), '.cache', 'read-to-me', 'images');
+const IMAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 
 // =============================================================================
 // Concurrency Limiters
@@ -98,9 +102,14 @@ const argv = yargs(hideBin(process.argv))
         type: 'boolean',
         default: false,
     })
+    .option('cache-images', {
+        describe: 'Cache AI image parsing results (expires in 1 week)',
+        type: 'boolean',
+        default: true,
+    })
     .strict()
     .help()
-    .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string; 'skip-upload': boolean };
+    .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string; 'skip-upload': boolean; 'cache-images': boolean };
 
 // =============================================================================
 // Types
@@ -155,6 +164,17 @@ interface EpisodeData {
 type ImageDescriptionResult =
     | { type: 'description'; text: string }
     | { type: 'skipped'; reason: 'stock_photo' | 'fetch_error' | 'no_api_key' | 'api_error' };
+
+interface ImageDescriptionResultWithCache {
+    result: ImageDescriptionResult;
+    fromCache: boolean;
+}
+
+interface ImageCacheEntry {
+    result: ImageDescriptionResult;
+    expiresAt: number;
+    promptHash: string;
+}
 
 // =============================================================================
 // Utility Functions
@@ -327,40 +347,7 @@ function extractContent(html: string, url: string): ExtractedContent {
 // AI Processing (Images, Tables, Chapters)
 // =============================================================================
 
-async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mimeType: string } | null> {
-    try {
-        const response = await fetchWithUA(imageUrl);
-        if (!response.ok) return null;
-
-        const contentType = response.headers.get('content-type') || 'image/jpeg';
-        const arrayBuffer = await response.arrayBuffer();
-        const base64 = Buffer.from(arrayBuffer).toString('base64');
-        return { data: base64, mimeType: contentType };
-    } catch {
-        return null;
-    }
-}
-
-async function describeImage(imageUrl: string): Promise<ImageDescriptionResult> {
-    if (!geminiClient) {
-        return { type: 'skipped', reason: 'no_api_key' };
-    }
-
-    const imageData = await fetchImageAsBase64(imageUrl);
-    if (!imageData) {
-        return { type: 'skipped', reason: 'fetch_error' };
-    }
-
-    try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            {
-                inlineData: {
-                    mimeType: imageData.mimeType,
-                    data: imageData.data,
-                },
-            },
-            `You are helping convert an article to audio format. Analyze this image and determine if it adds meaningful content to the article.
+const IMAGE_DESCRIPTION_PROMPT = `You are helping convert an article to audio format. Analyze this image and determine if it adds meaningful content to the article.
 
 SKIP the image (respond with exactly "SKIP") if it is:
 - A generic stock photo (business people shaking hands, smiling models, abstract tech imagery)
@@ -381,19 +368,122 @@ Your description should:
 - Be concise and suitable for spoken audio
 - Help the listener understand the gist without seeing the image
 
-Respond with either "SKIP" or your description (no other text).`,
+Respond with either "SKIP" or your description (no other text).`;
+
+const IMAGE_PROMPT_HASH = crypto.createHash('sha256').update(IMAGE_DESCRIPTION_PROMPT).digest('hex').slice(0, 16);
+
+function getImageCacheKey(imageUrl: string): string {
+    const urlHash = crypto.createHash('sha256').update(imageUrl).digest('hex').slice(0, 32);
+    return `${urlHash}_${IMAGE_PROMPT_HASH}`;
+}
+
+async function getImageFromCache(imageUrl: string): Promise<ImageDescriptionResult | null> {
+    if (!argv['cache-images']) return null;
+
+    const cacheKey = getImageCacheKey(imageUrl);
+    const cachePath = path.join(IMAGE_CACHE_DIR, `${cacheKey}.json`);
+
+    try {
+        const file = Bun.file(cachePath);
+        if (!await file.exists()) return null;
+
+        const entry: ImageCacheEntry = await file.json();
+
+        // Check if cache entry has expired
+        if (Date.now() > entry.expiresAt) {
+            return null;
+        }
+
+        // Verify prompt hash matches (in case prompt was updated)
+        if (entry.promptHash !== IMAGE_PROMPT_HASH) {
+            return null;
+        }
+
+        return entry.result;
+    } catch {
+        return null;
+    }
+}
+
+async function saveImageToCache(imageUrl: string, result: ImageDescriptionResult): Promise<void> {
+    if (!argv['cache-images']) return;
+
+    const cacheKey = getImageCacheKey(imageUrl);
+    const cachePath = path.join(IMAGE_CACHE_DIR, `${cacheKey}.json`);
+
+    const entry: ImageCacheEntry = {
+        result,
+        expiresAt: Date.now() + IMAGE_CACHE_TTL_MS,
+        promptHash: IMAGE_PROMPT_HASH,
+    };
+
+    try {
+        // Ensure cache directory exists
+        await Bun.write(path.join(IMAGE_CACHE_DIR, '.gitkeep'), '');
+        await Bun.write(cachePath, JSON.stringify(entry, null, 2));
+    } catch (err) {
+        console.log(chalk.yellow(`  Warning: Failed to cache image result: ${(err as Error).message}`));
+    }
+}
+
+async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mimeType: string } | null> {
+    try {
+        const response = await fetchWithUA(imageUrl);
+        if (!response.ok) return null;
+
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
+        const arrayBuffer = await response.arrayBuffer();
+        const base64 = Buffer.from(arrayBuffer).toString('base64');
+        return { data: base64, mimeType: contentType };
+    } catch {
+        return null;
+    }
+}
+
+async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWithCache> {
+    if (!geminiClient) {
+        return { result: { type: 'skipped', reason: 'no_api_key' }, fromCache: false };
+    }
+
+    // Check cache first
+    const cachedResult = await getImageFromCache(imageUrl);
+    if (cachedResult) {
+        return { result: cachedResult, fromCache: true };
+    }
+
+    const imageData = await fetchImageAsBase64(imageUrl);
+    if (!imageData) {
+        return { result: { type: 'skipped', reason: 'fetch_error' }, fromCache: false };
+    }
+
+    try {
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent([
+            {
+                inlineData: {
+                    mimeType: imageData.mimeType,
+                    data: imageData.data,
+                },
+            },
+            IMAGE_DESCRIPTION_PROMPT,
         ]);
         const response = result.response.text().trim();
 
         // If AI determined this is a stock/decorative image, skip it
+        let descriptionResult: ImageDescriptionResult;
         if (response.toUpperCase() === 'SKIP') {
-            return { type: 'skipped', reason: 'stock_photo' };
+            descriptionResult = { type: 'skipped', reason: 'stock_photo' };
+        } else {
+            descriptionResult = { type: 'description', text: response };
         }
 
-        return { type: 'description', text: response };
+        // Save to cache
+        await saveImageToCache(imageUrl, descriptionResult);
+
+        return { result: descriptionResult, fromCache: false };
     } catch (err) {
         console.log(chalk.yellow(`  Error describing image: ${(err as Error).message}`));
-        return { type: 'skipped', reason: 'api_error' };
+        return { result: { type: 'skipped', reason: 'api_error' }, fromCache: false };
     }
 }
 
@@ -483,21 +573,25 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
         return content;
     }
 
-    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini (concurrency: ${GEMINI_CONCURRENCY})...`));
+    const cacheInfo = argv['cache-images'] ? ' (cache enabled)' : '';
+    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini (concurrency: ${GEMINI_CONCURRENCY})${cacheInfo}...`));
 
     const imageDescriptions = new Map<string, string>();
     let completed = 0;
+    let cacheHits = 0;
     const total = content.allImages.length;
     const skippedImages = new Set<string>(); // Track images to remove from content
 
     // Process images in parallel with concurrency limit
     const descriptionPromises = content.allImages.map((imgUrl, i) =>
         geminiLimit(async () => {
-            const result = await describeImage(imgUrl);
+            const { result, fromCache } = await describeImage(imgUrl);
             completed++;
+            if (fromCache) cacheHits++;
+            const cacheTag = fromCache ? chalk.cyan('[cached] ') : '';
             if (result.type === 'description') {
                 imageDescriptions.set(imgUrl, result.text);
-                console.log(chalk.green(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → ${result.text.slice(0, 60)}...`));
+                console.log(chalk.green(`  [${completed}/${total}] ${cacheTag}${imgUrl.slice(0, 40)}... → ${result.text.slice(0, 60)}...`));
             } else {
                 skippedImages.add(imgUrl);
                 const reasonText = {
@@ -506,13 +600,17 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
                     'no_api_key': 'no API key',
                     'api_error': 'API error',
                 }[result.reason];
-                console.log(chalk.yellow(`  [${completed}/${total}] ${imgUrl.slice(0, 40)}... → (skipped: ${reasonText})`));
+                console.log(chalk.yellow(`  [${completed}/${total}] ${cacheTag}${imgUrl.slice(0, 40)}... → (skipped: ${reasonText})`));
             }
             return { imgUrl, result };
         })
     );
 
     await Promise.all(descriptionPromises);
+
+    if (argv['cache-images'] && cacheHits > 0) {
+        console.log(chalk.cyan(`  Cache hits: ${cacheHits}/${total} images`));
+    }
 
     // Replace image references in chapter content with descriptions or remove skipped images
     const updatedChapters = content.chapters.map(chapter => {

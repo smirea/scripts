@@ -15,6 +15,8 @@ this is a typescript script that receives a content (a webpage to start) and con
 	- [x] support `--voice=random|random-male|random-female` entries
 - [x] i want to be able to import this audio in some podcasting app and I want the audio to have chapters - generate separate audio chunks for each chapter, inject appropriate metadata, join at the end into a single audio file
 - [x] generate a thumbnail for the audio that's ideally embedded with the latest nano banana model (from google) and add a blue standard stylish border on top of it so they'll be consistent with a tag R2M in the top right
+	- [ ] blue border should be over the image
+	- [ ] the favicon of the website should be in the bottom right of the image also surrounded by the same blue border and a smooth transition
 - [x] store the markdown file, all the images in the output dir. store the final audio in the output dir with the same name as the folder
 - [x] create a dummy simple website for testing under `fixtures/read-for-me_test.html` that has 2 images, a table with 5 rows and 3 columns, a few links, this image https://waitbutwhy.com/wp-content/uploads/2024/10/nasa-budget_lg.png and 4-5 paragraphs of text talking about rockets
 - [x] parallelize ai calls with a reasonable concurrency to avoid throttling (use a simple npm package)
@@ -26,6 +28,9 @@ this is a typescript script that receives a content (a webpage to start) and con
 	- [x] set all other relevant metadata in the audio file
 	- [x] upload all the needed assets in the bucket
 	- [x] print the "podcast" url once done
+	- [ ] include at the top who reads it in format "Read by Google Chirp 3: Zephyr en_gb" (template based on the vendor + model + voice + dialect to be easily changed later)
+	- [ ] include the url where this was imported from
+- [x] add a `--cache-images` option that would store the result of the ai parsing a given image url and read it from cache if it exists (cache key based on url + ai prompt and expires in 1 week)
 
 # bugs
 - [x] The voice being used seems like a generic TTS model not Chirp 3, I suspect the way it is generated is wrong. lookup how to properly use google's Chirp 3: HD Voices and fix it
