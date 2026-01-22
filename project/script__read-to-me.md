@@ -30,7 +30,10 @@ this is a typescript script that receives a content (a webpage to start) and con
 	- [x] print the "podcast" url once done
 	- [ ] include at the top who reads it in format "Read by Google Chirp 3: Zephyr en_gb" (template based on the vendor + model + voice + dialect to be easily changed later)
 	- [ ] include the url where this was imported from
-- [x] add a `--cache-images` option that would store the result of the ai parsing a given image url and read it from cache if it exists (cache key based on url + ai prompt and expires in 1 week)
+- [x] add a `--cache-images` option that would store the result of the ai parsing a given image url and read it from cache if it exists (cache key based on url + ai prompt and expires in 1 week).
+- [ ] speech enhancement
+	- [ ] enabled by default (flag `--enhance-speech`)
+	- [ ] pass each chapter to the AI to tweak for better TTS. the specific prompt for this is under src/prompts/tts-optimizer.md - load it from there, tweak it if you feel it's necessary
 
 # bugs
 - [x] The voice being used seems like a generic TTS model not Chirp 3, I suspect the way it is generated is wrong. lookup how to properly use google's Chirp 3: HD Voices and fix it
@@ -40,4 +43,4 @@ this is a typescript script that receives a content (a webpage to start) and con
 
 # notes
 - use the `gcp` cli to create access keys and setup keys and apis as needed under the `personal` project
-- use `fixtures/read-for-me_test.html` for testing
+- use `fixtures/read-for-me_test.html` for testing and enable `--cache-images`
