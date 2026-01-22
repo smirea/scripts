@@ -5,6 +5,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] a way to extract the main content (markdown)
 - [x] parse each content chunk with gemini 2.5 flash to filter out things like ads, comments, amything that seems to not be part of the article itself
 	- [x] in the same time, have gemini suggest chapters starting points
+	- [ ] in the same time, split long sentences up to prevent the speech synthesis from throwing an error (see what the max length should be)
 - [x] parse images with ai to describe them (gemini 2.5 flash)
 	- [x] improve image prompt to focus on capturing the meaning of the picture succinctly in the context of the chapter. the goal is for someone reading it to get the gist
 	- [x] if it's purely a stock photo / visual photo, have the AI mention that and skip it
