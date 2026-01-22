@@ -1,7 +1,8 @@
 import chalk from 'chalk';
 import path from 'path';
+import { generateText } from 'ai';
 import { withRetry } from '../../utils/retry';
-import { geminiTextClient } from '../clients';
+import { geminiFlashModel } from '../clients';
 import { PROMPTS_DIR } from '../constants';
 import type { ExtractedContent } from '../types';
 
@@ -15,26 +16,21 @@ async function loadPrompt(): Promise<string> {
 }
 
 export async function generateSummary(content: ExtractedContent): Promise<string> {
-    if (!geminiTextClient) {
-        return `Audio version of "${content.title}"`;
-    }
-
-    console.log(chalk.blue('Generating article summary...'));
+    console.log(chalk.blue('Generating article summary with Gemini 3 Flash...'));
 
     try {
         const prompt = await loadPrompt();
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const fullContent = content.chapters.map(c => c.content).join('\n\n').slice(0, 4000);
 
         const result = await withRetry(
-            () => model.generateContent([
-                prompt,
-                `\n\nArticle title: ${content.title}\n${content.byline ? `Author: ${content.byline}` : ''}\n\nContent:\n${fullContent}`,
-            ]),
+            async () => generateText({
+                model: geminiFlashModel,
+                prompt: `${prompt}\n\nArticle title: ${content.title}\n${content.byline ? `Author: ${content.byline}` : ''}\n\nContent:\n${fullContent}`,
+            }),
             'generate summary'
         );
 
-        const summary = result.response.text().trim();
+        const summary = result.text.trim();
         console.log(chalk.green(`  Summary: ${summary.slice(0, 80)}...`));
         return summary;
     } catch (err) {

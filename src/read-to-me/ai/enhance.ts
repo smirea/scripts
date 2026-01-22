@@ -1,13 +1,14 @@
 import chalk from 'chalk';
 import path from 'path';
 import pLimit from 'p-limit';
+import { generateText } from 'ai';
 import { withRetry } from '../../utils/retry';
-import { geminiTextClient } from '../clients';
+import { claudeSonnetModel } from '../clients';
 import { argv } from '../cli';
 import { GEMINI_CONCURRENCY, PROMPTS_DIR } from '../constants';
 import type { ExtractedContent } from '../types';
 
-const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const aiLimit = pLimit(GEMINI_CONCURRENCY);
 
 async function loadTtsOptimizerPrompt(): Promise<string> {
     const promptPath = path.join(PROMPTS_DIR, 'tts-optimizer.md');
@@ -23,23 +24,18 @@ async function enhanceChapterForTTS(
     ttsPrompt: string,
     chapterIndex: number,
 ): Promise<string> {
-    if (!geminiTextClient) {
-        return chapterContent;
-    }
-
     try {
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
-            () => model.generateContent([
-                ttsPrompt,
-                `\n\n**Text to optimize:**\n\n${chapterContent}`,
-            ]),
+            async () => generateText({
+                model: claudeSonnetModel,
+                prompt: `${ttsPrompt}\n\n**Text to optimize:**\n\n${chapterContent}`,
+            }),
             'enhance for TTS'
         );
 
-        let ssmlOutput = result.response.text().trim();
+        let ssmlOutput = result.text.trim();
 
-        // Remove markdown code block wrapping if Gemini added it
+        // Remove markdown code block wrapping if model added it
         ssmlOutput = ssmlOutput.replace(/^```(?:xml|ssml)?\n?/, '').replace(/\n?```$/, '');
 
         // Validate that we got SSML back
@@ -56,17 +52,12 @@ async function enhanceChapterForTTS(
 }
 
 export async function enhanceContentForTTS(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('Skipping speech enhancement (no GEMINI_API_KEY)'));
-        return content;
-    }
-
     if (!argv['enhance-speech']) {
         console.log(chalk.gray('Speech enhancement disabled'));
         return content;
     }
 
-    console.log(chalk.blue(`Enhancing ${content.chapters.length} chapters for TTS (concurrency: ${GEMINI_CONCURRENCY})...`));
+    console.log(chalk.blue(`Enhancing ${content.chapters.length} chapters for TTS with Claude Sonnet 4.5 (concurrency: ${GEMINI_CONCURRENCY})...`));
 
     // Load the TTS optimizer prompt
     let ttsPrompt: string;
@@ -82,7 +73,7 @@ export async function enhanceContentForTTS(content: ExtractedContent): Promise<E
 
     // Process chapters in parallel with concurrency limit
     const enhancePromises = content.chapters.map((chapter, i) =>
-        geminiLimit(async () => {
+        aiLimit(async () => {
             const enhancedContent = await enhanceChapterForTTS(chapter.content, ttsPrompt, i);
             completed++;
 

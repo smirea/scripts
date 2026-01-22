@@ -1,12 +1,13 @@
 import chalk from 'chalk';
 import path from 'path';
 import pLimit from 'p-limit';
+import { generateText } from 'ai';
 import { withRetry } from '../../utils/retry';
-import { geminiTextClient } from '../clients';
+import { geminiFlashModel } from '../clients';
 import { GEMINI_CONCURRENCY, PROMPTS_DIR } from '../constants';
 import type { ExtractedContent } from '../types';
 
-const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const aiLimit = pLimit(GEMINI_CONCURRENCY);
 
 async function loadPrompt(): Promise<string> {
     const promptPath = path.join(PROMPTS_DIR, 'table-description.md');
@@ -18,22 +19,16 @@ async function loadPrompt(): Promise<string> {
 }
 
 async function describeTable(tableHtml: string): Promise<string | null> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('  Skipping table (no GEMINI_API_KEY)'));
-        return null;
-    }
-
     try {
         const prompt = await loadPrompt();
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
-            () => model.generateContent([
-                prompt,
-                `\n\nHTML TABLE:\n${tableHtml}`,
-            ]),
+            async () => generateText({
+                model: geminiFlashModel,
+                prompt: `${prompt}\n\nHTML TABLE:\n${tableHtml}`,
+            }),
             'describe table'
         );
-        return result.response.text().trim();
+        return result.text.trim();
     } catch (err) {
         console.log(chalk.yellow(`  Error describing table: ${(err as Error).message}`));
         return null;
@@ -41,16 +36,11 @@ async function describeTable(tableHtml: string): Promise<string | null> {
 }
 
 export async function processTablesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('Skipping table processing (no GEMINI_API_KEY)'));
-        return content;
-    }
-
     if (content.allTables.length === 0) {
         return content;
     }
 
-    console.log(chalk.blue(`Processing ${content.allTables.length} table(s) with Gemini (concurrency: ${GEMINI_CONCURRENCY})...`));
+    console.log(chalk.blue(`Processing ${content.allTables.length} table(s) with Gemini 3 Flash (concurrency: ${GEMINI_CONCURRENCY})...`));
 
     const tableResults: Array<{ cells: string[]; description: string }> = [];
     let completed = 0;
@@ -58,7 +48,7 @@ export async function processTablesInContent(content: ExtractedContent): Promise
 
     // Process tables in parallel with concurrency limit
     const descriptionPromises = content.allTables.map((table) =>
-        geminiLimit(async () => {
+        aiLimit(async () => {
             const description = await describeTable(table.html);
             completed++;
             if (description) {

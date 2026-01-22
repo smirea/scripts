@@ -4,13 +4,14 @@ import pLimit from 'p-limit';
 import { Readability } from '@mozilla/readability';
 import { parseHTML } from 'linkedom';
 import TurndownService from 'turndown';
+import { generateText } from 'ai';
 import { fetchWithUA } from '../utils/fetch';
 import { withRetry } from '../utils/retry';
-import { geminiTextClient } from './clients';
+import { geminiFlashModel } from './clients';
 import { GEMINI_CONCURRENCY, MD_IMAGE_REGEX, PROMPTS_DIR } from './constants';
 import type { Chapter, ExtractedContent, TableData } from './types';
 
-const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const aiLimit = pLimit(GEMINI_CONCURRENCY);
 
 // =============================================================================
 // Content Extraction
@@ -147,26 +148,21 @@ async function loadPrompt(filename: string): Promise<string> {
 }
 
 async function filterChapterContent(chapter: Chapter): Promise<Chapter> {
-    if (!geminiTextClient) {
-        return chapter;
-    }
-
     if (chapter.content.length < 200) {
         return chapter;
     }
 
     try {
         const prompt = await loadPrompt('content-filter.md');
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
-            () => model.generateContent([
-                prompt,
-                `\n\nCONTENT TO FILTER:\n---\n${chapter.content}\n---`,
-            ]),
+            async () => generateText({
+                model: geminiFlashModel,
+                prompt: `${prompt}\n\nCONTENT TO FILTER:\n---\n${chapter.content}\n---`,
+            }),
             'filter chapter'
         );
 
-        let filteredContent = result.response.text().trim();
+        let filteredContent = result.text.trim();
         filteredContent = filteredContent.replace(/^```(?:markdown)?\n?/, '').replace(/\n?```$/, '');
 
         if (filteredContent === 'EMPTY_CHAPTER' || filteredContent.length < 10) {
@@ -187,18 +183,13 @@ async function filterChapterContent(chapter: Chapter): Promise<Chapter> {
 }
 
 export async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
-        return content;
-    }
-
-    console.log(chalk.blue(`Filtering ${content.chapters.length} chapters to remove ads/comments (concurrency: ${GEMINI_CONCURRENCY})...`));
+    console.log(chalk.blue(`Filtering ${content.chapters.length} chapters with Gemini 3 Flash (concurrency: ${GEMINI_CONCURRENCY})...`));
 
     let completed = 0;
     const total = content.chapters.length;
 
     const filterPromises = content.chapters.map((chapter, i) =>
-        geminiLimit(async () => {
+        aiLimit(async () => {
             const filteredChapter = await filterChapterContent(chapter);
             completed++;
 

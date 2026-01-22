@@ -1,7 +1,8 @@
 import chalk from 'chalk';
 import path from 'path';
+import { generateText } from 'ai';
 import { withRetry } from '../../utils/retry';
-import { geminiTextClient } from '../clients';
+import { geminiFlashModel } from '../clients';
 import { PROMPTS_DIR } from '../constants';
 import { extractImagesFromMarkdown } from '../content';
 import type { Chapter, ExtractedContent } from '../types';
@@ -16,11 +17,6 @@ async function loadPrompt(): Promise<string> {
 }
 
 export async function suggestChapters(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('Skipping AI chapter suggestion (no GEMINI_API_KEY)'));
-        return content;
-    }
-
     // Combine all content to analyze as a whole
     const fullContent = content.chapters.map(c => c.content).join('\n\n');
 
@@ -30,20 +26,19 @@ export async function suggestChapters(content: ExtractedContent): Promise<Extrac
         return content;
     }
 
-    console.log(chalk.blue('Analyzing content for chapter suggestions...'));
+    console.log(chalk.blue('Analyzing content for chapter suggestions with Gemini 3 Flash...'));
 
     try {
         const prompt = await loadPrompt();
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
-            () => model.generateContent([
-                prompt,
-                `\n\nCONTENT TO ANALYZE:\n---\n${fullContent}\n---`,
-            ]),
+            async () => generateText({
+                model: geminiFlashModel,
+                prompt: `${prompt}\n\nCONTENT TO ANALYZE:\n---\n${fullContent}\n---`,
+            }),
             'suggest chapters'
         );
 
-        let responseText = result.response.text().trim();
+        let responseText = result.text.trim();
         // Remove markdown code block wrapping if present
         responseText = responseText.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
 

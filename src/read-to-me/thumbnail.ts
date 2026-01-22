@@ -3,10 +3,11 @@ import crypto from 'crypto';
 import path from 'path';
 import pLimit from 'p-limit';
 import sharp from 'sharp';
+import { generateText } from 'ai';
 import { escapeXml } from '../utils/xml';
 import { fetchWithUA } from '../utils/fetch';
 import { withRetry } from '../utils/retry';
-import { geminiImageGenClient, geminiTextClient } from './clients';
+import { geminiFlashModel, geminiImageGenClient } from './clients';
 import { argv } from './cli';
 import {
     FAVICON_BORDER_WIDTH,
@@ -23,7 +24,7 @@ import {
 import type { ExtractedContent, ThumbnailCacheMetadata } from './types';
 import { fetchImageAsBase64 } from './ai';
 
-const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const aiLimit = pLimit(GEMINI_CONCURRENCY);
 
 // =============================================================================
 // Thumbnail Caching
@@ -249,31 +250,37 @@ Article context: ${contentPreview}`;
     }
 
     // Fall back to using an article image
-    if (!baseImage && content.allImages.length > 0 && geminiTextClient) {
-        console.log(chalk.gray('  Falling back to article image (rating with AI)...'));
+    if (!baseImage && content.allImages.length > 0) {
+        console.log(chalk.gray('  Falling back to article image (rating with Gemini 3 Flash)...'));
         try {
-            const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
             const imagesToRate = content.allImages.slice(0, 5);
 
             const ratingPromises = imagesToRate.map((imgUrl) =>
-                geminiLimit(async () => {
+                aiLimit(async () => {
                     const imageData = await fetchImageAsBase64(imgUrl);
                     if (!imageData) return { imgUrl, score: -1, imageData: null };
 
                     try {
                         const result = await withRetry(
-                            () => model.generateContent([
-                                {
-                                    inlineData: {
-                                        mimeType: imageData.mimeType,
-                                        data: imageData.data,
-                                    },
-                                },
-                                'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
-                            ]),
+                            async () => generateText({
+                                model: geminiFlashModel,
+                                messages: [{
+                                    role: 'user',
+                                    content: [
+                                        {
+                                            type: 'image',
+                                            image: `data:${imageData.mimeType};base64,${imageData.data}`,
+                                        },
+                                        {
+                                            type: 'text',
+                                            text: 'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
+                                        },
+                                    ],
+                                }],
+                            }),
                             'rate image'
                         );
-                        const score = parseInt(result.response.text().trim(), 10);
+                        const score = parseInt(result.text.trim(), 10);
                         return { imgUrl, score: isNaN(score) ? -1 : score, imageData };
                     } catch {
                         return { imgUrl, score: -1, imageData: null };

@@ -2,14 +2,15 @@ import chalk from 'chalk';
 import crypto from 'crypto';
 import path from 'path';
 import pLimit from 'p-limit';
+import { generateText } from 'ai';
 import { fetchWithUA } from '../../utils/fetch';
 import { withRetry } from '../../utils/retry';
-import { geminiTextClient } from '../clients';
+import { geminiFlashModel } from '../clients';
 import { argv } from '../cli';
 import { GEMINI_CONCURRENCY, IMAGE_CACHE_DIR, IMAGE_CACHE_TTL_MS, PROMPTS_DIR } from '../constants';
 import type { ExtractedContent, ImageCacheEntry, ImageDescriptionResult, ImageDescriptionResultWithCache } from '../types';
 
-const geminiLimit = pLimit(GEMINI_CONCURRENCY);
+const aiLimit = pLimit(GEMINI_CONCURRENCY);
 
 let IMAGE_DESCRIPTION_PROMPT: string | null = null;
 let IMAGE_PROMPT_HASH: string | null = null;
@@ -98,10 +99,6 @@ export async function fetchImageAsBase64(imageUrl: string): Promise<{ data: stri
 }
 
 async function describeImage(imageUrl: string, context?: string): Promise<ImageDescriptionResultWithCache> {
-    if (!geminiTextClient) {
-        return { result: { type: 'skipped', reason: 'no_api_key' }, fromCache: false };
-    }
-
     // Check cache first (context not included in cache key for now)
     const cachedResult = await getImageFromCache(imageUrl);
     if (cachedResult) {
@@ -122,20 +119,26 @@ async function describeImage(imageUrl: string, context?: string): Promise<ImageD
             fullPrompt += `\n\n## Context from the article\n\nThe surrounding text discusses:\n"${context}"\n\nUse this context to make your description more relevant and connected to the article's discussion.`;
         }
 
-        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
-            () => model.generateContent([
-                {
-                    inlineData: {
-                        mimeType: imageData.mimeType,
-                        data: imageData.data,
-                    },
-                },
-                fullPrompt,
-            ]),
+            async () => generateText({
+                model: geminiFlashModel,
+                messages: [{
+                    role: 'user',
+                    content: [
+                        {
+                            type: 'image',
+                            image: `data:${imageData.mimeType};base64,${imageData.data}`,
+                        },
+                        {
+                            type: 'text',
+                            text: fullPrompt,
+                        },
+                    ],
+                }],
+            }),
             'describe image'
         );
-        const response = result.response.text().trim();
+        const response = result.text.trim();
 
         // If AI determined this is a stock/decorative image, skip it
         let descriptionResult: ImageDescriptionResult;
@@ -185,13 +188,8 @@ function extractContextForImage(content: string, imageUrl: string, charsBefore =
 }
 
 export async function processImagesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiTextClient) {
-        console.log(chalk.yellow('Skipping image processing (no GEMINI_API_KEY)'));
-        return content;
-    }
-
     const cacheInfo = argv['cache-images'] ? ' (cache enabled)' : '';
-    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini (concurrency: ${GEMINI_CONCURRENCY})${cacheInfo}...`));
+    console.log(chalk.blue(`Processing ${content.allImages.length} images with Gemini 3 Flash (concurrency: ${GEMINI_CONCURRENCY})${cacheInfo}...`));
 
     const imageDescriptions = new Map<string, string>();
     let completed = 0;
@@ -211,7 +209,7 @@ export async function processImagesInContent(content: ExtractedContent): Promise
 
     // Process images in parallel with concurrency limit
     const descriptionPromises = content.allImages.map((imgUrl) =>
-        geminiLimit(async () => {
+        aiLimit(async () => {
             // Extract context from the chapter where this image appears
             const chapterContent = imageToChapterContent.get(imgUrl);
             const context = chapterContent ? extractContextForImage(chapterContent, imgUrl) : undefined;
