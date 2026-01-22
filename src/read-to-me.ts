@@ -5,6 +5,7 @@ import { GoogleGenAI } from '@google/genai';
 import { Readability } from '@mozilla/readability';
 import chalk from 'chalk';
 import crypto from 'crypto';
+import { XMLParser } from 'fast-xml-parser';
 import { parseHTML } from 'linkedom';
 import path from 'path';
 import pLimit from 'p-limit';
@@ -203,15 +204,6 @@ function escapeXml(text: string): string {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&apos;');
-}
-
-function unescapeXml(text: string): string {
-    return text
-        .replace(/&apos;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
 }
 
 function escapeMetadata(text: string): string {
@@ -2228,49 +2220,54 @@ async function updateMasterFeed(masterFeedUrl: string, newEpisode: EpisodeData):
 }
 
 function parseEpisodesFromFeed(feedXml: string): EpisodeData[] {
+    const parser = new XMLParser({
+        ignoreAttributes: false,
+        attributeNamePrefix: '@_',
+        // Handle namespaced tags like itunes:author, psc:chapter
+        removeNSPrefix: false,
+        isArray: (name) => {
+            // Ensure items and chapters are always arrays even if there's only one
+            return name === 'item' || name === 'psc:chapter';
+        },
+    });
+
+    const parsed = parser.parse(feedXml);
+    const channel = parsed?.rss?.channel;
+    if (!channel) return [];
+
+    const items = channel.item || [];
     const episodes: EpisodeData[] = [];
 
-    // Parse <item> elements from the feed
-    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
-    let match;
-
-    while ((match = itemRegex.exec(feedXml)) !== null) {
-        const itemXml = match[1];
-
-        const getTag = (tag: string): string => {
-            const tagMatch = itemXml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
-            return tagMatch ? tagMatch[1].trim() : '';
-        };
-
-        const getAttr = (tag: string, attr: string): string => {
-            const tagMatch = itemXml.match(new RegExp(`<${tag}[^>]*${attr}="([^"]*)"`, 'i'));
-            return tagMatch ? tagMatch[1] : '';
-        };
-
+    for (const item of items) {
         // Parse enclosure attributes
-        const enclosureMatch = itemXml.match(/<enclosure[^>]*url="([^"]*)"[^>]*length="(\d+)"/);
+        const enclosure = item.enclosure || {};
+        const audioUrl = enclosure['@_url'] || '';
+        const audioSizeBytes = parseInt(enclosure['@_length'] || '0', 10);
 
-        // Parse chapters
+        // Parse chapters from psc:chapters
         const chapters: Array<{ title: string; startMs: number }> = [];
-        const chapterRegex = /<psc:chapter[^>]*start="([^"]*)"[^>]*title="([^"]*)"/g;
-        let chapterMatch;
-        while ((chapterMatch = chapterRegex.exec(itemXml)) !== null) {
+        const pscChapters = item['psc:chapters']?.['psc:chapter'] || [];
+        for (const chapter of pscChapters) {
             chapters.push({
-                title: unescapeXml(chapterMatch[2]),
-                startMs: parseTimeToMs(chapterMatch[1]),
+                title: chapter['@_title'] || '',
+                startMs: parseTimeToMs(chapter['@_start'] || '0:00:00'),
             });
         }
 
+        // Get itunes:image href
+        const itunesImage = item['itunes:image'] || {};
+        const thumbnailUrl = itunesImage['@_href'] || '';
+
         episodes.push({
-            title: unescapeXml(getTag('title')),
-            author: getTag('itunes:author') || 'Read To Me',
-            summary: unescapeXml(getTag('description')),
-            sourceUrl: getTag('link'),
-            audioUrl: enclosureMatch ? enclosureMatch[1] : '',
-            thumbnailUrl: getAttr('itunes:image', 'href'),
-            audioSizeBytes: enclosureMatch ? parseInt(enclosureMatch[2], 10) : 0,
-            durationMs: parseTimeToMs(getTag('itunes:duration')),
-            pubDate: getTag('pubDate'),
+            title: item.title || '',
+            author: item['itunes:author'] || 'Read To Me',
+            summary: item.description || '',
+            sourceUrl: item.link || '',
+            audioUrl,
+            thumbnailUrl,
+            audioSizeBytes,
+            durationMs: parseTimeToMs(item['itunes:duration'] || '0:00:00'),
+            pubDate: item.pubDate || '',
             chapters,
         });
     }
