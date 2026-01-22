@@ -35,6 +35,7 @@ const THUMBNAIL_TAG_COLOR = '#FFFFFF';
 const MD_IMAGE_REGEX = /!\[.*?\]\(([^)]+)\)/g;
 
 const IMAGE_CACHE_DIR = path.join(process.cwd(), '.cache', 'read-to-me', 'images');
+const THUMBNAIL_CACHE_DIR = path.join(process.cwd(), '.cache', 'read-to-me', 'thumbnails');
 const IMAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 
 const TTS_OPTIMIZER_PROMPT_PATH = path.join(import.meta.dir, 'prompts', 'tts-optimizer.md');
@@ -438,6 +439,80 @@ async function saveImageToCache(imageUrl: string, result: ImageDescriptionResult
         await Bun.write(cachePath, JSON.stringify(entry, null, 2));
     } catch (err) {
         console.log(chalk.yellow(`  Warning: Failed to cache image result: ${(err as Error).message}`));
+    }
+}
+
+// =============================================================================
+// Thumbnail Caching
+// =============================================================================
+
+interface ThumbnailCacheMetadata {
+    expiresAt: number;
+    sourceUrl: string;
+    contentHash: string;
+}
+
+/**
+ * Generate a cache key for the thumbnail based on source URL and content hash.
+ * The content hash includes the title and first chapter to detect content changes.
+ */
+function getThumbnailCacheKey(sourceUrl: string, content: ExtractedContent): string {
+    const urlHash = crypto.createHash('sha256').update(sourceUrl).digest('hex').slice(0, 32);
+    // Include title and first chapter content in hash to detect meaningful content changes
+    const contentToHash = `${content.title}|${content.chapters[0]?.content.slice(0, 200) || ''}`;
+    const contentHash = crypto.createHash('sha256').update(contentToHash).digest('hex').slice(0, 16);
+    return `${urlHash}_${contentHash}`;
+}
+
+async function getThumbnailFromCache(sourceUrl: string, content: ExtractedContent): Promise<Buffer | null> {
+    if (!argv['cache-images']) return null;
+
+    const cacheKey = getThumbnailCacheKey(sourceUrl, content);
+    const imagePath = path.join(THUMBNAIL_CACHE_DIR, `${cacheKey}.png`);
+    const metadataPath = path.join(THUMBNAIL_CACHE_DIR, `${cacheKey}.json`);
+
+    try {
+        const imageFile = Bun.file(imagePath);
+        const metadataFile = Bun.file(metadataPath);
+
+        if (!await imageFile.exists() || !await metadataFile.exists()) return null;
+
+        const metadata: ThumbnailCacheMetadata = await metadataFile.json();
+
+        // Check if cache entry has expired
+        if (Date.now() > metadata.expiresAt) {
+            return null;
+        }
+
+        return Buffer.from(await imageFile.arrayBuffer());
+    } catch {
+        return null;
+    }
+}
+
+async function saveThumbnailToCache(sourceUrl: string, content: ExtractedContent, thumbnail: Buffer): Promise<void> {
+    if (!argv['cache-images']) return;
+
+    const cacheKey = getThumbnailCacheKey(sourceUrl, content);
+    const imagePath = path.join(THUMBNAIL_CACHE_DIR, `${cacheKey}.png`);
+    const metadataPath = path.join(THUMBNAIL_CACHE_DIR, `${cacheKey}.json`);
+
+    const contentToHash = `${content.title}|${content.chapters[0]?.content.slice(0, 200) || ''}`;
+    const contentHash = crypto.createHash('sha256').update(contentToHash).digest('hex').slice(0, 16);
+
+    const metadata: ThumbnailCacheMetadata = {
+        expiresAt: Date.now() + IMAGE_CACHE_TTL_MS,
+        sourceUrl,
+        contentHash,
+    };
+
+    try {
+        // Ensure cache directory exists
+        await Bun.write(path.join(THUMBNAIL_CACHE_DIR, '.gitkeep'), '');
+        await Bun.write(imagePath, thumbnail);
+        await Bun.write(metadataPath, JSON.stringify(metadata, null, 2));
+    } catch (err) {
+        console.log(chalk.yellow(`  Warning: Failed to cache thumbnail: ${(err as Error).message}`));
     }
 }
 
@@ -1658,6 +1733,14 @@ createScript(async () => {
 // =============================================================================
 
 async function generateThumbnail(content: ExtractedContent, outputPath: string, sourceUrl: string): Promise<void> {
+    // Check thumbnail cache first
+    const cachedThumbnail = await getThumbnailFromCache(sourceUrl, content);
+    if (cachedThumbnail) {
+        console.log(chalk.gray('  Using cached thumbnail'));
+        await Bun.write(outputPath, cachedThumbnail);
+        return;
+    }
+
     let baseImage: Buffer | null = null;
     let faviconBuffer: Buffer | null = null;
 
@@ -1869,6 +1952,8 @@ Article context: ${contentPreview}`;
             .toBuffer();
 
         await Bun.write(outputPath, thumbnail);
+        // Save to cache for future runs
+        await saveThumbnailToCache(sourceUrl, content, thumbnail);
     } else {
         // Generate a placeholder thumbnail with title
         console.log(chalk.gray('  Generating placeholder thumbnail...'));
@@ -1977,6 +2062,8 @@ Article context: ${contentPreview}`;
         }
 
         await Bun.write(outputPath, thumbnail);
+        // Save to cache for future runs
+        await saveThumbnailToCache(sourceUrl, content, thumbnail);
     }
 }
 
