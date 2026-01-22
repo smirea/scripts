@@ -39,7 +39,7 @@ import { uploadToGCS } from './upload';
 
 const fetchLimit = pLimit(FETCH_CONCURRENCY);
 
-createScript(async () => {
+void createScript(async () => {
     const url = argv.url as string;
     const voice = resolveVoice(argv.voice);
     const dialect = argv.dialect as EnglishDialect;
@@ -272,7 +272,7 @@ createScript(async () => {
         const thumbnailUrl = `${GCS_BASE_URL}/${gcsPath}/thumbnail.png`;
 
         // Get audio file size for enclosure
-        const audioStats = await Bun.file(combinedPath).size;
+        const audioStats = Bun.file(combinedPath).size;
 
         const rssFeed = generateRssFeed({
             title: content.title,

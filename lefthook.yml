@@ -3,4 +3,5 @@ pre-commit:
   commands:
     oxlint:
       glob: "*.{js,ts,jsx,tsx}"
-      run: bunx oxlint {staged_files}
+      run: bunx oxlint --fix --type-aware {staged_files}
+      stage_fixed: true

@@ -2,7 +2,7 @@
     "name": "scripts",
     "private": true,
     "scripts": {
-        "lint": "oxlint --fix",
+        "lint": "oxlint --fix --type-aware",
         "test": "bun test",
         "dev": "bun --watch src/index.ts"
     },
@@ -30,6 +30,7 @@
         "yargs": "^18.0.0"
     },
     "devDependencies": {
-        "oxlint": "^1.41.0"
+        "oxlint": "^1.41.0",
+        "oxlint-tsgolint": "^0.11.1"
     }
 }

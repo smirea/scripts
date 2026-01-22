@@ -102,7 +102,7 @@ export async function enhanceContentForTTS(content: ExtractedContent): Promise<E
     // Sort by original index to maintain order
     const enhancedChapters = results
         .sort((a, b) => a.originalIndex - b.originalIndex)
-        .map(({ originalIndex, ...chapter }) => chapter);
+        .map(({ originalIndex: _, ...chapter }) => chapter);
 
     const enhancedCount = enhancedChapters.filter(c => c.content.includes('<speak>')).length;
     console.log(chalk.green(`  Enhanced ${enhancedCount}/${total} chapters with SSML`));

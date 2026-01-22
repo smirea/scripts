@@ -13,7 +13,7 @@ export async function withRetry<T>(
     return pRetry(fn, {
         retries,
         onFailedAttempt: (error) => {
-            const errMessage = (error as unknown as Error).message || String(error);
+            const errMessage = error.message;
             console.log(chalk.yellow(`  Retry ${error.attemptNumber}/${retries + 1} for ${label}: ${errMessage}`));
         },
     });
