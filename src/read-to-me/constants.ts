@@ -1,4 +1,5 @@
 import path from 'path';
+import { env, GCS_BASE_URL as _GCS_BASE_URL } from '../config';
 
 // Concurrency limits
 export const GEMINI_CONCURRENCY = 5;
@@ -6,8 +7,8 @@ export const TTS_CONCURRENCY = 5;
 export const FETCH_CONCURRENCY = 10;
 
 // GCS configuration
-export const GCS_BUCKET = process.env.GCS_BUCKET || 'stefan-rss-feed';
-export const GCS_BASE_URL = process.env.GCS_BASE_URL || `https://storage.googleapis.com/${GCS_BUCKET}`;
+export const GCS_BUCKET = env.GCS_BUCKET;
+export const GCS_BASE_URL = _GCS_BASE_URL;
 
 // Retry configuration
 export const API_RETRY_COUNT = 1;

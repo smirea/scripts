@@ -16,6 +16,7 @@
         "@types/sharp": "^0.32.0",
         "@types/turndown": "^5.0.6",
         "@types/yargs": "^17.0.35",
+        "envsafe-lite": "^1.0.5",
         "fast-xml-parser": "^5.3.3",
         "kill-port-process": "^3.2.1",
         "lefthook": "^2.0.15",
