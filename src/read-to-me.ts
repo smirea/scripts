@@ -73,6 +73,14 @@ const VOICE_GENDERS: Record<Voice, 'male' | 'female'> = {
     Leda: 'female', Orus: 'male', Puck: 'male', Zephyr: 'female',
 };
 
+/**
+ * Build narrator attribution string.
+ * Format: "Read by Google Chirp 3: Zephyr en-GB"
+ */
+function buildNarratorAttribution(voice: Voice, dialect: EnglishDialect): string {
+    return `Read by Google Chirp 3: ${voice} ${dialect}`;
+}
+
 const argv = yargs(hideBin(process.argv))
     .scriptName('read-to-me')
     .usage('$0 <url>', 'Convert a webpage to audio', (yargs) => {
@@ -1306,7 +1314,11 @@ createScript(async () => {
 
     // Step 3.5: Generate a summary for RSS feed and metadata
     console.log();
-    const summary = await generateSummary(content);
+    const baseSummary = await generateSummary(content);
+
+    // Build narrator attribution and prepend to summary
+    const narrator = buildNarratorAttribution(voice, dialect);
+    const summary = `${narrator}. ${baseSummary}`;
 
     // Update summary after processing
     console.log();
@@ -1380,7 +1392,7 @@ createScript(async () => {
     });
 
     // Generate ffmetadata file for chapters
-    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime, summary);
+    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime, summary, narrator);
     const ffmetadataPath = path.join(outputDir, 'ffmetadata.txt');
     await Bun.write(ffmetadataPath, ffmetadataContent);
 
@@ -1409,6 +1421,7 @@ createScript(async () => {
     await Bun.write(metadataPath, JSON.stringify({
         title: content.title,
         author: content.byline,
+        narrator,
         summary,
         voice,
         dialect,
@@ -1802,6 +1815,7 @@ function generateFfmetadata(
     chapters: ChapterMetadata[],
     totalDurationMs: number,
     summary: string,
+    narrator: string,
 ): string {
     // Generate ffmetadata format for ffmpeg chapter embedding
     // See: https://ffmpeg.org/ffmpeg-formats.html#Metadata-1
@@ -1810,6 +1824,7 @@ function generateFfmetadata(
         metadata += `artist=${escapeMetadata(content.byline)}\n`;
     }
     metadata += `album=Read To Me\n`;
+    metadata += `composer=${escapeMetadata(narrator)}\n`;
     metadata += `description=${escapeMetadata(summary)}\n`;
     metadata += `comment=${escapeMetadata(summary)}\n`;
     metadata += `genre=Podcast\n`;
