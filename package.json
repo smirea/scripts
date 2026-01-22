@@ -30,6 +30,7 @@
         "linkedom": "^0.18.12",
         "lodash": "^4.17.23",
         "p-limit": "^7.2.0",
+        "p-retry": "^7.1.1",
         "prettier": "^3.8.1",
         "sharp": "^0.34.5",
         "turndown": "^7.2.2",

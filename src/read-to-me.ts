@@ -9,6 +9,7 @@ import { XMLParser } from 'fast-xml-parser';
 import { parseHTML } from 'linkedom';
 import path from 'path';
 import pLimit from 'p-limit';
+import pRetry from 'p-retry';
 import sharp from 'sharp';
 import TurndownService from 'turndown';
 import yargs from 'yargs';
@@ -25,8 +26,10 @@ const TTS_CONCURRENCY = 5;
 const FETCH_CONCURRENCY = 10;
 
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
-const GCS_BUCKET = 'stefan-rss-feed';
-const GCS_BASE_URL = `https://storage.googleapis.com/${GCS_BUCKET}`;
+const GCS_BUCKET = process.env.GCS_BUCKET || 'stefan-rss-feed';
+const GCS_BASE_URL = process.env.GCS_BASE_URL || `https://storage.googleapis.com/${GCS_BUCKET}`;
+
+const API_RETRY_COUNT = 1;
 
 const THUMBNAIL_SIZE = 1400;
 const THUMBNAIL_BORDER_WIDTH = 40;
@@ -54,10 +57,10 @@ const fetchLimit = pLimit(FETCH_CONCURRENCY);
 // =============================================================================
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-/** Standard Gemini client for text/image analysis */
-const geminiClient = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
-/** New Gemini client for image generation (Gemini 2.5 Flash Image) */
-const geminiImageClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+/** Gemini client for text/image analysis (vision, summarization, content filtering) */
+const geminiTextClient = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+/** Gemini client for image generation (Gemini 2.5 Flash Image) */
+const geminiImageGenClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const ttsClient = new TextToSpeechClient();
 
 // =============================================================================
@@ -230,6 +233,21 @@ function parseTimeToMs(timeStr: string): number {
 
 async function fetchWithUA(url: string): Promise<Response> {
     return fetch(url, { headers: { 'User-Agent': USER_AGENT } });
+}
+
+/**
+ * Wrap an async function with retry logic.
+ * Retries once on failure before throwing.
+ */
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+    return pRetry(fn, {
+        retries: API_RETRY_COUNT,
+        onFailedAttempt: (error) => {
+            // FailedAttemptError extends Error, so we can access message via prototype
+            const errMessage = (error as unknown as Error).message || String(error);
+            console.log(chalk.yellow(`  Retry ${error.attemptNumber}/${API_RETRY_COUNT + 1} for ${label}: ${errMessage}`));
+        },
+    });
 }
 
 function extractImagesFromMarkdown(content: string): string[] {
@@ -580,7 +598,7 @@ async function fetchFavicon(sourceUrl: string): Promise<Buffer | null> {
 }
 
 async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWithCache> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         return { result: { type: 'skipped', reason: 'no_api_key' }, fromCache: false };
     }
 
@@ -596,16 +614,19 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWi
     }
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            {
-                inlineData: {
-                    mimeType: imageData.mimeType,
-                    data: imageData.data,
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await withRetry(
+            () => model.generateContent([
+                {
+                    inlineData: {
+                        mimeType: imageData.mimeType,
+                        data: imageData.data,
+                    },
                 },
-            },
-            IMAGE_DESCRIPTION_PROMPT,
-        ]);
+                IMAGE_DESCRIPTION_PROMPT,
+            ]),
+            'describe image'
+        );
         const response = result.response.text().trim();
 
         // If AI determined this is a stock/decorative image, skip it
@@ -627,15 +648,16 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWi
 }
 
 async function describeTable(tableHtml: string): Promise<string | null> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('  Skipping table (no GEMINI_API_KEY)'));
         return null;
     }
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            `You are helping convert an article to audio format. Analyze this HTML table and provide a concise narrative explanation that captures the key insights and conclusions the table conveys.
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await withRetry(
+            () => model.generateContent([
+                `You are helping convert an article to audio format. Analyze this HTML table and provide a concise narrative explanation that captures the key insights and conclusions the table conveys.
 
 Your explanation should:
 - Be 2-4 sentences long
@@ -650,7 +672,9 @@ Do NOT:
 
 HTML TABLE:
 ${tableHtml}`,
-        ]);
+            ]),
+            'describe table'
+        );
         return result.response.text().trim();
     } catch (err) {
         console.log(chalk.yellow(`  Error describing table: ${(err as Error).message}`));
@@ -659,7 +683,7 @@ ${tableHtml}`,
 }
 
 async function processTablesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping table processing (no GEMINI_API_KEY)'));
         return content;
     }
@@ -707,7 +731,7 @@ async function processTablesInContent(content: ExtractedContent): Promise<Extrac
 }
 
 async function processImagesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping image processing (no GEMINI_API_KEY)'));
         return content;
     }
@@ -773,8 +797,8 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
     return { ...content, chapters: updatedChapters };
 }
 
-async function filterChapterContent(chapter: Chapter, chapterIndex: number, totalChapters: number): Promise<Chapter> {
-    if (!geminiClient) {
+async function filterChapterContent(chapter: Chapter): Promise<Chapter> {
+    if (!geminiTextClient) {
         return chapter;
     }
 
@@ -784,9 +808,10 @@ async function filterChapterContent(chapter: Chapter, chapterIndex: number, tota
     }
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            `You are a content filter for an article-to-audio converter. Your task is to clean up the following article section by removing content that is NOT part of the main article.
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await withRetry(
+            () => model.generateContent([
+                `You are a content filter for an article-to-audio converter. Your task is to clean up the following article section by removing content that is NOT part of the main article.
 
 REMOVE these types of content:
 - Advertisements and promotional content
@@ -817,7 +842,9 @@ CONTENT TO FILTER:
 ---
 ${chapter.content}
 ---`,
-        ]);
+            ]),
+            'filter chapter'
+        );
 
         let filteredContent = result.response.text().trim();
 
@@ -844,7 +871,7 @@ ${chapter.content}
 }
 
 async function suggestChapters(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping AI chapter suggestion (no GEMINI_API_KEY)'));
         return content;
     }
@@ -861,9 +888,10 @@ async function suggestChapters(content: ExtractedContent): Promise<ExtractedCont
     console.log(chalk.blue('Analyzing content for chapter suggestions...'));
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            `You are analyzing an article to suggest logical chapter divisions for an audio version.
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await withRetry(
+            () => model.generateContent([
+                `You are analyzing an article to suggest logical chapter divisions for an audio version.
 
 Your task is to identify natural topic breaks where chapters should begin. A good chapter break occurs when:
 - The topic shifts significantly
@@ -898,7 +926,9 @@ CONTENT TO ANALYZE:
 ---
 ${fullContent}
 ---`,
-        ]);
+            ]),
+            'suggest chapters'
+        );
 
         let responseText = result.response.text().trim();
         // Remove markdown code block wrapping if present
@@ -962,18 +992,19 @@ ${fullContent}
 }
 
 async function generateSummary(content: ExtractedContent): Promise<string> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         return `Audio version of "${content.title}"`;
     }
 
     console.log(chalk.blue('Generating article summary...'));
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const fullContent = content.chapters.map(c => c.content).join('\n\n').slice(0, 4000);
 
-        const result = await model.generateContent([
-            `Generate a brief summary (2-3 sentences, max 200 characters) for a podcast episode based on this article.
+        const result = await withRetry(
+            () => model.generateContent([
+                `Generate a brief summary (2-3 sentences, max 200 characters) for a podcast episode based on this article.
 The summary should capture the main topic and key insights, suitable for an RSS feed description.
 Write in third person and avoid phrases like "This article" or "The author".
 
@@ -984,7 +1015,9 @@ Content:
 ${fullContent}
 
 Respond with ONLY the summary text, no quotes or other formatting.`,
-        ]);
+            ]),
+            'generate summary'
+        );
 
         const summary = result.response.text().trim();
         console.log(chalk.green(`  Summary: ${summary.slice(0, 80)}...`));
@@ -1007,18 +1040,20 @@ async function enhanceChapterForTTS(
     chapterContent: string,
     ttsPrompt: string,
     chapterIndex: number,
-    totalChapters: number,
 ): Promise<string> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         return chapterContent;
     }
 
     try {
-        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent([
-            ttsPrompt,
-            `\n\n**Text to optimize:**\n\n${chapterContent}`,
-        ]);
+        const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await withRetry(
+            () => model.generateContent([
+                ttsPrompt,
+                `\n\n**Text to optimize:**\n\n${chapterContent}`,
+            ]),
+            'enhance for TTS'
+        );
 
         let ssmlOutput = result.response.text().trim();
 
@@ -1039,7 +1074,7 @@ async function enhanceChapterForTTS(
 }
 
 async function enhanceContentForTTS(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping speech enhancement (no GEMINI_API_KEY)'));
         return content;
     }
@@ -1066,7 +1101,7 @@ async function enhanceContentForTTS(content: ExtractedContent): Promise<Extracte
     // Process chapters in parallel with concurrency limit
     const enhancePromises = content.chapters.map((chapter, i) =>
         geminiLimit(async () => {
-            const enhancedContent = await enhanceChapterForTTS(chapter.content, ttsPrompt, i, total);
+            const enhancedContent = await enhanceChapterForTTS(chapter.content, ttsPrompt, i);
             completed++;
 
             const isEnhanced = enhancedContent.includes('<speak>');
@@ -1094,7 +1129,7 @@ async function enhanceContentForTTS(content: ExtractedContent): Promise<Extracte
 }
 
 async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!geminiClient) {
+    if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
         return content;
     }
@@ -1107,7 +1142,7 @@ async function filterContentWithAI(content: ExtractedContent): Promise<Extracted
     // Process chapters in parallel with concurrency limit
     const filterPromises = content.chapters.map((chapter, i) =>
         geminiLimit(async () => {
-            const filteredChapter = await filterChapterContent(chapter, i, total);
+            const filteredChapter = await filterChapterContent(chapter);
             completed++;
 
             const hasContent = filteredChapter.content.trim().length > 0;
@@ -1312,17 +1347,20 @@ async function synthesizeChapter(
             // Determine if this chunk is SSML or plain text
             const chunkIsSSML = chunk.startsWith('<speak>');
 
-            const [response] = await ttsClient.synthesizeSpeech({
-                input: chunkIsSSML ? { ssml: chunk } : { text: chunk },
-                voice: {
-                    languageCode: dialect,
-                    name: `${dialect}-Chirp3-HD-${voice}`,
-                },
-                audioConfig: {
-                    audioEncoding: 'MP3',
-                    speakingRate: 1.0,
-                },
-            });
+            const [response] = await withRetry(
+                () => ttsClient.synthesizeSpeech({
+                    input: chunkIsSSML ? { ssml: chunk } : { text: chunk },
+                    voice: {
+                        languageCode: dialect,
+                        name: `${dialect}-Chirp3-HD-${voice}`,
+                    },
+                    audioConfig: {
+                        audioEncoding: 'MP3',
+                        speakingRate: 1.0,
+                    },
+                }),
+                'TTS synthesis'
+            );
 
             return {
                 index: chunkIndex,
@@ -1486,13 +1524,11 @@ createScript(async () => {
     console.log(`  Output directory: ${outputDir}`);
 
     // Save individual chapter MP3s
-    const chapterFiles: string[] = [];
     for (let i = 0; i < chapterAudios.length; i++) {
         const audio = chapterAudios[i];
         const filename = `${String(i + 1).padStart(2, '0')}-${audio.title.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}.mp3`;
         const filepath = path.join(outputDir, filename);
         await Bun.write(filepath, audio.audioBuffer);
-        chapterFiles.push(filepath);
         console.log(chalk.green(`  ✓ ${filename}`));
     }
 
@@ -1621,20 +1657,18 @@ createScript(async () => {
         console.log(chalk.gray(`  Uploading audio file...`));
         const audioUploadResult = await Bun.$`gcloud storage cp ${combinedPath} ${audioGcsPath}`.quiet();
         if (audioUploadResult.exitCode !== 0) {
-            console.log(chalk.yellow(`  ⚠ Failed to upload audio file`));
-        } else {
-            console.log(chalk.green(`  ✓ ${outputBase}.m4a`));
+            throw new Error(`Failed to upload audio file to ${audioGcsPath}`);
         }
+        console.log(chalk.green(`  ✓ ${outputBase}.m4a`));
 
         // Upload thumbnail
         const thumbnailGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/thumbnail.png`;
         console.log(chalk.gray(`  Uploading thumbnail...`));
         const thumbnailUploadResult = await Bun.$`gcloud storage cp ${thumbnailPath} ${thumbnailGcsPath}`.quiet();
         if (thumbnailUploadResult.exitCode !== 0) {
-            console.log(chalk.yellow(`  ⚠ Failed to upload thumbnail`));
-        } else {
-            console.log(chalk.green(`  ✓ thumbnail.png`));
+            throw new Error(`Failed to upload thumbnail to ${thumbnailGcsPath}`);
         }
+        console.log(chalk.green(`  ✓ thumbnail.png`));
 
         // Generate and upload RSS feed
         console.log(chalk.gray(`  Generating RSS feed...`));
@@ -1667,13 +1701,15 @@ createScript(async () => {
         const rssGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/feed.xml`;
         const rssUploadResult = await Bun.$`gcloud storage cp ${rssFeedPath} ${rssGcsPath}`.quiet();
         if (rssUploadResult.exitCode !== 0) {
-            console.log(chalk.yellow(`  ⚠ Failed to upload RSS feed`));
-        } else {
-            console.log(chalk.green(`  ✓ feed.xml (uploaded)`));
+            throw new Error(`Failed to upload RSS feed to ${rssGcsPath}`);
         }
+        console.log(chalk.green(`  ✓ feed.xml (uploaded)`));
 
         // Set correct content type for RSS feed
-        await Bun.$`gcloud storage objects update ${rssGcsPath} --content-type=application/rss+xml`.quiet();
+        const contentTypeResult = await Bun.$`gcloud storage objects update ${rssGcsPath} --content-type=application/rss+xml`.quiet();
+        if (contentTypeResult.exitCode !== 0) {
+            throw new Error(`Failed to set content type for ${rssGcsPath}`);
+        }
 
         // Update master feed with all episodes
         console.log(chalk.gray(`  Updating master feed...`));
@@ -1702,11 +1738,13 @@ createScript(async () => {
 
         const masterUploadResult = await Bun.$`gcloud storage cp ${masterFeedPath} ${masterFeedGcsPath}`.quiet();
         if (masterUploadResult.exitCode !== 0) {
-            console.log(chalk.yellow(`  ⚠ Failed to upload master feed`));
-        } else {
-            await Bun.$`gcloud storage objects update ${masterFeedGcsPath} --content-type=application/rss+xml`.quiet();
-            console.log(chalk.green(`  ✓ master feed.xml (uploaded)`));
+            throw new Error(`Failed to upload master feed to ${masterFeedGcsPath}`);
         }
+        const masterContentTypeResult = await Bun.$`gcloud storage objects update ${masterFeedGcsPath} --content-type=application/rss+xml`.quiet();
+        if (masterContentTypeResult.exitCode !== 0) {
+            throw new Error(`Failed to set content type for ${masterFeedGcsPath}`);
+        }
+        console.log(chalk.green(`  ✓ master feed.xml (uploaded)`));
 
         podcastUrl = masterFeedUrl;
     }
@@ -1728,6 +1766,67 @@ createScript(async () => {
 // Thumbnail Generation
 // =============================================================================
 
+const FAVICON_SIZE = 64;
+const FAVICON_BORDER_WIDTH = 4;
+const FAVICON_PADDING = 15;
+
+/**
+ * Create a favicon overlay with a gradient border for compositing onto thumbnails.
+ * Returns the overlay options for sharp.composite() or null if favicon is not available.
+ */
+async function createFaviconOverlay(faviconBuffer: Buffer | null): Promise<sharp.OverlayOptions | null> {
+    if (!faviconBuffer) return null;
+
+    const faviconTotalSize = FAVICON_SIZE + FAVICON_BORDER_WIDTH * 2;
+
+    // Create favicon with blue border and rounded corners
+    const processedFavicon = await sharp(faviconBuffer)
+        .resize(FAVICON_SIZE, FAVICON_SIZE, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+        .png()
+        .toBuffer();
+
+    // Create SVG container with blue border and smooth rounded corners
+    const faviconContainerSvg = Buffer.from(`
+        <svg width="${faviconTotalSize}" height="${faviconTotalSize}" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <linearGradient id="faviconBorderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                    <stop offset="0%" style="stop-color:#1E90FF;stop-opacity:1" />
+                    <stop offset="50%" style="stop-color:#4169E1;stop-opacity:1" />
+                    <stop offset="100%" style="stop-color:#1E90FF;stop-opacity:1" />
+                </linearGradient>
+            </defs>
+            <rect x="0" y="0" width="${faviconTotalSize}" height="${faviconTotalSize}" rx="12" ry="12" fill="url(#faviconBorderGradient)"/>
+        </svg>
+    `);
+
+    // Composite the favicon onto its container
+    const faviconWithBorder = await sharp(faviconContainerSvg)
+        .composite([
+            {
+                input: await sharp(processedFavicon)
+                    .extend({
+                        top: 0,
+                        bottom: 0,
+                        left: 0,
+                        right: 0,
+                        background: { r: 0, g: 0, b: 0, alpha: 0 }
+                    })
+                    .toBuffer(),
+                top: FAVICON_BORDER_WIDTH,
+                left: FAVICON_BORDER_WIDTH,
+            },
+        ])
+        .png()
+        .toBuffer();
+
+    // Position: bottom-right, inside the main border
+    return {
+        input: faviconWithBorder,
+        top: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - FAVICON_PADDING,
+        left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - FAVICON_PADDING,
+    };
+}
+
 async function generateThumbnail(content: ExtractedContent, outputPath: string, sourceUrl: string): Promise<void> {
     // Check thumbnail cache first
     const cachedThumbnail = await getThumbnailFromCache(sourceUrl, content);
@@ -1744,7 +1843,7 @@ async function generateThumbnail(content: ExtractedContent, outputPath: string, 
     const faviconPromise = fetchFavicon(sourceUrl).catch(() => null);
 
     // Try to generate an AI thumbnail using Gemini 2.5 Flash Image (nano-banana)
-    if (geminiImageClient) {
+    if (geminiImageGenClient) {
         console.log(chalk.gray('  Generating AI thumbnail with Gemini...'));
         try {
             // Create a prompt based on the article title and content
@@ -1757,13 +1856,16 @@ Use bold colors and an eye-catching composition that captures the essence of the
 Do NOT include any text in the image.
 Article context: ${contentPreview}`;
 
-            const response = await geminiImageClient.models.generateContent({
-                model: 'gemini-2.5-flash-image',
-                contents: prompt,
-                config: {
-                    responseModalities: ['IMAGE'],
-                },
-            });
+            const response = await withRetry(
+                () => geminiImageGenClient.models.generateContent({
+                    model: 'gemini-2.5-flash-image',
+                    contents: prompt,
+                    config: {
+                        responseModalities: ['IMAGE'],
+                    },
+                }),
+                'generate thumbnail'
+            );
 
             // Extract the generated image
             if (response.candidates?.[0]?.content?.parts) {
@@ -1781,50 +1883,50 @@ Article context: ${contentPreview}`;
     }
 
     // Fall back to using an article image if AI generation failed
-    if (!baseImage && content.allImages.length > 0 && geminiClient) {
+    if (!baseImage && content.allImages.length > 0 && geminiTextClient) {
         console.log(chalk.gray('  Falling back to article image (rating with AI)...'));
         try {
-            const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+            const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
             const imagesToRate = content.allImages.slice(0, 5);
 
-            // Rate images in parallel with concurrency limit
+            // Rate images in parallel with concurrency limit, caching the fetched data
             const ratingPromises = imagesToRate.map((imgUrl) =>
                 geminiLimit(async () => {
                     const imageData = await fetchImageAsBase64(imgUrl);
-                    if (!imageData) return { imgUrl, score: -1 };
+                    if (!imageData) return { imgUrl, score: -1, imageData: null };
 
                     try {
-                        const result = await model.generateContent([
-                            {
-                                inlineData: {
-                                    mimeType: imageData.mimeType,
-                                    data: imageData.data,
+                        const result = await withRetry(
+                            () => model.generateContent([
+                                {
+                                    inlineData: {
+                                        mimeType: imageData.mimeType,
+                                        data: imageData.data,
+                                    },
                                 },
-                            },
-                            'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
-                        ]);
+                                'Rate this image from 0-10 for use as a podcast thumbnail. Consider: visual appeal, relevance, composition. Reply with just a number.',
+                            ]),
+                            'rate image'
+                        );
                         const score = parseInt(result.response.text().trim(), 10);
-                        return { imgUrl, score: isNaN(score) ? -1 : score };
+                        return { imgUrl, score: isNaN(score) ? -1 : score, imageData };
                     } catch {
-                        return { imgUrl, score: -1 };
+                        return { imgUrl, score: -1, imageData: null };
                     }
                 })
             );
 
             const ratings = await Promise.all(ratingPromises);
 
-            // Find the best rated image
+            // Find the best rated image (reuse cached imageData to avoid refetching)
             const bestRating = ratings.reduce((best, current) =>
                 current.score > best.score ? current : best,
-                { imgUrl: null as string | null, score: -1 }
+                { imgUrl: null as string | null, score: -1, imageData: null as { data: string; mimeType: string } | null }
             );
 
-            if (bestRating.imgUrl && bestRating.score >= 0) {
-                const imageData = await fetchImageAsBase64(bestRating.imgUrl);
-                if (imageData) {
-                    baseImage = Buffer.from(imageData.data, 'base64');
-                    console.log(chalk.gray(`  Using article image (score: ${bestRating.score}/10)`));
-                }
+            if (bestRating.imgUrl && bestRating.score >= 0 && bestRating.imageData) {
+                baseImage = Buffer.from(bestRating.imageData.data, 'base64');
+                console.log(chalk.gray(`  Using article image (score: ${bestRating.score}/10)`));
             }
         } catch (err) {
             console.log(chalk.yellow(`  Could not select image with AI: ${(err as Error).message}`));
@@ -1871,63 +1973,7 @@ Article context: ${contentPreview}`;
         `);
 
         // Prepare favicon composite if available
-        const faviconComposite: sharp.OverlayOptions[] = [];
-        if (faviconBuffer) {
-            const faviconSize = 64;
-            const faviconBorderWidth = 4;
-            const faviconTotalSize = faviconSize + faviconBorderWidth * 2;
-            const faviconPadding = 15;
-
-            // Create favicon with blue border and rounded corners
-            const processedFavicon = await sharp(faviconBuffer)
-                .resize(faviconSize, faviconSize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-                .png()
-                .toBuffer();
-
-            // Create SVG container with blue border and smooth rounded corners
-            const faviconContainerSvg = Buffer.from(`
-                <svg width="${faviconTotalSize}" height="${faviconTotalSize}" xmlns="http://www.w3.org/2000/svg">
-                    <defs>
-                        <linearGradient id="faviconBorderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#1E90FF;stop-opacity:1" />
-                            <stop offset="50%" style="stop-color:#4169E1;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#1E90FF;stop-opacity:1" />
-                        </linearGradient>
-                        <clipPath id="faviconClip">
-                            <rect x="${faviconBorderWidth}" y="${faviconBorderWidth}" width="${faviconSize}" height="${faviconSize}" rx="8" ry="8"/>
-                        </clipPath>
-                    </defs>
-                    <rect x="0" y="0" width="${faviconTotalSize}" height="${faviconTotalSize}" rx="12" ry="12" fill="url(#faviconBorderGradient)"/>
-                </svg>
-            `);
-
-            // Composite the favicon onto its container
-            const faviconWithBorder = await sharp(faviconContainerSvg)
-                .composite([
-                    {
-                        input: await sharp(processedFavicon)
-                            .extend({
-                                top: 0,
-                                bottom: 0,
-                                left: 0,
-                                right: 0,
-                                background: { r: 0, g: 0, b: 0, alpha: 0 }
-                            })
-                            .toBuffer(),
-                        top: faviconBorderWidth,
-                        left: faviconBorderWidth,
-                    },
-                ])
-                .png()
-                .toBuffer();
-
-            // Position: bottom-right, inside the main border
-            faviconComposite.push({
-                input: faviconWithBorder,
-                top: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
-                left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
-            });
-        }
+        const faviconOverlay = await createFaviconOverlay(faviconBuffer);
 
         // Create thumbnail: image first, then border overlay on top, then R2M tag, then favicon
         const thumbnail = await sharp(resizedImage)
@@ -1942,7 +1988,7 @@ Article context: ${contentPreview}`;
                     top: THUMBNAIL_BORDER_WIDTH + tagPadding,
                     left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - tagWidth - tagPadding,
                 },
-                ...faviconComposite,
+                ...(faviconOverlay ? [faviconOverlay] : []),
             ])
             .png()
             .toBuffer();
@@ -1990,72 +2036,12 @@ Article context: ${contentPreview}`;
         `;
 
         // Prepare favicon composite for placeholder if available
-        const placeholderFaviconComposite: sharp.OverlayOptions[] = [];
-        if (faviconBuffer) {
-            const faviconSize = 64;
-            const faviconBorderWidth = 4;
-            const faviconTotalSize = faviconSize + faviconBorderWidth * 2;
-            const faviconPadding = 15;
+        const placeholderFaviconOverlay = await createFaviconOverlay(faviconBuffer);
 
-            // Create favicon with blue border and rounded corners
-            const processedFavicon = await sharp(faviconBuffer)
-                .resize(faviconSize, faviconSize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
-                .png()
-                .toBuffer();
-
-            // Create SVG container with blue border and smooth rounded corners
-            const faviconContainerSvg = Buffer.from(`
-                <svg width="${faviconTotalSize}" height="${faviconTotalSize}" xmlns="http://www.w3.org/2000/svg">
-                    <defs>
-                        <linearGradient id="faviconBorderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%" style="stop-color:#1E90FF;stop-opacity:1" />
-                            <stop offset="50%" style="stop-color:#4169E1;stop-opacity:1" />
-                            <stop offset="100%" style="stop-color:#1E90FF;stop-opacity:1" />
-                        </linearGradient>
-                    </defs>
-                    <rect x="0" y="0" width="${faviconTotalSize}" height="${faviconTotalSize}" rx="12" ry="12" fill="url(#faviconBorderGradient)"/>
-                </svg>
-            `);
-
-            // Composite the favicon onto its container
-            const faviconWithBorder = await sharp(faviconContainerSvg)
-                .composite([
-                    {
-                        input: await sharp(processedFavicon)
-                            .extend({
-                                top: 0,
-                                bottom: 0,
-                                left: 0,
-                                right: 0,
-                                background: { r: 0, g: 0, b: 0, alpha: 0 }
-                            })
-                            .toBuffer(),
-                        top: faviconBorderWidth,
-                        left: faviconBorderWidth,
-                    },
-                ])
-                .png()
-                .toBuffer();
-
-            // Position: bottom-right, inside the main border
-            placeholderFaviconComposite.push({
-                input: faviconWithBorder,
-                top: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
-                left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
-            });
-        }
-
-        let thumbnail: Buffer;
-        if (placeholderFaviconComposite.length > 0) {
-            thumbnail = await sharp(Buffer.from(svg))
-                .composite(placeholderFaviconComposite)
-                .png()
-                .toBuffer();
-        } else {
-            thumbnail = await sharp(Buffer.from(svg))
-                .png()
-                .toBuffer();
-        }
+        const thumbnail = await sharp(Buffer.from(svg))
+            .composite(placeholderFaviconOverlay ? [placeholderFaviconOverlay] : [])
+            .png()
+            .toBuffer();
 
         await Bun.write(outputPath, thumbnail);
         // Save to cache for future runs
