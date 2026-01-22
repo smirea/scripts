@@ -2,14 +2,11 @@
     "name": "scripts",
     "private": true,
     "scripts": {
-        "lint": "eslint --fix --cache --cache-location node_modules/.cache/eslintcache",
+        "lint": "oxlint --fix",
         "test": "bun test",
         "dev": "bun --watch src/index.ts"
     },
     "dependencies": {
-        "@eslint/compat": "^2.0.1",
-        "@eslint/eslintrc": "^3.3.3",
-        "@eslint/js": "^9.39.2",
         "@google-cloud/storage": "^7.18.0",
         "@google-cloud/text-to-speech": "^6.4.0",
         "@google/genai": "^1.38.0",
@@ -19,13 +16,7 @@
         "@types/sharp": "^0.32.0",
         "@types/turndown": "^5.0.6",
         "@types/yargs": "^17.0.35",
-        "@typescript-eslint/eslint-plugin": "^8.53.1",
-        "@typescript-eslint/parser": "^8.53.1",
-        "eslint": "^9.39.2",
-        "eslint-plugin-import": "^2.32.0",
-        "eslint-plugin-prettier": "^5.5.5",
         "fast-xml-parser": "^5.3.3",
-        "globals": "^17.0.0",
         "kill-port-process": "^3.2.1",
         "lefthook": "^2.0.15",
         "linkedom": "^0.18.12",
@@ -37,5 +28,8 @@
         "turndown": "^7.2.2",
         "typescript": "^5.9.3",
         "yargs": "^18.0.0"
+    },
+    "devDependencies": {
+        "oxlint": "^1.41.0"
     }
 }

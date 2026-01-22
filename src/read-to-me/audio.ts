@@ -43,7 +43,7 @@ function splitTextIntoChunks(text: string): string[] {
     // Function to split long text at natural break points
     function splitLongText(text: string, maxLen: number): string[] {
         const result: string[] = [];
-        const parts = text.split(/(?<=[,;:\)\]])\s+/);
+        const parts = text.split(/(?<=[,;:)\]])\s+/);
 
         for (const part of parts) {
             if (part.length <= maxLen) {
