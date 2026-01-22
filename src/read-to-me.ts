@@ -1695,13 +1695,27 @@ Article context: ${contentPreview}`;
         }
     }
 
-    // Generate the thumbnail with border and R2M tag
+    // Generate the thumbnail with border overlay and R2M tag
     if (baseImage) {
-        const innerSize = THUMBNAIL_SIZE - (THUMBNAIL_BORDER_WIDTH * 2);
-
+        // Resize image to full thumbnail size (border will overlay on top)
         const resizedImage = await sharp(baseImage)
-            .resize(innerSize, innerSize, { fit: 'cover' })
+            .resize(THUMBNAIL_SIZE, THUMBNAIL_SIZE, { fit: 'cover' })
             .toBuffer();
+
+        // Create the border frame as an SVG overlay (transparent center, colored border)
+        const borderSvg = Buffer.from(`
+            <svg width="${THUMBNAIL_SIZE}" height="${THUMBNAIL_SIZE}" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <mask id="borderMask">
+                        <rect width="100%" height="100%" fill="white"/>
+                        <rect x="${THUMBNAIL_BORDER_WIDTH}" y="${THUMBNAIL_BORDER_WIDTH}"
+                              width="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH * 2}"
+                              height="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH * 2}" fill="black"/>
+                    </mask>
+                </defs>
+                <rect width="100%" height="100%" fill="${THUMBNAIL_BORDER_COLOR}" mask="url(#borderMask)"/>
+            </svg>
+        `);
 
         // Create the R2M tag SVG overlay
         const tagWidth = 120;
@@ -1717,20 +1731,13 @@ Article context: ${contentPreview}`;
             </svg>
         `);
 
-        // Create thumbnail with border and R2M tag
-        const thumbnail = await sharp({
-            create: {
-                width: THUMBNAIL_SIZE,
-                height: THUMBNAIL_SIZE,
-                channels: 4,
-                background: THUMBNAIL_BORDER_COLOR,
-            },
-        })
+        // Create thumbnail: image first, then border overlay on top, then R2M tag
+        const thumbnail = await sharp(resizedImage)
             .composite([
                 {
-                    input: resizedImage,
-                    top: THUMBNAIL_BORDER_WIDTH,
-                    left: THUMBNAIL_BORDER_WIDTH,
+                    input: borderSvg,
+                    top: 0,
+                    left: 0,
                 },
                 {
                     input: tagSvg,
