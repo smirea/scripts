@@ -6,9 +6,9 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] parse each content chunk with gemini 2.5 flash to filter out things like ads, comments, amything that seems to not be part of the article itself
 	- [x] in the same time, have gemini suggest chapters starting points
 - [x] parse images with ai to describe them (gemini 2.5 flash)
-	- [ ] improve image prompt to focus on capturing the meaning of the picture succinctly in the context of the chapter. the goal is for someone reading it to get the gist
-	- [ ] if it's purely a stock photo / visual photo, have the AI mention that and skip it
-	- [ ] if it's a chart the prompt should focus on understand the implication of the chart and the conclusion its trying to convey
+	- [x] improve image prompt to focus on capturing the meaning of the picture succinctly in the context of the chapter. the goal is for someone reading it to get the gist
+	- [x] if it's purely a stock photo / visual photo, have the AI mention that and skip it
+	- [x] if it's a chart the prompt should focus on understand the implication of the chart and the conclusion its trying to convey
 - [x] convert content into audio using google's Chirp 3
 	- [x] use the `Zephyr` voice by default with English (United Kingdom) dialect
 	- [x] allow selecting `--voice` and `--dialect` via cli args (only english language allowed)
