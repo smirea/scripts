@@ -14,45 +14,57 @@ import { hideBin } from 'yargs/helpers';
 
 import { createScript, style } from './utils/createScript';
 
-// Concurrency limits for different API types to avoid throttling
-const GEMINI_CONCURRENCY = 5;  // Gemini API calls
-const TTS_CONCURRENCY = 5;     // Google TTS API calls
-const FETCH_CONCURRENCY = 10;  // HTTP fetch requests
+// =============================================================================
+// Constants
+// =============================================================================
+
+const GEMINI_CONCURRENCY = 5;
+const TTS_CONCURRENCY = 5;
+const FETCH_CONCURRENCY = 10;
+
+const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
+const GCS_BUCKET = 'stefan-rss-feed';
+const GCS_BASE_URL = `https://storage.googleapis.com/${GCS_BUCKET}`;
+
+const THUMBNAIL_SIZE = 1400;
+const THUMBNAIL_BORDER_WIDTH = 40;
+const THUMBNAIL_BORDER_COLOR = '#1E90FF';
+const THUMBNAIL_TAG_COLOR = '#FFFFFF';
+
+const MD_IMAGE_REGEX = /!\[.*?\]\(([^)]+)\)/g;
+
+// =============================================================================
+// Concurrency Limiters
+// =============================================================================
 
 const geminiLimit = pLimit(GEMINI_CONCURRENCY);
 const ttsLimit = pLimit(TTS_CONCURRENCY);
 const fetchLimit = pLimit(FETCH_CONCURRENCY);
 
+// =============================================================================
+// API Clients
+// =============================================================================
+
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const genAI = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
-const genAINew = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
+/** Standard Gemini client for text/image analysis */
+const geminiClient = GEMINI_API_KEY ? new GoogleGenerativeAI(GEMINI_API_KEY) : null;
+/** New Gemini client for image generation (Gemini 2.5 Flash Image) */
+const geminiImageClient = GEMINI_API_KEY ? new GoogleGenAI({ apiKey: GEMINI_API_KEY }) : null;
 const ttsClient = new TextToSpeechClient();
 
-const ENGLISH_DIALECTS = [
-    'en-AU', // Australia
-    'en-GB', // United Kingdom
-    'en-IN', // India
-    'en-US', // United States
-] as const;
+// =============================================================================
+// Voice Configuration
+// =============================================================================
 
+const ENGLISH_DIALECTS = ['en-AU', 'en-GB', 'en-IN', 'en-US'] as const;
 type EnglishDialect = typeof ENGLISH_DIALECTS[number];
 
-const CHIRP3_VOICES = [
-    'Aoede', 'Charon', 'Fenrir', 'Kore', 'Leda',
-    'Orus', 'Puck', 'Zephyr',
-] as const;
-
+const CHIRP3_VOICES = ['Aoede', 'Charon', 'Fenrir', 'Kore', 'Leda', 'Orus', 'Puck', 'Zephyr'] as const;
 type Voice = typeof CHIRP3_VOICES[number];
 
 const VOICE_GENDERS: Record<Voice, 'male' | 'female'> = {
-    Aoede: 'female',
-    Charon: 'male',
-    Fenrir: 'male',
-    Kore: 'female',
-    Leda: 'female',
-    Orus: 'male',
-    Puck: 'male',
-    Zephyr: 'female',
+    Aoede: 'female', Charon: 'male', Fenrir: 'male', Kore: 'female',
+    Leda: 'female', Orus: 'male', Puck: 'male', Zephyr: 'female',
 };
 
 const argv = yargs(hideBin(process.argv))
@@ -90,6 +102,10 @@ const argv = yargs(hideBin(process.argv))
     .help()
     .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string; 'skip-upload': boolean };
 
+// =============================================================================
+// Types
+// =============================================================================
+
 interface Chapter {
     title: string;
     content: string;
@@ -109,13 +125,102 @@ interface ExtractedContent {
     allTables: TableData[];
 }
 
+interface ChapterAudio {
+    title: string;
+    audioBuffer: Buffer;
+    durationMs: number;
+}
+
+interface ChapterMetadata {
+    index: number;
+    title: string;
+    startMs: number;
+    endMs: number;
+    startFormatted: string;
+}
+
+interface EpisodeData {
+    title: string;
+    author: string;
+    summary: string;
+    sourceUrl: string;
+    audioUrl: string;
+    thumbnailUrl: string;
+    audioSizeBytes: number;
+    durationMs: number;
+    pubDate: string;
+    chapters: Array<{ title: string; startMs: number }>;
+}
+
+type ImageDescriptionResult =
+    | { type: 'description'; text: string }
+    | { type: 'skipped'; reason: 'stock_photo' | 'fetch_error' | 'no_api_key' | 'api_error' };
+
+// =============================================================================
+// Utility Functions
+// =============================================================================
+
+function escapeXml(text: string): string {
+    return text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function unescapeXml(text: string): string {
+    return text
+        .replace(/&apos;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+}
+
+function escapeMetadata(text: string): string {
+    return text
+        .replace(/\\/g, '\\\\')
+        .replace(/=/g, '\\=')
+        .replace(/;/g, '\\;')
+        .replace(/#/g, '\\#')
+        .replace(/\n/g, '\\\n');
+}
+
+function formatMs(ms: number): string {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+    return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function parseTimeToMs(timeStr: string): number {
+    const parts = timeStr.split(':').map(Number);
+    if (parts.length !== 3) return 0;
+    return (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+}
+
+async function fetchWithUA(url: string): Promise<Response> {
+    return fetch(url, { headers: { 'User-Agent': USER_AGENT } });
+}
+
+function extractImagesFromMarkdown(content: string): string[] {
+    const images: string[] = [];
+    let match;
+    const regex = new RegExp(MD_IMAGE_REGEX.source, 'g');
+    while ((match = regex.exec(content)) !== null) {
+        images.push(match[1]);
+    }
+    return images;
+}
+
+// =============================================================================
+// Content Extraction
+// =============================================================================
+
 async function fetchWebpage(url: string): Promise<string> {
     console.log(chalk.blue('Fetching webpage...'));
-    const response = await fetch(url, {
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        },
-    });
+    const response = await fetchWithUA(url);
     if (!response.ok) {
         throw new Error(`Failed to fetch: ${response.status} ${response.statusText}`);
     }
@@ -188,13 +293,7 @@ function extractContent(html: string, url: string): ExtractedContent {
             };
         } else {
             currentChapter.content += line + '\n';
-
-            // Track images in this chapter
-            const mdImgRegex = /!\[.*?\]\(([^)]+)\)/g;
-            let imgMatch;
-            while ((imgMatch = mdImgRegex.exec(line)) !== null) {
-                currentChapter.images.push(imgMatch[1]);
-            }
+            currentChapter.images.push(...extractImagesFromMarkdown(line));
         }
     }
 
@@ -224,13 +323,13 @@ function extractContent(html: string, url: string): ExtractedContent {
     };
 }
 
+// =============================================================================
+// AI Processing (Images, Tables, Chapters)
+// =============================================================================
+
 async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mimeType: string } | null> {
     try {
-        const response = await fetch(imageUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            },
-        });
+        const response = await fetchWithUA(imageUrl);
         if (!response.ok) return null;
 
         const contentType = response.headers.get('content-type') || 'image/jpeg';
@@ -242,12 +341,8 @@ async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mim
     }
 }
 
-type ImageDescriptionResult =
-    | { type: 'description'; text: string }
-    | { type: 'skipped'; reason: 'stock_photo' | 'fetch_error' | 'no_api_key' | 'api_error' };
-
 async function describeImage(imageUrl: string): Promise<ImageDescriptionResult> {
-    if (!genAI) {
+    if (!geminiClient) {
         return { type: 'skipped', reason: 'no_api_key' };
     }
 
@@ -257,7 +352,7 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResult> 
     }
 
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await model.generateContent([
             {
                 inlineData: {
@@ -303,13 +398,13 @@ Respond with either "SKIP" or your description (no other text).`,
 }
 
 async function describeTable(tableHtml: string): Promise<string | null> {
-    if (!genAI) {
+    if (!geminiClient) {
         console.log(chalk.yellow('  Skipping table (no GEMINI_API_KEY)'));
         return null;
     }
 
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await model.generateContent([
             `You are helping convert an article to audio format. Analyze this HTML table and provide a concise narrative explanation that captures the key insights and conclusions the table conveys.
 
@@ -335,7 +430,7 @@ ${tableHtml}`,
 }
 
 async function processTablesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!genAI) {
+    if (!geminiClient) {
         console.log(chalk.yellow('Skipping table processing (no GEMINI_API_KEY)'));
         return content;
     }
@@ -383,7 +478,7 @@ async function processTablesInContent(content: ExtractedContent): Promise<Extrac
 }
 
 async function processImagesInContent(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!genAI) {
+    if (!geminiClient) {
         console.log(chalk.yellow('Skipping image processing (no GEMINI_API_KEY)'));
         return content;
     }
@@ -442,7 +537,7 @@ async function processImagesInContent(content: ExtractedContent): Promise<Extrac
 }
 
 async function filterChapterContent(chapter: Chapter, chapterIndex: number, totalChapters: number): Promise<Chapter> {
-    if (!genAI) {
+    if (!geminiClient) {
         return chapter;
     }
 
@@ -452,7 +547,7 @@ async function filterChapterContent(chapter: Chapter, chapterIndex: number, tota
     }
 
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await model.generateContent([
             `You are a content filter for an article-to-audio converter. Your task is to clean up the following article section by removing content that is NOT part of the main article.
 
@@ -512,7 +607,7 @@ ${chapter.content}
 }
 
 async function suggestChapters(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!genAI) {
+    if (!geminiClient) {
         console.log(chalk.yellow('Skipping AI chapter suggestion (no GEMINI_API_KEY)'));
         return content;
     }
@@ -529,7 +624,7 @@ async function suggestChapters(content: ExtractedContent): Promise<ExtractedCont
     console.log(chalk.blue('Analyzing content for chapter suggestions...'));
 
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await model.generateContent([
             `You are analyzing an article to suggest logical chapter divisions for an audio version.
 
@@ -606,18 +701,10 @@ ${fullContent}
 
             const chapterContent = fullContent.slice(startIndex, endIndex).trim();
 
-            // Find images in this chapter content
-            const images: string[] = [];
-            const mdImgRegex = /!\[.*?\]\(([^)]+)\)/g;
-            let imgMatch;
-            while ((imgMatch = mdImgRegex.exec(chapterContent)) !== null) {
-                images.push(imgMatch[1]);
-            }
-
             newChapters.push({
                 title: suggestion.title,
                 content: chapterContent,
-                images,
+                images: extractImagesFromMarkdown(chapterContent),
             });
 
             console.log(chalk.gray(`    - ${suggestion.title} (${chapterContent.length} chars)`));
@@ -638,14 +725,14 @@ ${fullContent}
 }
 
 async function generateSummary(content: ExtractedContent): Promise<string> {
-    if (!genAI) {
+    if (!geminiClient) {
         return `Audio version of "${content.title}"`;
     }
 
     console.log(chalk.blue('Generating article summary...'));
 
     try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const fullContent = content.chapters.map(c => c.content).join('\n\n').slice(0, 4000);
 
         const result = await model.generateContent([
@@ -672,7 +759,7 @@ Respond with ONLY the summary text, no quotes or other formatting.`,
 }
 
 async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
-    if (!genAI) {
+    if (!geminiClient) {
         console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
         return content;
     }
@@ -718,11 +805,9 @@ async function filterContentWithAI(content: ExtractedContent): Promise<Extracted
     return { ...content, chapters: filteredChapters };
 }
 
-interface ChapterAudio {
-    title: string;
-    audioBuffer: Buffer;
-    durationMs: number;
-}
+// =============================================================================
+// Audio Synthesis
+// =============================================================================
 
 async function synthesizeChapter(
     chapter: Chapter,
@@ -1058,26 +1143,21 @@ createScript(async () => {
         const imageDownloadPromises = content.allImages.map((imgUrl, i) =>
             fetchLimit(async () => {
                 try {
-                    const response = await fetch(imgUrl, {
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                        },
-                    });
-                    if (response.ok) {
-                        const contentType = response.headers.get('content-type') || 'image/jpeg';
-                        const ext = contentType.includes('png') ? 'png'
-                            : contentType.includes('gif') ? 'gif'
-                            : contentType.includes('webp') ? 'webp'
-                            : contentType.includes('svg') ? 'svg'
-                            : 'jpg';
-                        const filename = `${String(i + 1).padStart(2, '0')}-image.${ext}`;
-                        const imagePath = path.join(imagesDir, filename);
-                        const arrayBuffer = await response.arrayBuffer();
-                        await Bun.write(imagePath, Buffer.from(arrayBuffer));
-                        console.log(chalk.green(`  ✓ images/${filename}`));
-                        return { success: true, filename };
-                    }
-                    return { success: false, error: 'Response not ok' };
+                    const response = await fetchWithUA(imgUrl);
+                    if (!response.ok) return { success: false, error: 'Response not ok' };
+
+                    const contentType = response.headers.get('content-type') || 'image/jpeg';
+                    const ext = contentType.includes('png') ? 'png'
+                        : contentType.includes('gif') ? 'gif'
+                        : contentType.includes('webp') ? 'webp'
+                        : contentType.includes('svg') ? 'svg'
+                        : 'jpg';
+                    const filename = `${String(i + 1).padStart(2, '0')}-image.${ext}`;
+                    const imagePath = path.join(imagesDir, filename);
+                    const arrayBuffer = await response.arrayBuffer();
+                    await Bun.write(imagePath, Buffer.from(arrayBuffer));
+                    console.log(chalk.green(`  ✓ images/${filename}`));
+                    return { success: true, filename };
                 } catch {
                     console.log(chalk.yellow(`  ⚠ Could not save image: ${imgUrl.slice(0, 50)}...`));
                     return { success: false, error: 'Fetch failed' };
@@ -1101,12 +1181,10 @@ createScript(async () => {
         console.log();
         console.log(style.header('Uploading to GCS'));
 
-        const GCS_BUCKET = 'stefan-rss-feed';
-        const GCS_PATH = `read-to-me/${titleSlug}`;
-        const GCS_BASE_URL = `https://storage.googleapis.com/${GCS_BUCKET}`;
+        const gcsPath = `read-to-me/${titleSlug}`;
 
         // Upload M4A audio file
-        const audioGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/${outputBase}.m4a`;
+        const audioGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/${outputBase}.m4a`;
         console.log(chalk.gray(`  Uploading audio file...`));
         const audioUploadResult = await Bun.$`gcloud storage cp ${combinedPath} ${audioGcsPath}`.quiet();
         if (audioUploadResult.exitCode !== 0) {
@@ -1116,7 +1194,7 @@ createScript(async () => {
         }
 
         // Upload thumbnail
-        const thumbnailGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/thumbnail.png`;
+        const thumbnailGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/thumbnail.png`;
         console.log(chalk.gray(`  Uploading thumbnail...`));
         const thumbnailUploadResult = await Bun.$`gcloud storage cp ${thumbnailPath} ${thumbnailGcsPath}`.quiet();
         if (thumbnailUploadResult.exitCode !== 0) {
@@ -1127,8 +1205,8 @@ createScript(async () => {
 
         // Generate and upload RSS feed
         console.log(chalk.gray(`  Generating RSS feed...`));
-        const audioUrl = `${GCS_BASE_URL}/${GCS_PATH}/${outputBase}.m4a`;
-        const thumbnailUrl = `${GCS_BASE_URL}/${GCS_PATH}/thumbnail.png`;
+        const audioUrl = `${GCS_BASE_URL}/${gcsPath}/${outputBase}.m4a`;
+        const thumbnailUrl = `${GCS_BASE_URL}/${gcsPath}/thumbnail.png`;
 
         // Get audio file size for enclosure
         const audioStats = await Bun.file(combinedPath).size;
@@ -1153,7 +1231,7 @@ createScript(async () => {
         console.log(chalk.green(`  ✓ feed.xml (local)`));
 
         // Upload RSS feed
-        const rssGcsPath = `gs://${GCS_BUCKET}/${GCS_PATH}/feed.xml`;
+        const rssGcsPath = `gs://${GCS_BUCKET}/${gcsPath}/feed.xml`;
         const rssUploadResult = await Bun.$`gcloud storage cp ${rssFeedPath} ${rssGcsPath}`.quiet();
         if (rssUploadResult.exitCode !== 0) {
             console.log(chalk.yellow(`  ⚠ Failed to upload RSS feed`));
@@ -1213,17 +1291,15 @@ createScript(async () => {
     }
 });
 
-async function generateThumbnail(content: ExtractedContent, outputPath: string): Promise<void> {
-    const THUMBNAIL_SIZE = 1400; // Standard podcast cover size
-    const BORDER_WIDTH = 40;
-    const BORDER_COLOR = '#1E90FF'; // Dodger blue - stylish standard blue
-    const TAG_BG_COLOR = '#1E90FF'; // Same blue for consistency
-    const TAG_TEXT_COLOR = '#FFFFFF';
+// =============================================================================
+// Thumbnail Generation
+// =============================================================================
 
+async function generateThumbnail(content: ExtractedContent, outputPath: string): Promise<void> {
     let baseImage: Buffer | null = null;
 
     // Try to generate an AI thumbnail using Gemini 2.5 Flash Image (nano-banana)
-    if (genAINew) {
+    if (geminiImageClient) {
         console.log(chalk.gray('  Generating AI thumbnail with Gemini...'));
         try {
             // Create a prompt based on the article title and content
@@ -1236,7 +1312,7 @@ Use bold colors and an eye-catching composition that captures the essence of the
 Do NOT include any text in the image.
 Article context: ${contentPreview}`;
 
-            const response = await genAINew.models.generateContent({
+            const response = await geminiImageClient.models.generateContent({
                 model: 'gemini-2.5-flash-image',
                 contents: prompt,
                 config: {
@@ -1260,10 +1336,10 @@ Article context: ${contentPreview}`;
     }
 
     // Fall back to using an article image if AI generation failed
-    if (!baseImage && content.allImages.length > 0 && genAI) {
+    if (!baseImage && content.allImages.length > 0 && geminiClient) {
         console.log(chalk.gray('  Falling back to article image (rating with AI)...'));
         try {
-            const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+            const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
             const imagesToRate = content.allImages.slice(0, 5);
 
             // Rate images in parallel with concurrency limit
@@ -1312,7 +1388,7 @@ Article context: ${contentPreview}`;
 
     // Generate the thumbnail with border and R2M tag
     if (baseImage) {
-        const innerSize = THUMBNAIL_SIZE - (BORDER_WIDTH * 2);
+        const innerSize = THUMBNAIL_SIZE - (THUMBNAIL_BORDER_WIDTH * 2);
 
         const resizedImage = await sharp(baseImage)
             .resize(innerSize, innerSize, { fit: 'cover' })
@@ -1324,9 +1400,9 @@ Article context: ${contentPreview}`;
         const tagPadding = 15;
         const tagSvg = Buffer.from(`
             <svg width="${tagWidth}" height="${tagHeight}" xmlns="http://www.w3.org/2000/svg">
-                <rect x="0" y="0" width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${TAG_BG_COLOR}"/>
+                <rect x="0" y="0" width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${THUMBNAIL_BORDER_COLOR}"/>
                 <text x="50%" y="55%" font-family="Arial, Helvetica, sans-serif" font-size="28"
-                      fill="${TAG_TEXT_COLOR}" text-anchor="middle" dominant-baseline="middle" font-weight="bold">
+                      fill="${THUMBNAIL_TAG_COLOR}" text-anchor="middle" dominant-baseline="middle" font-weight="bold">
                     R2M
                 </text>
             </svg>
@@ -1338,19 +1414,19 @@ Article context: ${contentPreview}`;
                 width: THUMBNAIL_SIZE,
                 height: THUMBNAIL_SIZE,
                 channels: 4,
-                background: BORDER_COLOR,
+                background: THUMBNAIL_BORDER_COLOR,
             },
         })
             .composite([
                 {
                     input: resizedImage,
-                    top: BORDER_WIDTH,
-                    left: BORDER_WIDTH,
+                    top: THUMBNAIL_BORDER_WIDTH,
+                    left: THUMBNAIL_BORDER_WIDTH,
                 },
                 {
                     input: tagSvg,
-                    top: BORDER_WIDTH + tagPadding,
-                    left: THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth - tagPadding,
+                    top: THUMBNAIL_BORDER_WIDTH + tagPadding,
+                    left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - tagWidth - tagPadding,
                 },
             ])
             .png()
@@ -1374,9 +1450,9 @@ Article context: ${contentPreview}`;
                     </linearGradient>
                 </defs>
                 <rect width="100%" height="100%" fill="url(#bg)"/>
-                <rect x="${BORDER_WIDTH / 2}" y="${BORDER_WIDTH / 2}"
-                      width="${THUMBNAIL_SIZE - BORDER_WIDTH}" height="${THUMBNAIL_SIZE - BORDER_WIDTH}"
-                      fill="none" stroke="${BORDER_COLOR}" stroke-width="${BORDER_WIDTH}"/>
+                <rect x="${THUMBNAIL_BORDER_WIDTH / 2}" y="${THUMBNAIL_BORDER_WIDTH / 2}"
+                      width="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH}" height="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH}"
+                      fill="none" stroke="${THUMBNAIL_BORDER_COLOR}" stroke-width="${THUMBNAIL_BORDER_WIDTH}"/>
                 <text x="50%" y="45%" font-family="Arial, sans-serif" font-size="72"
                       fill="white" text-anchor="middle" font-weight="bold">
                     ${escapeXml(content.title.slice(0, 30))}${content.title.length > 30 ? '...' : ''}
@@ -1386,11 +1462,11 @@ Article context: ${contentPreview}`;
                     Audio Article
                 </text>
                 <!-- R2M Tag -->
-                <rect x="${THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth - tagPadding}" y="${BORDER_WIDTH + tagPadding}"
-                      width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${TAG_BG_COLOR}"/>
-                <text x="${THUMBNAIL_SIZE - BORDER_WIDTH - tagWidth / 2 - tagPadding}" y="${BORDER_WIDTH + tagPadding + tagHeight / 2 + 8}"
+                <rect x="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - tagWidth - tagPadding}" y="${THUMBNAIL_BORDER_WIDTH + tagPadding}"
+                      width="${tagWidth}" height="${tagHeight}" rx="8" ry="8" fill="${THUMBNAIL_BORDER_COLOR}"/>
+                <text x="${THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - tagWidth / 2 - tagPadding}" y="${THUMBNAIL_BORDER_WIDTH + tagPadding + tagHeight / 2 + 8}"
                       font-family="Arial, Helvetica, sans-serif" font-size="28"
-                      fill="${TAG_TEXT_COLOR}" text-anchor="middle" font-weight="bold">
+                      fill="${THUMBNAIL_TAG_COLOR}" text-anchor="middle" font-weight="bold">
                     R2M
                 </text>
             </svg>
@@ -1404,14 +1480,9 @@ Article context: ${contentPreview}`;
     }
 }
 
-function escapeXml(text: string): string {
-    return text
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&apos;');
-}
+// =============================================================================
+// Output Generation (Markdown, RSS, Metadata)
+// =============================================================================
 
 function generateMarkdown(content: ExtractedContent, sourceUrl: string): string {
     let markdown = `# ${content.title}\n\n`;
@@ -1428,21 +1499,6 @@ function generateMarkdown(content: ExtractedContent, sourceUrl: string): string 
     }
 
     return markdown;
-}
-
-function formatMs(ms: number): string {
-    const seconds = Math.floor(ms / 1000);
-    const minutes = Math.floor(seconds / 60);
-    const hours = Math.floor(minutes / 60);
-    return `${hours}:${String(minutes % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
-}
-
-interface ChapterMetadata {
-    index: number;
-    title: string;
-    startMs: number;
-    endMs: number;
-    startFormatted: string;
 }
 
 function generateFfmetadata(
@@ -1478,16 +1534,6 @@ function generateFfmetadata(
     }
 
     return metadata;
-}
-
-function escapeMetadata(text: string): string {
-    // Escape special characters for ffmetadata format
-    return text
-        .replace(/\\/g, '\\\\')
-        .replace(/=/g, '\\=')
-        .replace(/;/g, '\\;')
-        .replace(/#/g, '\\#')
-        .replace(/\n/g, '\\\n');
 }
 
 interface RssFeedOptions {
@@ -1563,19 +1609,6 @@ ${pscChapters}
 </rss>`;
 }
 
-interface EpisodeData {
-    title: string;
-    author: string;
-    summary: string;
-    sourceUrl: string;
-    audioUrl: string;
-    thumbnailUrl: string;
-    audioSizeBytes: number;
-    durationMs: number;
-    pubDate: string;
-    chapters: Array<{ title: string; startMs: number }>;
-}
-
 async function updateMasterFeed(masterFeedUrl: string, newEpisode: EpisodeData): Promise<string> {
     // Try to fetch existing master feed
     let existingEpisodes: EpisodeData[] = [];
@@ -1627,30 +1660,21 @@ function parseEpisodesFromFeed(feedXml: string): EpisodeData[] {
         const chapterRegex = /<psc:chapter[^>]*start="([^"]*)"[^>]*title="([^"]*)"/g;
         let chapterMatch;
         while ((chapterMatch = chapterRegex.exec(itemXml)) !== null) {
-            const timeStr = chapterMatch[1];
-            const title = chapterMatch[2].replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-            // Parse time string (H:MM:SS) to ms
-            const parts = timeStr.split(':').map(Number);
-            const ms = (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
-            chapters.push({ title, startMs: ms });
+            chapters.push({
+                title: unescapeXml(chapterMatch[2]),
+                startMs: parseTimeToMs(chapterMatch[1]),
+            });
         }
 
-        // Parse duration (H:MM:SS) to ms
-        const durationStr = getTag('itunes:duration');
-        const durationParts = durationStr.split(':').map(Number);
-        const durationMs = durationParts.length === 3
-            ? (durationParts[0] * 3600 + durationParts[1] * 60 + durationParts[2]) * 1000
-            : 0;
-
         episodes.push({
-            title: getTag('title').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+            title: unescapeXml(getTag('title')),
             author: getTag('itunes:author') || 'Read To Me',
-            summary: getTag('description').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+            summary: unescapeXml(getTag('description')),
             sourceUrl: getTag('link'),
             audioUrl: enclosureMatch ? enclosureMatch[1] : '',
             thumbnailUrl: getAttr('itunes:image', 'href'),
             audioSizeBytes: enclosureMatch ? parseInt(enclosureMatch[2], 10) : 0,
-            durationMs,
+            durationMs: parseTimeToMs(getTag('itunes:duration')),
             pubDate: getTag('pubDate'),
             chapters,
         });
