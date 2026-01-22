@@ -37,6 +37,8 @@ const MD_IMAGE_REGEX = /!\[.*?\]\(([^)]+)\)/g;
 const IMAGE_CACHE_DIR = path.join(process.cwd(), '.cache', 'read-to-me', 'images');
 const IMAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
 
+const TTS_OPTIMIZER_PROMPT_PATH = path.join(import.meta.dir, 'prompts', 'tts-optimizer.md');
+
 // =============================================================================
 // Concurrency Limiters
 // =============================================================================
@@ -107,9 +109,14 @@ const argv = yargs(hideBin(process.argv))
         type: 'boolean',
         default: true,
     })
+    .option('enhance-speech', {
+        describe: 'Enhance text for better TTS using AI (converts to SSML)',
+        type: 'boolean',
+        default: true,
+    })
     .strict()
     .help()
-    .parseSync() as { url: string; voice: typeof CHIRP3_VOICES[number] | 'random' | 'random-male' | 'random-female'; dialect: EnglishDialect; output?: string; 'skip-upload': boolean; 'cache-images': boolean };
+    .parseSync();
 
 // =============================================================================
 // Types
@@ -856,6 +863,104 @@ Respond with ONLY the summary text, no quotes or other formatting.`,
     }
 }
 
+async function loadTtsOptimizerPrompt(): Promise<string> {
+    const file = Bun.file(TTS_OPTIMIZER_PROMPT_PATH);
+    if (!await file.exists()) {
+        throw new Error(`TTS optimizer prompt not found at: ${TTS_OPTIMIZER_PROMPT_PATH}`);
+    }
+    return file.text();
+}
+
+async function enhanceChapterForTTS(
+    chapterContent: string,
+    ttsPrompt: string,
+    chapterIndex: number,
+    totalChapters: number,
+): Promise<string> {
+    if (!geminiClient) {
+        return chapterContent;
+    }
+
+    try {
+        const model = geminiClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent([
+            ttsPrompt,
+            `\n\n**Text to optimize:**\n\n${chapterContent}`,
+        ]);
+
+        let ssmlOutput = result.response.text().trim();
+
+        // Remove markdown code block wrapping if Gemini added it
+        ssmlOutput = ssmlOutput.replace(/^```(?:xml|ssml)?\n?/, '').replace(/\n?```$/, '');
+
+        // Validate that we got SSML back
+        if (!ssmlOutput.includes('<speak>')) {
+            console.log(chalk.yellow(`    → Chapter ${chapterIndex + 1}: AI didn't return SSML, using original`));
+            return chapterContent;
+        }
+
+        return ssmlOutput;
+    } catch (err) {
+        console.log(chalk.yellow(`    → Chapter ${chapterIndex + 1}: Enhancement failed: ${(err as Error).message}`));
+        return chapterContent;
+    }
+}
+
+async function enhanceContentForTTS(content: ExtractedContent): Promise<ExtractedContent> {
+    if (!geminiClient) {
+        console.log(chalk.yellow('Skipping speech enhancement (no GEMINI_API_KEY)'));
+        return content;
+    }
+
+    if (!argv['enhance-speech']) {
+        console.log(chalk.gray('Speech enhancement disabled'));
+        return content;
+    }
+
+    console.log(chalk.blue(`Enhancing ${content.chapters.length} chapters for TTS (concurrency: ${GEMINI_CONCURRENCY})...`));
+
+    // Load the TTS optimizer prompt
+    let ttsPrompt: string;
+    try {
+        ttsPrompt = await loadTtsOptimizerPrompt();
+    } catch (err) {
+        console.log(chalk.yellow(`  Failed to load TTS prompt: ${(err as Error).message}`));
+        return content;
+    }
+
+    let completed = 0;
+    const total = content.chapters.length;
+
+    // Process chapters in parallel with concurrency limit
+    const enhancePromises = content.chapters.map((chapter, i) =>
+        geminiLimit(async () => {
+            const enhancedContent = await enhanceChapterForTTS(chapter.content, ttsPrompt, i, total);
+            completed++;
+
+            const isEnhanced = enhancedContent.includes('<speak>');
+            if (isEnhanced) {
+                console.log(chalk.green(`  [${completed}/${total}] Enhanced: ${chapter.title}`));
+            } else {
+                console.log(chalk.yellow(`  [${completed}/${total}] Kept original: ${chapter.title}`));
+            }
+
+            return { ...chapter, content: enhancedContent, originalIndex: i };
+        })
+    );
+
+    const results = await Promise.all(enhancePromises);
+
+    // Sort by original index to maintain order
+    const enhancedChapters = results
+        .sort((a, b) => a.originalIndex - b.originalIndex)
+        .map(({ originalIndex, ...chapter }) => chapter);
+
+    const enhancedCount = enhancedChapters.filter(c => c.content.includes('<speak>')).length;
+    console.log(chalk.green(`  Enhanced ${enhancedCount}/${total} chapters with SSML`));
+
+    return { ...content, chapters: enhancedChapters };
+}
+
 async function filterContentWithAI(content: ExtractedContent): Promise<ExtractedContent> {
     if (!geminiClient) {
         console.log(chalk.yellow('Skipping content filtering (no GEMINI_API_KEY)'));
@@ -907,18 +1012,9 @@ async function filterContentWithAI(content: ExtractedContent): Promise<Extracted
 // Audio Synthesis
 // =============================================================================
 
-async function synthesizeChapter(
-    chapter: Chapter,
-    voice: Voice,
-    dialect: EnglishDialect,
-    chapterIndex: number,
-    totalChapters: number,
-): Promise<ChapterAudio> {
-    console.log(chalk.gray(`  [${chapterIndex + 1}/${totalChapters}] Synthesizing: ${chapter.title}`));
-
+function cleanTextForTTS(content: string): string {
     // Clean up markdown for TTS (remove links, code blocks, etc.)
-    // Note: Chapter titles are NOT spoken - they are metadata only (embedded in M4A file)
-    const text = chapter.content
+    return content
         .replace(/```[\s\S]*?```/g, '') // Remove code blocks
         .replace(/`[^`]+`/g, '') // Remove inline code
         // Replace markdown links with link text (handles nested parens in URLs)
@@ -931,24 +1027,23 @@ async function synthesizeChapter(
         .replace(/\n{3,}/g, '\n\n') // Normalize multiple newlines
         .replace(/  +/g, ' ') // Normalize multiple spaces
         .trim();
+}
 
-    // Google TTS has a 5000 byte limit per request and individual sentence limits
+function splitTextIntoChunks(text: string): string[] {
     const MAX_BYTES = 4500;
-    const MAX_SENTENCE_LENGTH = 300; // TTS has strict limits on individual sentence length
+    const MAX_SENTENCE_LENGTH = 300;
     const chunks: string[] = [];
     let currentChunk = '';
 
     // Function to split long text at natural break points
     function splitLongText(text: string, maxLen: number): string[] {
         const result: string[] = [];
-        // Try splitting at natural break points (commas, semicolons, parentheses)
         const parts = text.split(/(?<=[,;:\)\]])\s+/);
 
         for (const part of parts) {
             if (part.length <= maxLen) {
                 result.push(part);
             } else {
-                // Force split at word boundaries if still too long
                 const words = part.split(/\s+/);
                 let current = '';
                 for (const word of words) {
@@ -965,7 +1060,6 @@ async function synthesizeChapter(
         return result;
     }
 
-    // Split into sentences, then further split long sentences
     const sentences = text.split(/(?<=[.!?])\s+/);
     const processedSentences: string[] = [];
 
@@ -987,11 +1081,107 @@ async function synthesizeChapter(
     }
     if (currentChunk.trim()) chunks.push(currentChunk.trim());
 
+    return chunks;
+}
+
+function splitSsmlIntoChunks(ssml: string): string[] {
+    // For SSML, we need to split at <p> or <s> boundaries, or at sentence boundaries within the content
+    // Google TTS has a 5000 byte limit per request
+    const MAX_BYTES = 4500;
+    const chunks: string[] = [];
+
+    // Extract content between <speak> tags
+    const speakMatch = ssml.match(/<speak>([\s\S]*)<\/speak>/);
+    if (!speakMatch) {
+        // If no speak tags, treat as plain text
+        return splitTextIntoChunks(ssml);
+    }
+
+    const innerContent = speakMatch[1];
+
+    // Try to split at paragraph boundaries first
+    const paragraphs = innerContent.split(/<\/p>\s*/);
+
+    let currentChunk = '';
+    for (const para of paragraphs) {
+        const paraWithClose = para.includes('<p>') ? para + '</p>' : para;
+        const wrappedPara = `<speak>${paraWithClose}</speak>`;
+
+        if (Buffer.byteLength(wrappedPara, 'utf-8') > MAX_BYTES) {
+            // Paragraph too large, split at sentence boundaries
+            const sentences = para.split(/<\/s>\s*/);
+            for (const sent of sentences) {
+                const sentWithClose = sent.includes('<s>') ? sent + '</s>' : sent;
+                const wrappedSent = `<speak>${sentWithClose}</speak>`;
+
+                if (Buffer.byteLength(wrappedSent, 'utf-8') > MAX_BYTES) {
+                    // Even a single sentence is too large, fall back to text chunking
+                    // Strip SSML tags and chunk as plain text
+                    const plainText = sent.replace(/<[^>]+>/g, '').trim();
+                    const textChunks = splitTextIntoChunks(plainText);
+                    for (const textChunk of textChunks) {
+                        if (currentChunk) {
+                            chunks.push(`<speak>${currentChunk}</speak>`);
+                            currentChunk = '';
+                        }
+                        chunks.push(textChunk); // Plain text chunk (no SSML wrapper)
+                    }
+                } else if (Buffer.byteLength(`<speak>${currentChunk}${sentWithClose}</speak>`, 'utf-8') > MAX_BYTES) {
+                    if (currentChunk) chunks.push(`<speak>${currentChunk}</speak>`);
+                    currentChunk = sentWithClose;
+                } else {
+                    currentChunk += sentWithClose;
+                }
+            }
+        } else if (Buffer.byteLength(`<speak>${currentChunk}${paraWithClose}</speak>`, 'utf-8') > MAX_BYTES) {
+            if (currentChunk) chunks.push(`<speak>${currentChunk}</speak>`);
+            currentChunk = paraWithClose;
+        } else {
+            currentChunk += paraWithClose;
+        }
+    }
+
+    if (currentChunk.trim()) {
+        chunks.push(`<speak>${currentChunk}</speak>`);
+    }
+
+    // If we couldn't split it, just return the original
+    if (chunks.length === 0) {
+        chunks.push(ssml);
+    }
+
+    return chunks;
+}
+
+async function synthesizeChapter(
+    chapter: Chapter,
+    voice: Voice,
+    dialect: EnglishDialect,
+    chapterIndex: number,
+    totalChapters: number,
+): Promise<ChapterAudio> {
+    console.log(chalk.gray(`  [${chapterIndex + 1}/${totalChapters}] Synthesizing: ${chapter.title}`));
+
+    // Check if content is SSML (contains <speak> tags)
+    const isSSML = chapter.content.includes('<speak>');
+
+    let chunks: string[];
+    if (isSSML) {
+        chunks = splitSsmlIntoChunks(chapter.content);
+    } else {
+        // Note: Chapter titles are NOT spoken - they are metadata only (embedded in M4A file)
+        const text = cleanTextForTTS(chapter.content);
+        chunks = splitTextIntoChunks(text);
+    }
+
     // Process TTS chunks in parallel with concurrency limit
     const audioPromises = chunks.map((chunk, chunkIndex) =>
         ttsLimit(async () => {
+            // Determine if this chunk is SSML or plain text
+            const chunkIsSSML = chunk.startsWith('<speak>');
+
             const [response] = await ttsClient.synthesizeSpeech({
-                input: { text: chunk },
+                input: chunkIsSSML ? { ssml: chunk } : { text: chunk },
                 voice: {
                     languageCode: dialect,
                     name: `${dialect}-Chirp3-HD-${voice}`,
@@ -1023,7 +1213,8 @@ async function synthesizeChapter(
     // Estimate duration (rough: MP3 at 24kbps is ~3KB per second)
     const durationMs = Math.round((audioBuffer.length / 3000) * 1000);
 
-    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ~${(durationMs / 1000).toFixed(1)}s`));
+    const ssmlTag = isSSML ? chalk.cyan(' [SSML]') : '';
+    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ~${(durationMs / 1000).toFixed(1)}s${ssmlTag}`));
 
     return {
         title: chapter.title,
@@ -1080,6 +1271,8 @@ createScript(async () => {
     const output = argv.output;
     const noUpload = argv['skip-upload'];
 
+    const enhanceSpeech = argv['enhance-speech'];
+
     console.log(style.header('Read To Me'));
     console.log('Configuration:');
     console.log(`  URL: ${url}`);
@@ -1087,6 +1280,7 @@ createScript(async () => {
     console.log(`  Dialect: ${dialect}`);
     console.log(`  Output: ${output || '(auto)'}`);
     console.log(`  Upload: ${noUpload ? 'disabled' : 'enabled'}`);
+    console.log(`  Speech enhancement: ${enhanceSpeech ? 'enabled' : 'disabled'}`);
     console.log();
 
     // Step 1: Extract content from webpage
@@ -1133,6 +1327,10 @@ createScript(async () => {
         console.log();
         content = await processTablesInContent(content);
     }
+
+    // Step 5.5: Enhance content for TTS (convert to SSML)
+    console.log();
+    content = await enhanceContentForTTS(content);
 
     // Step 6: Synthesize audio with Google Chirp 3
     console.log();
