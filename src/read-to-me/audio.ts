@@ -3,8 +3,9 @@ import pLimit from 'p-limit';
 import { withRetry } from '../utils/retry';
 import { ttsClient } from './clients';
 import { TTS_CONCURRENCY } from './constants';
-import type { Chapter, ChapterAudio, ExtractedContent } from './types';
-import type { EnglishDialect, Voice } from './voice';
+import { parseChapterIntoSegments } from './segments';
+import type { Chapter, ChapterAudio, ChapterWithSegments, ContentSegment, ExtractedContent } from './types';
+import { getOppositeGenderVoice, type EnglishDialect, type Voice } from './voice';
 
 const ttsLimit = pLimit(TTS_CONCURRENCY);
 
@@ -153,6 +154,188 @@ function splitSsmlIntoChunks(ssml: string): string[] {
 }
 
 // =============================================================================
+// Image Description SSML
+// =============================================================================
+
+function wrapImageDescriptionInSSML(description: string): string {
+    const cleanedDescription = description
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+
+    return `<speak>
+<break time="500ms"/>
+<prosody rate="slow">
+${cleanedDescription}
+</prosody>
+<break time="500ms"/>
+</speak>`;
+}
+
+// =============================================================================
+// Segment-based Audio Synthesis
+// =============================================================================
+
+function stripSSMLTags(content: string): string {
+    return content
+        .replace(/<speak>|<\/speak>/g, '')
+        .replace(/<p>|<\/p>/g, '')
+        .replace(/<s>|<\/s>/g, '')
+        .replace(/<break[^>]*\/>/g, ' ')
+        .replace(/<prosody[^>]*>|<\/prosody>/g, '')
+        .replace(/<say-as[^>]*>|<\/say-as>/g, '')
+        .replace(/<sub[^>]*>|<\/sub>/g, '')
+        .replace(/<phoneme[^>]*>|<\/phoneme>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function isValidSSML(content: string): boolean {
+    const hasSpeak = content.includes('<speak>') && content.includes('</speak>');
+    if (!hasSpeak) return false;
+
+    // Check for balanced tags - simple heuristic
+    const openP = (content.match(/<p>/g) || []).length;
+    const closeP = (content.match(/<\/p>/g) || []).length;
+    const openS = (content.match(/<s>/g) || []).length;
+    const closeS = (content.match(/<\/s>/g) || []).length;
+
+    return openP === closeP && openS === closeS;
+}
+
+async function synthesizeSegment(
+    segment: ContentSegment,
+    voice: Voice,
+    imageVoice: Voice,
+    dialect: EnglishDialect,
+): Promise<Buffer> {
+    const isImage = segment.type === 'image';
+    const selectedVoice = isImage ? imageVoice : voice;
+
+    let content: string;
+    let isSSML: boolean;
+
+    if (isImage) {
+        content = wrapImageDescriptionInSSML(segment.description);
+        isSSML = true;
+    } else {
+        // Check if content has SSML tags
+        const hasSSMLTags = segment.content.includes('<speak>') ||
+            segment.content.includes('<p>') ||
+            segment.content.includes('<prosody');
+
+        if (hasSSMLTags) {
+            // Check if SSML is valid (not broken by segmentation)
+            if (isValidSSML(segment.content)) {
+                content = segment.content;
+                isSSML = true;
+            } else {
+                // SSML was broken by segmentation - strip tags and use plain text
+                content = cleanTextForTTS(stripSSMLTags(segment.content));
+                isSSML = false;
+            }
+        } else {
+            content = cleanTextForTTS(segment.content);
+            isSSML = false;
+        }
+    }
+
+    // Skip empty content
+    if (!content.trim()) {
+        return Buffer.alloc(0);
+    }
+
+    const chunks = isSSML ? splitSsmlIntoChunks(content) : splitTextIntoChunks(content);
+
+    const audioPromises = chunks.map((chunk, chunkIndex) =>
+        ttsLimit(async () => {
+            const chunkIsSSML = chunk.startsWith('<speak>');
+
+            try {
+                const [response] = await withRetry(
+                    () => ttsClient.synthesizeSpeech({
+                        input: chunkIsSSML ? { ssml: chunk } : { text: chunk },
+                        voice: {
+                            languageCode: dialect,
+                            name: `${dialect}-Chirp3-HD-${selectedVoice}`,
+                        },
+                        audioConfig: {
+                            audioEncoding: 'MP3',
+                            speakingRate: 1.0,
+                        },
+                    }),
+                    'TTS synthesis'
+                );
+
+                return {
+                    index: chunkIndex,
+                    buffer: response.audioContent ? Buffer.from(response.audioContent as Uint8Array) : null,
+                };
+            } catch (err) {
+                // Log the problematic content for debugging
+                console.log(chalk.red(`    TTS Error on chunk ${chunkIndex + 1}/${chunks.length}:`));
+                console.log(chalk.gray(`    Content preview: ${chunk.slice(0, 200)}...`));
+                throw err;
+            }
+        })
+    );
+
+    const results = await Promise.all(audioPromises);
+
+    const audioBuffers = results
+        .sort((a, b) => a.index - b.index)
+        .filter(r => r.buffer !== null)
+        .map(r => r.buffer as Buffer);
+
+    return Buffer.concat(audioBuffers);
+}
+
+async function synthesizeChapterWithSegments(
+    chapter: ChapterWithSegments,
+    voice: Voice,
+    imageVoice: Voice,
+    dialect: EnglishDialect,
+    chapterIndex: number,
+    totalChapters: number,
+): Promise<ChapterAudio> {
+    const textSegments = chapter.segments.filter(s => s.type === 'text').length;
+    const imageSegments = chapter.segments.filter(s => s.type === 'image').length;
+
+    console.log(chalk.gray(`  [${chapterIndex + 1}/${totalChapters}] Synthesizing: ${chapter.title}`));
+    if (imageSegments > 0) {
+        console.log(chalk.gray(`    → ${textSegments} text segments, ${imageSegments} image descriptions (${imageVoice} voice)`));
+    }
+
+    const audioBuffers: Buffer[] = [];
+
+    for (let i = 0; i < chapter.segments.length; i++) {
+        const segment = chapter.segments[i];
+        const buffer = await synthesizeSegment(segment, voice, imageVoice, dialect);
+        audioBuffers.push(buffer);
+
+        if (segment.type === 'image') {
+            const preview = segment.description.length > 50
+                ? segment.description.slice(0, 47) + '...'
+                : segment.description;
+            console.log(chalk.magenta(`    → [IMG] ${preview}`));
+        }
+    }
+
+    const audioBuffer = Buffer.concat(audioBuffers);
+    const durationMs = Math.round((audioBuffer.length / 3000) * 1000);
+
+    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ~${(durationMs / 1000).toFixed(1)}s`));
+
+    return {
+        title: chapter.title,
+        audioBuffer,
+        durationMs,
+    };
+}
+
+// =============================================================================
 // Audio Synthesis
 // =============================================================================
 
@@ -226,18 +409,44 @@ export async function synthesizeContent(
     voice: Voice,
     dialect: EnglishDialect,
 ): Promise<ChapterAudio[]> {
-    console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with ${voice} voice (concurrency: ${TTS_CONCURRENCY})...`));
+    const imageVoice = getOppositeGenderVoice(voice);
+    const hasImages = content.chapters.some(c => c.content.includes('[Image:'));
+
+    if (hasImages) {
+        console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with dual-voice narration...`));
+        console.log(chalk.gray(`  Main voice: ${voice} | Image voice: ${imageVoice}`));
+    } else {
+        console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with ${voice} voice (concurrency: ${TTS_CONCURRENCY})...`));
+    }
 
     const results: Array<{ index: number; audio: ChapterAudio }> = [];
+
     for (let i = 0; i < content.chapters.length; i++) {
         const chapter = content.chapters[i];
-        const audio = await synthesizeChapter(
-            chapter,
-            voice,
-            dialect,
-            i,
-            content.chapters.length,
-        );
+        const chapterHasImages = chapter.content.includes('[Image:');
+
+        let audio: ChapterAudio;
+
+        if (chapterHasImages) {
+            const chapterWithSegments = parseChapterIntoSegments(chapter);
+            audio = await synthesizeChapterWithSegments(
+                chapterWithSegments,
+                voice,
+                imageVoice,
+                dialect,
+                i,
+                content.chapters.length,
+            );
+        } else {
+            audio = await synthesizeChapter(
+                chapter,
+                voice,
+                dialect,
+                i,
+                content.chapters.length,
+            );
+        }
+
         results.push({ index: i, audio });
     }
 

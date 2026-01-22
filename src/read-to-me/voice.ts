@@ -50,6 +50,31 @@ export function getVoiceGender(voice: Voice): Gender {
 }
 
 /**
+ * Get an opposite-gender voice suitable for image descriptions.
+ * Picks a voice with a calm, clear style that contrasts with the main narrator.
+ */
+export function getOppositeGenderVoice(mainVoice: Voice): Voice {
+    const mainGender = getVoiceGender(mainVoice);
+
+    // Curated list of voices that work well for image descriptions:
+    // - Clear and deliberate delivery
+    // - Calm tone that doesn't compete with the main narrator
+    const maleImageVoices: Voice[] = ['Charon', 'Iapetus', 'Schedar', 'Sadaltager'];
+    const femaleImageVoices: Voice[] = ['Erinome', 'Despina', 'Gacrux', 'Achernar'];
+
+    if (mainGender === 'female') {
+        // Main voice is female, pick a male voice for images
+        // Avoid picking the same voice style - use index based on main voice position
+        const idx = voices.findIndex(v => v.name === mainVoice) % maleImageVoices.length;
+        return maleImageVoices[idx];
+    } else {
+        // Main voice is male, pick a female voice for images
+        const idx = voices.findIndex(v => v.name === mainVoice) % femaleImageVoices.length;
+        return femaleImageVoices[idx];
+    }
+}
+
+/**
  * Get voice info by name.
  */
 export function getVoiceInfo(voice: Voice) {

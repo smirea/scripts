@@ -97,12 +97,12 @@ export async function fetchImageAsBase64(imageUrl: string): Promise<{ data: stri
     }
 }
 
-async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWithCache> {
+async function describeImage(imageUrl: string, context?: string): Promise<ImageDescriptionResultWithCache> {
     if (!geminiTextClient) {
         return { result: { type: 'skipped', reason: 'no_api_key' }, fromCache: false };
     }
 
-    // Check cache first
+    // Check cache first (context not included in cache key for now)
     const cachedResult = await getImageFromCache(imageUrl);
     if (cachedResult) {
         return { result: cachedResult, fromCache: true };
@@ -114,7 +114,14 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWi
     }
 
     try {
-        const prompt = await loadImagePrompt();
+        const basePrompt = await loadImagePrompt();
+
+        // Add context to the prompt if available
+        let fullPrompt = basePrompt;
+        if (context) {
+            fullPrompt += `\n\n## Context from the article\n\nThe surrounding text discusses:\n"${context}"\n\nUse this context to make your description more relevant and connected to the article's discussion.`;
+        }
+
         const model = geminiTextClient.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const result = await withRetry(
             () => model.generateContent([
@@ -124,7 +131,7 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWi
                         data: imageData.data,
                     },
                 },
-                prompt,
+                fullPrompt,
             ]),
             'describe image'
         );
@@ -148,6 +155,35 @@ async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWi
     }
 }
 
+function extractContextForImage(content: string, imageUrl: string, charsBefore = 300, charsAfter = 150): string | undefined {
+    const escapedUrl = imageUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const imgRegex = new RegExp(`!\\[.*?\\]\\(${escapedUrl}\\)`);
+    const match = imgRegex.exec(content);
+
+    if (!match) return undefined;
+
+    const imgIndex = match.index;
+    const start = Math.max(0, imgIndex - charsBefore);
+    const end = Math.min(content.length, imgIndex + match[0].length + charsAfter);
+
+    let context = content.slice(start, imgIndex).trim();
+    const afterText = content.slice(imgIndex + match[0].length, end).trim();
+
+    if (afterText) {
+        context += ' [...] ' + afterText;
+    }
+
+    // Clean up markdown formatting for context
+    context = context
+        .replace(/!\[.*?\]\([^)]+\)/g, '') // Remove other images
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Convert links to text
+        .replace(/[#*_~`]/g, '') // Remove markdown formatting
+        .replace(/\s+/g, ' ') // Normalize whitespace
+        .trim();
+
+    return context.length > 50 ? context : undefined;
+}
+
 export async function processImagesInContent(content: ExtractedContent): Promise<ExtractedContent> {
     if (!geminiTextClient) {
         console.log(chalk.yellow('Skipping image processing (no GEMINI_API_KEY)'));
@@ -161,18 +197,34 @@ export async function processImagesInContent(content: ExtractedContent): Promise
     let completed = 0;
     let cacheHits = 0;
     const total = content.allImages.length;
-    const skippedImages = new Set<string>(); // Track images to remove from content
+    const skippedImages = new Set<string>();
+
+    // Build a map of image URL to chapter content for context extraction
+    const imageToChapterContent = new Map<string, string>();
+    for (const chapter of content.chapters) {
+        for (const imgUrl of chapter.images) {
+            if (!imageToChapterContent.has(imgUrl)) {
+                imageToChapterContent.set(imgUrl, chapter.content);
+            }
+        }
+    }
 
     // Process images in parallel with concurrency limit
     const descriptionPromises = content.allImages.map((imgUrl) =>
         geminiLimit(async () => {
-            const { result, fromCache } = await describeImage(imgUrl);
+            // Extract context from the chapter where this image appears
+            const chapterContent = imageToChapterContent.get(imgUrl);
+            const context = chapterContent ? extractContextForImage(chapterContent, imgUrl) : undefined;
+
+            const { result, fromCache } = await describeImage(imgUrl, context);
             completed++;
             if (fromCache) cacheHits++;
             const cacheTag = fromCache ? chalk.cyan('[cached] ') : '';
             if (result.type === 'description') {
                 imageDescriptions.set(imgUrl, result.text);
-                console.log(chalk.green(`  [${completed}/${total}] ${cacheTag}${imgUrl.slice(0, 40)}... → ${result.text.slice(0, 60)}...`));
+                const preview = result.text.length > 80 ? result.text.slice(0, 77) + '...' : result.text;
+                console.log(chalk.green(`  [${completed}/${total}] ${cacheTag}${imgUrl.slice(0, 40)}...`));
+                console.log(chalk.gray(`    → ${preview}`));
             } else {
                 skippedImages.add(imgUrl);
                 const reasonText = {
@@ -194,8 +246,18 @@ export async function processImagesInContent(content: ExtractedContent): Promise
     }
 
     // Replace image references in chapter content with descriptions or remove skipped images
+    // Also track the first described image per chapter for Podcasting 2.0 chapter artwork
     const updatedChapters = content.chapters.map(chapter => {
         let updatedContent = chapter.content;
+        let chapterImageUrl: string | undefined;
+
+        // Find the first described image in this chapter (for chapter artwork)
+        for (const imgUrl of chapter.images) {
+            if (imageDescriptions.has(imgUrl) && !chapterImageUrl) {
+                chapterImageUrl = imgUrl;
+                break;
+            }
+        }
 
         // Replace described images with their descriptions
         for (const [imgUrl, description] of imageDescriptions) {
@@ -209,7 +271,7 @@ export async function processImagesInContent(content: ExtractedContent): Promise
             updatedContent = updatedContent.replace(mdImgRegex, '');
         }
 
-        return { ...chapter, content: updatedContent };
+        return { ...chapter, content: updatedContent, chapterImageUrl };
     });
 
     return { ...content, chapters: updatedChapters };

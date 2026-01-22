@@ -32,7 +32,7 @@ import { synthesizeContent } from './audio';
 import { generateThumbnail } from './thumbnail';
 
 // Output
-import { generateFfmetadata, generateMarkdown, generateRssFeed, updateMasterFeed } from './output';
+import { generateFfmetadata, generateMarkdown, generateRssFeed, generateJsonChapters, updateMasterFeed } from './output';
 
 // Upload
 import { uploadToGCS } from './upload';
@@ -266,13 +266,66 @@ void createScript(async () => {
         await uploadToGCS(thumbnailPath, `${GCS_BUCKET}/${gcsPath}/thumbnail.png`, 'image/png');
         console.log(chalk.green(`  ✓ thumbnail.png`));
 
+        // Upload chapter images and track their GCS URLs
+        const chapterImageUrls: Map<number, string> = new Map();
+        const chaptersWithImages = content.chapters
+            .map((c, i) => ({ index: i, imageUrl: c.chapterImageUrl }))
+            .filter((c): c is { index: number; imageUrl: string } => !!c.imageUrl);
+
+        if (chaptersWithImages.length > 0) {
+            console.log(chalk.gray(`  Uploading ${chaptersWithImages.length} chapter images...`));
+            for (const { index, imageUrl } of chaptersWithImages) {
+                try {
+                    const response = await fetchWithUA(imageUrl);
+                    if (response.ok) {
+                        const contentType = response.headers.get('content-type') || 'image/jpeg';
+                        const ext = contentType.includes('png') ? 'png'
+                            : contentType.includes('gif') ? 'gif'
+                            : contentType.includes('webp') ? 'webp'
+                            : 'jpg';
+                        const chapterImageFilename = `chapter-${index + 1}.${ext}`;
+                        const chapterImagePath = path.join(outputDir, 'images', chapterImageFilename);
+                        const arrayBuffer = await response.arrayBuffer();
+                        await Bun.write(chapterImagePath, Buffer.from(arrayBuffer));
+
+                        const gcsImagePath = `${GCS_BUCKET}/${gcsPath}/images/${chapterImageFilename}`;
+                        await uploadToGCS(chapterImagePath, gcsImagePath, contentType);
+
+                        const gcsImageUrl = `${GCS_BASE_URL}/${gcsPath}/images/${chapterImageFilename}`;
+                        chapterImageUrls.set(index, gcsImageUrl);
+                        console.log(chalk.green(`  ✓ chapter-${index + 1} image`));
+                    }
+                } catch {
+                    console.log(chalk.yellow(`  ⚠ Could not upload chapter ${index + 1} image`));
+                }
+            }
+        }
+
         // Generate and upload RSS feed
         console.log(chalk.gray(`  Generating RSS feed...`));
         const audioUrl = `${GCS_BASE_URL}/${gcsPath}/${outputBase}.m4a`;
         const thumbnailUrl = `${GCS_BASE_URL}/${gcsPath}/thumbnail.png`;
+        const jsonChaptersUrl = `${GCS_BASE_URL}/${gcsPath}/podcast-chapters.json`;
 
         // Get audio file size for enclosure
         const audioStats = Bun.file(combinedPath).size;
+
+        // Build chapters with image URLs for RSS
+        const chaptersForRss = chapters.map((c, i) => ({
+            title: c.title,
+            startMs: c.startMs,
+            imageUrl: chapterImageUrls.get(i),
+        }));
+
+        // Generate Podcasting 2.0 JSON chapters file
+        const jsonChapters = generateJsonChapters(chaptersForRss, url);
+        const jsonChaptersPath = path.join(outputDir, 'podcast-chapters.json');
+        await Bun.write(jsonChaptersPath, JSON.stringify(jsonChapters, null, 2));
+        console.log(chalk.green(`  ✓ podcast-chapters.json (local)`));
+
+        // Upload JSON chapters
+        await uploadToGCS(jsonChaptersPath, `${GCS_BUCKET}/${gcsPath}/podcast-chapters.json`, 'application/json+chapters');
+        console.log(chalk.green(`  ✓ podcast-chapters.json (uploaded)`));
 
         const rssFeed = generateRssFeed({
             title: content.title,
@@ -283,10 +336,8 @@ void createScript(async () => {
             thumbnailUrl,
             audioSizeBytes: audioStats,
             durationMs: currentTime,
-            chapters: chapters.map(c => ({
-                title: c.title,
-                startMs: c.startMs,
-            })),
+            chapters: chaptersForRss,
+            chaptersJsonUrl: jsonChaptersUrl,
         });
 
         const rssFeedPath = path.join(outputDir, 'feed.xml');
@@ -311,10 +362,7 @@ void createScript(async () => {
             audioSizeBytes: audioStats,
             durationMs: currentTime,
             pubDate: new Date().toUTCString(),
-            chapters: chapters.map(c => ({
-                title: c.title,
-                startMs: c.startMs,
-            })),
+            chapters: chaptersForRss,
         };
 
         const masterFeed = await updateMasterFeed(masterFeedUrl, newEpisode);

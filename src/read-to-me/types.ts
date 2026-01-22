@@ -2,6 +2,23 @@ export interface Chapter {
     title: string;
     content: string;
     images: string[];
+    chapterImageUrl?: string;
+}
+
+export interface ImageDescription {
+    url: string;
+    description: string;
+    context?: string;
+}
+
+export type ContentSegment =
+    | { type: 'text'; content: string }
+    | { type: 'image'; description: string };
+
+export interface ChapterWithSegments {
+    title: string;
+    segments: ContentSegment[];
+    chapterImageUrl?: string;
 }
 
 export interface TableData {
@@ -41,7 +58,7 @@ export interface EpisodeData {
     audioSizeBytes: number;
     durationMs: number;
     pubDate: string;
-    chapters: Array<{ title: string; startMs: number }>;
+    chapters: Array<{ title: string; startMs: number; imageUrl?: string }>;
 }
 
 export type ImageDescriptionResult =
@@ -74,5 +91,6 @@ export interface RssFeedOptions {
     thumbnailUrl: string;
     audioSizeBytes: number;
     durationMs: number;
-    chapters: Array<{ title: string; startMs: number }>;
+    chapters: Array<{ title: string; startMs: number; imageUrl?: string }>;
+    chaptersJsonUrl?: string;
 }
