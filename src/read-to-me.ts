@@ -101,7 +101,7 @@ const argv = yargs(hideBin(process.argv))
         alias: 'd',
         describe: 'English dialect to use',
         choices: ENGLISH_DIALECTS,
-        default: 'en-GB' as EnglishDialect,
+        default: 'en-US' satisfies EnglishDialect,
     })
     .option('output', {
         alias: 'o',
@@ -270,22 +270,26 @@ function extractContent(html: string, url: string): ExtractedContent {
     const reader = new Readability(document as any, { charThreshold: 100 });
     const article = reader.parse();
 
-    if (!article) {
+    if (!article || !article.content) {
         throw new Error('Failed to extract article content');
     }
+
+    const articleContent = article.content;
+    const articleTitle = article.title || 'Untitled';
+    const articleByline = article.byline ?? null;
 
     const turndown = new TurndownService({
         headingStyle: 'atx',
         codeBlockStyle: 'fenced',
     });
 
-    const markdown = turndown.turndown(article.content);
+    const markdown = turndown.turndown(articleContent);
 
     // Extract images from the original content
     const imgRegex = /<img[^>]+src=["']([^"']+)["']/gi;
     const allImages: string[] = [];
     let match;
-    while ((match = imgRegex.exec(article.content)) !== null) {
+    while ((match = imgRegex.exec(articleContent)) !== null) {
         const imgUrl = new URL(match[1], url).href;
         allImages.push(imgUrl);
     }
@@ -294,7 +298,7 @@ function extractContent(html: string, url: string): ExtractedContent {
     const tableRegex = /<table[\s\S]*?<\/table>/gi;
     const allTables: TableData[] = [];
     let tableMatch;
-    while ((tableMatch = tableRegex.exec(article.content)) !== null) {
+    while ((tableMatch = tableRegex.exec(articleContent)) !== null) {
         const tableHtml = tableMatch[0];
         // Extract cell contents to use for matching in markdown
         const cellRegex = /<t[hd][^>]*>([^<]*)</gi;
@@ -340,7 +344,7 @@ function extractContent(html: string, url: string): ExtractedContent {
     // If no chapters found, create one from all content
     if (chapters.length === 0) {
         chapters.push({
-            title: article.title || 'Content',
+            title: articleTitle || 'Content',
             content: markdown,
             images: allImages,
         });
@@ -351,8 +355,8 @@ function extractContent(html: string, url: string): ExtractedContent {
     console.log(chalk.green(`  Found ${allTables.length} table(s)`));
 
     return {
-        title: article.title,
-        byline: article.byline,
+        title: articleTitle,
+        byline: articleByline,
         chapters,
         allImages,
         allTables,
@@ -1401,9 +1405,9 @@ function resolveVoice(voice: typeof argv.voice): Voice {
 }
 
 createScript(async () => {
-    const url = argv.url;
+    const url = argv.url as string;
     const voice = resolveVoice(argv.voice);
-    const dialect = argv.dialect;
+    const dialect = argv.dialect as EnglishDialect;
     const output = argv.output;
     const noUpload = argv['skip-upload'];
 
