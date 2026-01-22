@@ -455,6 +455,59 @@ async function fetchImageAsBase64(imageUrl: string): Promise<{ data: string; mim
     }
 }
 
+async function fetchFavicon(sourceUrl: string): Promise<Buffer | null> {
+    try {
+        const urlObj = new URL(sourceUrl);
+        const origin = urlObj.origin;
+
+        // Try common favicon locations
+        const faviconUrls = [
+            `${origin}/favicon.ico`,
+            `${origin}/favicon.png`,
+            `${origin}/apple-touch-icon.png`,
+            `${origin}/apple-touch-icon-precomposed.png`,
+        ];
+
+        for (const faviconUrl of faviconUrls) {
+            try {
+                const response = await fetchWithUA(faviconUrl);
+                if (response.ok) {
+                    const contentType = response.headers.get('content-type') || '';
+                    if (contentType.includes('image') || faviconUrl.endsWith('.ico') || faviconUrl.endsWith('.png')) {
+                        const buffer = Buffer.from(await response.arrayBuffer());
+                        // Validate it's a valid image by trying to process with sharp
+                        try {
+                            await sharp(buffer).metadata();
+                            return buffer;
+                        } catch {
+                            continue;
+                        }
+                    }
+                }
+            } catch {
+                continue;
+            }
+        }
+
+        // Fallback: Use Google's favicon service
+        const googleFaviconUrl = `https://www.google.com/s2/favicons?domain=${urlObj.hostname}&sz=128`;
+        const googleResponse = await fetchWithUA(googleFaviconUrl);
+        if (googleResponse.ok) {
+            const buffer = Buffer.from(await googleResponse.arrayBuffer());
+            try {
+                await sharp(buffer).metadata();
+                return buffer;
+            } catch {
+                return null;
+            }
+        }
+
+        return null;
+    } catch {
+        return null;
+    }
+}
+
 async function describeImage(imageUrl: string): Promise<ImageDescriptionResultWithCache> {
     if (!geminiClient) {
         return { result: { type: 'skipped', reason: 'no_api_key' }, fromCache: false };
@@ -1481,7 +1534,7 @@ createScript(async () => {
     console.log();
     console.log(style.header('Generating Thumbnail'));
     const thumbnailPath = path.join(outputDir, 'thumbnail.png');
-    await generateThumbnail(content, thumbnailPath);
+    await generateThumbnail(content, thumbnailPath, url);
     console.log(chalk.green(`  ✓ thumbnail.png`));
 
     // Step 9: Upload to GCS and generate RSS feed (unless --no-upload)
@@ -1604,8 +1657,12 @@ createScript(async () => {
 // Thumbnail Generation
 // =============================================================================
 
-async function generateThumbnail(content: ExtractedContent, outputPath: string): Promise<void> {
+async function generateThumbnail(content: ExtractedContent, outputPath: string, sourceUrl: string): Promise<void> {
     let baseImage: Buffer | null = null;
+    let faviconBuffer: Buffer | null = null;
+
+    // Fetch favicon in parallel with other operations
+    const faviconPromise = fetchFavicon(sourceUrl).catch(() => null);
 
     // Try to generate an AI thumbnail using Gemini 2.5 Flash Image (nano-banana)
     if (geminiImageClient) {
@@ -1696,6 +1753,9 @@ Article context: ${contentPreview}`;
     }
 
     // Generate the thumbnail with border overlay and R2M tag
+    // Wait for favicon to be fetched
+    faviconBuffer = await faviconPromise;
+
     if (baseImage) {
         // Resize image to full thumbnail size (border will overlay on top)
         const resizedImage = await sharp(baseImage)
@@ -1731,7 +1791,66 @@ Article context: ${contentPreview}`;
             </svg>
         `);
 
-        // Create thumbnail: image first, then border overlay on top, then R2M tag
+        // Prepare favicon composite if available
+        const faviconComposite: sharp.OverlayOptions[] = [];
+        if (faviconBuffer) {
+            const faviconSize = 64;
+            const faviconBorderWidth = 4;
+            const faviconTotalSize = faviconSize + faviconBorderWidth * 2;
+            const faviconPadding = 15;
+
+            // Create favicon with blue border and rounded corners
+            const processedFavicon = await sharp(faviconBuffer)
+                .resize(faviconSize, faviconSize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+                .png()
+                .toBuffer();
+
+            // Create SVG container with blue border and smooth rounded corners
+            const faviconContainerSvg = Buffer.from(`
+                <svg width="${faviconTotalSize}" height="${faviconTotalSize}" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="faviconBorderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#1E90FF;stop-opacity:1" />
+                            <stop offset="50%" style="stop-color:#4169E1;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#1E90FF;stop-opacity:1" />
+                        </linearGradient>
+                        <clipPath id="faviconClip">
+                            <rect x="${faviconBorderWidth}" y="${faviconBorderWidth}" width="${faviconSize}" height="${faviconSize}" rx="8" ry="8"/>
+                        </clipPath>
+                    </defs>
+                    <rect x="0" y="0" width="${faviconTotalSize}" height="${faviconTotalSize}" rx="12" ry="12" fill="url(#faviconBorderGradient)"/>
+                </svg>
+            `);
+
+            // Composite the favicon onto its container
+            const faviconWithBorder = await sharp(faviconContainerSvg)
+                .composite([
+                    {
+                        input: await sharp(processedFavicon)
+                            .extend({
+                                top: 0,
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                background: { r: 0, g: 0, b: 0, alpha: 0 }
+                            })
+                            .toBuffer(),
+                        top: faviconBorderWidth,
+                        left: faviconBorderWidth,
+                    },
+                ])
+                .png()
+                .toBuffer();
+
+            // Position: bottom-right, inside the main border
+            faviconComposite.push({
+                input: faviconWithBorder,
+                top: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
+                left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
+            });
+        }
+
+        // Create thumbnail: image first, then border overlay on top, then R2M tag, then favicon
         const thumbnail = await sharp(resizedImage)
             .composite([
                 {
@@ -1744,6 +1863,7 @@ Article context: ${contentPreview}`;
                     top: THUMBNAIL_BORDER_WIDTH + tagPadding,
                     left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - tagWidth - tagPadding,
                 },
+                ...faviconComposite,
             ])
             .png()
             .toBuffer();
@@ -1788,9 +1908,73 @@ Article context: ${contentPreview}`;
             </svg>
         `;
 
-        const thumbnail = await sharp(Buffer.from(svg))
-            .png()
-            .toBuffer();
+        // Prepare favicon composite for placeholder if available
+        const placeholderFaviconComposite: sharp.OverlayOptions[] = [];
+        if (faviconBuffer) {
+            const faviconSize = 64;
+            const faviconBorderWidth = 4;
+            const faviconTotalSize = faviconSize + faviconBorderWidth * 2;
+            const faviconPadding = 15;
+
+            // Create favicon with blue border and rounded corners
+            const processedFavicon = await sharp(faviconBuffer)
+                .resize(faviconSize, faviconSize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 1 } })
+                .png()
+                .toBuffer();
+
+            // Create SVG container with blue border and smooth rounded corners
+            const faviconContainerSvg = Buffer.from(`
+                <svg width="${faviconTotalSize}" height="${faviconTotalSize}" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="faviconBorderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" style="stop-color:#1E90FF;stop-opacity:1" />
+                            <stop offset="50%" style="stop-color:#4169E1;stop-opacity:1" />
+                            <stop offset="100%" style="stop-color:#1E90FF;stop-opacity:1" />
+                        </linearGradient>
+                    </defs>
+                    <rect x="0" y="0" width="${faviconTotalSize}" height="${faviconTotalSize}" rx="12" ry="12" fill="url(#faviconBorderGradient)"/>
+                </svg>
+            `);
+
+            // Composite the favicon onto its container
+            const faviconWithBorder = await sharp(faviconContainerSvg)
+                .composite([
+                    {
+                        input: await sharp(processedFavicon)
+                            .extend({
+                                top: 0,
+                                bottom: 0,
+                                left: 0,
+                                right: 0,
+                                background: { r: 0, g: 0, b: 0, alpha: 0 }
+                            })
+                            .toBuffer(),
+                        top: faviconBorderWidth,
+                        left: faviconBorderWidth,
+                    },
+                ])
+                .png()
+                .toBuffer();
+
+            // Position: bottom-right, inside the main border
+            placeholderFaviconComposite.push({
+                input: faviconWithBorder,
+                top: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
+                left: THUMBNAIL_SIZE - THUMBNAIL_BORDER_WIDTH - faviconTotalSize - faviconPadding,
+            });
+        }
+
+        let thumbnail: Buffer;
+        if (placeholderFaviconComposite.length > 0) {
+            thumbnail = await sharp(Buffer.from(svg))
+                .composite(placeholderFaviconComposite)
+                .png()
+                .toBuffer();
+        } else {
+            thumbnail = await sharp(Buffer.from(svg))
+                .png()
+                .toBuffer();
+        }
 
         await Bun.write(outputPath, thumbnail);
     }
