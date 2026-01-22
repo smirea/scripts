@@ -856,27 +856,23 @@ async function synthesizeContent(
 ): Promise<ChapterAudio[]> {
     console.log(chalk.blue(`Synthesizing ${content.chapters.length} chapters with ${voice} voice (concurrency: ${TTS_CONCURRENCY})...`));
 
-    // Process chapters in parallel with concurrency limit
-    // Note: We use ttsLimit here since chapter synthesis makes multiple TTS calls internally
-    const chapterPromises = content.chapters.map((chapter, i) =>
-        ttsLimit(async () => {
-            const audio = await synthesizeChapter(
-                chapter,
-                voice,
-                dialect,
-                i,
-                content.chapters.length,
-            );
-            return { index: i, audio };
-        })
-    );
+    // Process chapters sequentially to avoid deadlock with ttsLimit
+    // (synthesizeChapter internally uses ttsLimit for TTS chunks, so we can't wrap chapters in ttsLimit too)
+    const results: Array<{ index: number; audio: ChapterAudio }> = [];
+    for (let i = 0; i < content.chapters.length; i++) {
+        const chapter = content.chapters[i];
+        const audio = await synthesizeChapter(
+            chapter,
+            voice,
+            dialect,
+            i,
+            content.chapters.length,
+        );
+        results.push({ index: i, audio });
+    }
 
-    const results = await Promise.all(chapterPromises);
-
-    // Sort by index to maintain chapter order
-    return results
-        .sort((a, b) => a.index - b.index)
-        .map(r => r.audio);
+    // Results are already in order since we processed sequentially
+    return results.map(r => r.audio);
 }
 
 function resolveVoice(voice: typeof argv.voice): Voice {
@@ -1168,7 +1164,40 @@ createScript(async () => {
         // Set correct content type for RSS feed
         await Bun.$`gcloud storage objects update ${rssGcsPath} --content-type=application/rss+xml`.quiet();
 
-        podcastUrl = `${GCS_BASE_URL}/${GCS_PATH}/feed.xml`;
+        // Update master feed with all episodes
+        console.log(chalk.gray(`  Updating master feed...`));
+        const masterFeedUrl = `${GCS_BASE_URL}/read-to-me/feed.xml`;
+        const masterFeedGcsPath = `gs://${GCS_BUCKET}/read-to-me/feed.xml`;
+
+        const newEpisode: EpisodeData = {
+            title: content.title,
+            author: content.byline || 'Read To Me',
+            summary,
+            sourceUrl: url,
+            audioUrl,
+            thumbnailUrl,
+            audioSizeBytes: audioStats,
+            durationMs: currentTime,
+            pubDate: new Date().toUTCString(),
+            chapters: chapters.map(c => ({
+                title: c.title,
+                startMs: c.startMs,
+            })),
+        };
+
+        const masterFeed = await updateMasterFeed(masterFeedUrl, newEpisode);
+        const masterFeedPath = path.join(outputDir, 'master-feed.xml');
+        await Bun.write(masterFeedPath, masterFeed);
+
+        const masterUploadResult = await Bun.$`gcloud storage cp ${masterFeedPath} ${masterFeedGcsPath}`.quiet();
+        if (masterUploadResult.exitCode !== 0) {
+            console.log(chalk.yellow(`  ⚠ Failed to upload master feed`));
+        } else {
+            await Bun.$`gcloud storage objects update ${masterFeedGcsPath} --content-type=application/rss+xml`.quiet();
+            console.log(chalk.green(`  ✓ master feed.xml (uploaded)`));
+        }
+
+        podcastUrl = masterFeedUrl;
     }
 
     console.log();
@@ -1530,6 +1559,152 @@ ${pscChapters}
             </psc:chapters>
             <podcast:chapters url="${escapeXml(audioUrl.replace('.m4a', '-chapters.json'))}" type="application/json+chapters" />
         </item>
+    </channel>
+</rss>`;
+}
+
+interface EpisodeData {
+    title: string;
+    author: string;
+    summary: string;
+    sourceUrl: string;
+    audioUrl: string;
+    thumbnailUrl: string;
+    audioSizeBytes: number;
+    durationMs: number;
+    pubDate: string;
+    chapters: Array<{ title: string; startMs: number }>;
+}
+
+async function updateMasterFeed(masterFeedUrl: string, newEpisode: EpisodeData): Promise<string> {
+    // Try to fetch existing master feed
+    let existingEpisodes: EpisodeData[] = [];
+
+    try {
+        const response = await fetch(masterFeedUrl);
+        if (response.ok) {
+            const existingFeed = await response.text();
+            existingEpisodes = parseEpisodesFromFeed(existingFeed);
+        }
+    } catch {
+        // No existing feed, start fresh
+    }
+
+    // Remove any existing episode with the same audio URL (re-processing same article)
+    existingEpisodes = existingEpisodes.filter(ep => ep.audioUrl !== newEpisode.audioUrl);
+
+    // Add new episode at the beginning
+    const allEpisodes = [newEpisode, ...existingEpisodes];
+
+    return generateMasterFeed(allEpisodes);
+}
+
+function parseEpisodesFromFeed(feedXml: string): EpisodeData[] {
+    const episodes: EpisodeData[] = [];
+
+    // Parse <item> elements from the feed
+    const itemRegex = /<item>([\s\S]*?)<\/item>/g;
+    let match;
+
+    while ((match = itemRegex.exec(feedXml)) !== null) {
+        const itemXml = match[1];
+
+        const getTag = (tag: string): string => {
+            const tagMatch = itemXml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
+            return tagMatch ? tagMatch[1].trim() : '';
+        };
+
+        const getAttr = (tag: string, attr: string): string => {
+            const tagMatch = itemXml.match(new RegExp(`<${tag}[^>]*${attr}="([^"]*)"`, 'i'));
+            return tagMatch ? tagMatch[1] : '';
+        };
+
+        // Parse enclosure attributes
+        const enclosureMatch = itemXml.match(/<enclosure[^>]*url="([^"]*)"[^>]*length="(\d+)"/);
+
+        // Parse chapters
+        const chapters: Array<{ title: string; startMs: number }> = [];
+        const chapterRegex = /<psc:chapter[^>]*start="([^"]*)"[^>]*title="([^"]*)"/g;
+        let chapterMatch;
+        while ((chapterMatch = chapterRegex.exec(itemXml)) !== null) {
+            const timeStr = chapterMatch[1];
+            const title = chapterMatch[2].replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+            // Parse time string (H:MM:SS) to ms
+            const parts = timeStr.split(':').map(Number);
+            const ms = (parts[0] * 3600 + parts[1] * 60 + parts[2]) * 1000;
+            chapters.push({ title, startMs: ms });
+        }
+
+        // Parse duration (H:MM:SS) to ms
+        const durationStr = getTag('itunes:duration');
+        const durationParts = durationStr.split(':').map(Number);
+        const durationMs = durationParts.length === 3
+            ? (durationParts[0] * 3600 + durationParts[1] * 60 + durationParts[2]) * 1000
+            : 0;
+
+        episodes.push({
+            title: getTag('title').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+            author: getTag('itunes:author') || 'Read To Me',
+            summary: getTag('description').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'),
+            sourceUrl: getTag('link'),
+            audioUrl: enclosureMatch ? enclosureMatch[1] : '',
+            thumbnailUrl: getAttr('itunes:image', 'href'),
+            audioSizeBytes: enclosureMatch ? parseInt(enclosureMatch[2], 10) : 0,
+            durationMs,
+            pubDate: getTag('pubDate'),
+            chapters,
+        });
+    }
+
+    return episodes;
+}
+
+function generateMasterFeed(episodes: EpisodeData[]): string {
+    const itemsXml = episodes.map(ep => {
+        const durationFormatted = formatMs(ep.durationMs);
+        const pscChapters = ep.chapters.map(c => {
+            const timeFormatted = formatMs(c.startMs);
+            return `            <psc:chapter start="${timeFormatted}" title="${escapeXml(c.title)}" />`;
+        }).join('\n');
+
+        return `        <item>
+            <title>${escapeXml(ep.title)}</title>
+            <description>${escapeXml(ep.summary)}</description>
+            <link>${escapeXml(ep.sourceUrl)}</link>
+            <guid isPermaLink="false">${escapeXml(ep.audioUrl)}</guid>
+            <pubDate>${ep.pubDate}</pubDate>
+            <enclosure url="${escapeXml(ep.audioUrl)}" length="${ep.audioSizeBytes}" type="audio/mp4" />
+            <itunes:duration>${durationFormatted}</itunes:duration>
+            <itunes:author>${escapeXml(ep.author)}</itunes:author>
+            <itunes:summary>${escapeXml(ep.summary)}</itunes:summary>
+            <itunes:image href="${escapeXml(ep.thumbnailUrl)}" />
+            <psc:chapters version="1.2">
+${pscChapters}
+            </psc:chapters>
+        </item>`;
+    }).join('\n');
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+    xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
+    xmlns:podcast="https://podcastindex.org/namespace/1.0"
+    xmlns:psc="http://podlove.org/simple-chapters">
+    <channel>
+        <title>Read To Me</title>
+        <link>https://storage.googleapis.com/stefan-rss-feed/read-to-me/</link>
+        <description>Articles converted to audio with AI-powered narration</description>
+        <language>en</language>
+        <itunes:author>Read To Me</itunes:author>
+        <itunes:summary>Articles converted to audio with AI-powered narration</itunes:summary>
+        <itunes:image href="https://storage.googleapis.com/stefan-rss-feed/read-to-me/cover.png" />
+        <itunes:category text="Technology" />
+        <itunes:explicit>false</itunes:explicit>
+        <image>
+            <url>https://storage.googleapis.com/stefan-rss-feed/read-to-me/cover.png</url>
+            <title>Read To Me</title>
+            <link>https://storage.googleapis.com/stefan-rss-feed/read-to-me/</link>
+        </image>
+${itemsXml}
     </channel>
 </rss>`;
 }
