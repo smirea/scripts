@@ -278,7 +278,7 @@ async function synthesizeSegment(
                         },
                         audioConfig: {
                             audioEncoding: 'MP3',
-                            speakingRate: 1.0,
+                            speakingRate: 0.85,
                         },
                     }),
                     'TTS synthesis'
@@ -386,7 +386,7 @@ async function synthesizeChapter(
                     },
                     audioConfig: {
                         audioEncoding: 'MP3',
-                        speakingRate: 1.0,
+                        speakingRate: 0.85,
                     },
                 }),
                 'TTS synthesis'
