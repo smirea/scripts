@@ -24,6 +24,7 @@ this is a typescript script that receives a content (a webpage to start) and con
 - [x] create proper RSS feed format for the audio file - goal is for an app like Overcast to be able to automatically import this
 	- [x] create a public read-only gcs bucket "stefan-rss-feed" and store under "/read-to-me/"
 	- [x] add a `--skip-upload` flag that should be used in testing
+	- [ ] the RSS feed is for the entire podcast. each upload is a new episode
 	- [x] create a summary for the audio and set as metadata
 	- [x] set all other relevant metadata in the audio file
 	- [x] upload all the needed assets in the bucket
