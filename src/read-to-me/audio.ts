@@ -1,4 +1,7 @@
 import chalk from 'chalk';
+import { unlink } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import pLimit from 'p-limit';
 import { withRetry } from '../utils/retry';
 import { ttsClient } from './clients';
@@ -8,6 +11,18 @@ import type { Chapter, ChapterAudio, ChapterWithSegments, ContentSegment, Extrac
 import { getOppositeGenderVoice, type EnglishDialect, type Voice } from './voice';
 
 const ttsLimit = pLimit(TTS_CONCURRENCY);
+
+async function getAudioDurationMs(buffer: Buffer): Promise<number> {
+    const tempPath = join(tmpdir(), `audio-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+    await Bun.write(tempPath, buffer);
+    try {
+        const result = await Bun.$`ffprobe -v error -show_entries format=duration -of csv=p=0 ${tempPath}`.quiet();
+        const seconds = parseFloat(result.text().trim());
+        return Math.round(seconds * 1000);
+    } finally {
+        await unlink(tempPath).catch(() => {});
+    }
+}
 
 // =============================================================================
 // Text Chunking
@@ -324,9 +339,9 @@ async function synthesizeChapterWithSegments(
     }
 
     const audioBuffer = Buffer.concat(audioBuffers);
-    const durationMs = Math.round((audioBuffer.length / 3000) * 1000);
+    const durationMs = await getAudioDurationMs(audioBuffer);
 
-    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ~${(durationMs / 1000).toFixed(1)}s`));
+    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ${(durationMs / 1000).toFixed(1)}s`));
 
     return {
         title: chapter.title,
@@ -392,10 +407,10 @@ async function synthesizeChapter(
         .map(r => r.buffer as Buffer);
 
     const audioBuffer = Buffer.concat(audioBuffers);
-    const durationMs = Math.round((audioBuffer.length / 3000) * 1000);
+    const durationMs = await getAudioDurationMs(audioBuffer);
 
     const ssmlTag = isSSML ? chalk.cyan(' [SSML]') : '';
-    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ~${(durationMs / 1000).toFixed(1)}s${ssmlTag}`));
+    console.log(chalk.green(`    → ${(audioBuffer.length / 1024).toFixed(1)} KB, ${(durationMs / 1000).toFixed(1)}s${ssmlTag}`));
 
     return {
         title: chapter.title,
