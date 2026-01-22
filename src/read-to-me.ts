@@ -1392,7 +1392,7 @@ createScript(async () => {
     });
 
     // Generate ffmetadata file for chapters
-    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime, summary, narrator);
+    const ffmetadataContent = generateFfmetadata(content, chapters, currentTime, summary, narrator, url);
     const ffmetadataPath = path.join(outputDir, 'ffmetadata.txt');
     await Bun.write(ffmetadataPath, ffmetadataContent);
 
@@ -1816,6 +1816,7 @@ function generateFfmetadata(
     totalDurationMs: number,
     summary: string,
     narrator: string,
+    sourceUrl: string,
 ): string {
     // Generate ffmetadata format for ffmpeg chapter embedding
     // See: https://ffmpeg.org/ffmpeg-formats.html#Metadata-1
@@ -1825,8 +1826,9 @@ function generateFfmetadata(
     }
     metadata += `album=Read To Me\n`;
     metadata += `composer=${escapeMetadata(narrator)}\n`;
-    metadata += `description=${escapeMetadata(summary)}\n`;
-    metadata += `comment=${escapeMetadata(summary)}\n`;
+    const fullDescription = `${summary} Source: ${sourceUrl}`;
+    metadata += `description=${escapeMetadata(fullDescription)}\n`;
+    metadata += `comment=${escapeMetadata(fullDescription)}\n`;
     metadata += `genre=Podcast\n`;
     metadata += `\n`;
 
