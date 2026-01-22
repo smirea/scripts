@@ -1,6 +1,12 @@
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import { CHIRP3_VOICES, ENGLISH_DIALECTS, type EnglishDialect } from './voice';
+import { VOICE_NAMES, ENGLISH_DIALECTS, DEFAULT_VOICE, printVoicesTable, type EnglishDialect } from './voice';
+
+// Handle --print-voices flag early (before yargs validation)
+if (process.argv.includes('--print-voices')) {
+    printVoicesTable();
+    process.exit(0);
+}
 
 export const argv = yargs(hideBin(process.argv))
     .scriptName('read-to-me')
@@ -11,11 +17,15 @@ export const argv = yargs(hideBin(process.argv))
             demandOption: true,
         });
     })
+    .option('print-voices', {
+        describe: 'Print available voices and exit',
+        type: 'boolean',
+    })
     .option('voice', {
         alias: 'v',
         describe: 'Voice to use for TTS',
-        choices: [...CHIRP3_VOICES, 'random', 'random-male', 'random-female'] as const,
-        default: 'Zephyr' as const,
+        choices: [...VOICE_NAMES, 'random', 'random-male', 'random-female'] as const,
+        default: DEFAULT_VOICE,
     })
     .option('dialect', {
         alias: 'd',
