@@ -1,0 +1,18 @@
+{
+    "name": "scripts",
+    "private": true,
+    "scripts": {
+        "lint": "oxlint --fix",
+        "test": "bun test",
+        "dev": "bun --watch src/index.ts"
+    },
+    "dependencies": {
+        "@types/bun": "^1.3.8",
+        "@typescript/native-preview": "^7.0.0-dev.20260129.1",
+        "kill-port-process": "^3.2.1",
+        "lefthook": "^2.0.16",
+        "lodash": "^4.17.23",
+        "oxlint": "^1.42.0",
+        "typescript": "^5.9.3"
+    }
+}
