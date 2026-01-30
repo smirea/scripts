@@ -213,7 +213,7 @@ function sanitizeEnvValue(value: string): string | undefined {
 function setEnvVarInFile(filePath: string, key: string, value: string): void {
   const content = readFileSync(filePath, "utf8");
   const lines = content.split(/\r?\n/);
-  const assignmentPattern = new RegExp(`^(?:\s*export\s+)?${key}\\s*=`, "i");
+  const assignmentPattern = new RegExp(`^(?:s*exports+)?${key}\\s*=`, "i");
   let updated = false;
   for (let i = 0; i < lines.length; i++) {
     if (assignmentPattern.test(lines[i])) {
@@ -319,8 +319,10 @@ function trimMessageBlock(value: string): string {
   return lines.join("\n");
 }
 
+const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
+
 function stripAnsi(value: string): string {
-  return value.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+  return value.replace(ANSI_REGEX, "");
 }
 
 function handleSpawnErrors(result: SpawnSyncReturns<string>, label: string): void {
