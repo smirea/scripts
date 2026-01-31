@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
+import { isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
+import type { StdioOptions } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
@@ -8,7 +10,7 @@ import { hideBin } from "yargs/helpers";
 
 const home = requireEnv("HOME");
 
-runCli();
+void runCli();
 
 interface WorktreeEntry {
   path: string;
@@ -27,8 +29,8 @@ interface RepoInfo {
   worktreesRoot: string;
 }
 
-function runCli(): void {
-  yargs(hideBin(process.argv))
+async function runCli(): Promise<void> {
+  await yargs(hideBin(process.argv))
     .scriptName("git-worktree")
     .strict()
     .command(
@@ -38,7 +40,8 @@ function runCli(): void {
       (argv: ArgumentsCamelCase<{ branch: string }>) =>
         runOrExit(() => {
           const info = getRepoInfo();
-          addWorktree(info, argv.branch);
+          const worktreePath = addWorktree(info, argv.branch);
+          console.log(`Worktree ready: ${worktreePath}`);
         })
     )
     .command(
@@ -72,15 +75,25 @@ function runCli(): void {
           console.log(target);
         })
     )
-    .demandCommand(1, "Command required.")
+    .command(
+      "$0",
+      "Interactively select a worktree",
+      () => {},
+      () =>
+        runOrExit(async () => {
+          const info = getRepoInfo();
+          const target = await selectWorktreeInteractive(info);
+          console.log(target);
+        })
+    )
     .help()
     .wrap(100)
-    .parse();
+    .parseAsync();
 }
 
-function runOrExit(fn: () => void): void {
+async function runOrExit(fn: () => void | Promise<void>): Promise<void> {
   try {
-    fn();
+    await fn();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
@@ -167,7 +180,11 @@ function isMainWorktree(worktreePath: string): boolean {
   }
 }
 
-function addWorktree(info: RepoInfo, branch: string): void {
+function addWorktree(
+  info: RepoInfo,
+  branch: string,
+  options: { stdio?: "inherit" | "stderr" } = {}
+): string {
   const safeBranch = normalizeBranch(branch);
   const worktreePath = path.join(info.worktreesRoot, `${info.repoName}__${safeBranch}`);
   if (!isSafeWorktreePath(info.worktreesRoot, worktreePath)) {
@@ -185,10 +202,11 @@ function addWorktree(info: RepoInfo, branch: string): void {
   const args = hasBranch
     ? ["worktree", "add", worktreePath, branch]
     : ["worktree", "add", "-b", branch, worktreePath];
-  runCommand("git", args, { cwd: info.mainWorktree.path, stdio: "inherit" });
+  const stdio = options.stdio ?? "inherit";
+  runCommand("git", args, { cwd: info.mainWorktree.path, stdio });
   copyEnvFiles(info.mainWorktree.path, worktreePath);
-  runCommand("bun", ["install"], { cwd: worktreePath, stdio: "inherit" });
-  console.log(`Worktree ready: ${worktreePath}`);
+  runCommand("bun", ["install"], { cwd: worktreePath, stdio });
+  return worktreePath;
 }
 
 function listWorktrees(info: RepoInfo): void {
@@ -200,6 +218,40 @@ function listWorktrees(info: RepoInfo): void {
   const nameWidth = rows.reduce((max, row) => Math.max(max, row.label.length), 0);
   const lines = rows.map(row => `${row.label.padEnd(nameWidth + 2)}${row.path}`);
   console.log(lines.join("\n"));
+}
+
+async function selectWorktreeInteractive(info: RepoInfo): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new Error("Interactive mode requires a TTY. Use `git-worktree list` instead.");
+  }
+  const options = info.worktrees.map(entry => ({
+    value: entry.path,
+    label: formatWorktreeLabel(info, entry),
+    hint: entry.path,
+  }));
+  options.push({ value: "__new__", label: "Create new worktree...", hint: "Add a new worktree" });
+  const selected = await select({
+    message: "Select a worktree",
+    options,
+    initialValue: info.currentWorktree,
+    output: process.stderr,
+  });
+  if (isCancel(selected)) {
+    process.exit(0);
+  }
+  if (selected === "__new__") {
+    const branch = await text({
+      message: "New worktree branch",
+      placeholder: "feature/example",
+      validate: value => (value?.trim() ? undefined : "Branch name is required."),
+      output: process.stderr,
+    });
+    if (isCancel(branch)) {
+      process.exit(0);
+    }
+    return addWorktree(info, branch, { stdio: "stderr" });
+  }
+  return resolveSelectedWorktree(info, selected);
 }
 
 function removeWorktree(info: RepoInfo, branch: string): void {
@@ -219,9 +271,6 @@ function removeWorktree(info: RepoInfo, branch: string): void {
 function resolveWorktreePath(info: RepoInfo, branch: string): string {
   const entry = findWorktreeByBranch(info, branch);
   if (entry) {
-    if (!entry.isMain && !isSafeWorktreePath(info.worktreesRoot, entry.path)) {
-      throw new Error(`Worktree for ${branch} is outside ${info.worktreesRoot}.`);
-    }
     return entry.path;
   }
   throw new Error(`No worktree found for branch ${branch}.`);
@@ -229,6 +278,32 @@ function resolveWorktreePath(info: RepoInfo, branch: string): string {
 
 function findWorktreeByBranch(info: RepoInfo, branch: string): WorktreeEntry | undefined {
   return info.worktrees.find(entry => entry.branch === branch);
+}
+
+function resolveSelectedWorktree(info: RepoInfo, selection: string): string {
+  const entry = info.worktrees.find(item => item.path === selection);
+  if (!entry) {
+    throw new Error(`Unknown worktree selection: ${selection}`);
+  }
+  if (entry.branch) {
+    return resolveWorktreePath(info, entry.branch);
+  }
+  return entry.path;
+}
+
+function formatWorktreeLabel(info: RepoInfo, entry: WorktreeEntry): string {
+  const branch = entry.branch ?? "(detached)";
+  const tags: string[] = [];
+  if (entry.isMain) {
+    tags.push("main");
+  }
+  if (entry.path === info.currentWorktree) {
+    tags.push("current");
+  }
+  if (tags.length === 0) {
+    return branch;
+  }
+  return `${branch} (${tags.join(", ")})`;
 }
 
 function branchExists(info: RepoInfo, branch: string): boolean {
@@ -278,12 +353,14 @@ function copyEnvFiles(fromDir: string, toDir: string): void {
 function runCommand(
   command: string,
   args: string[],
-  options: { cwd?: string; stdio?: "inherit" | "pipe" } = {}
+  options: { cwd?: string; stdio?: "inherit" | "pipe" | "stderr" } = {}
 ): string {
+  const stdio: StdioOptions =
+    options.stdio === "stderr" ? ["inherit", process.stderr, process.stderr] : options.stdio ?? "pipe";
   const result = spawnSync(command, args, {
     cwd: options.cwd,
     encoding: "utf8",
-    stdio: options.stdio ?? "pipe",
+    stdio: stdio ?? "pipe",
   });
   if (result.error) {
     throw result.error;
