@@ -2,50 +2,13 @@
 import { spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
+import yargs from "yargs";
+import type { Argv, ArgumentsCamelCase } from "yargs";
+import { hideBin } from "yargs/helpers";
 
 const home = requireEnv("HOME");
 
-const rawArgs = process.argv.slice(2);
-if (rawArgs.length === 0 || rawArgs[0] === "help" || rawArgs[0] === "--help") {
-  printUsage();
-  process.exit(0);
-}
-
-const [command, ...rest] = rawArgs;
-
-try {
-  const info = getRepoInfo();
-
-  switch (command) {
-    case "add": {
-      const branch = requireBranch(rest);
-      addWorktree(info, branch);
-      break;
-    }
-    case "list": {
-      ensureNoExtraArgs(rest, command);
-      listWorktrees(info);
-      break;
-    }
-    case "remove": {
-      const branch = requireBranch(rest);
-      removeWorktree(info, branch);
-      break;
-    }
-    case "cd": {
-      const branch = requireBranch(rest);
-      const target = resolveWorktreePath(info, branch);
-      console.log(target);
-      break;
-    }
-    default:
-      throw new Error(`Unknown command: ${command}`);
-  }
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
-  process.exit(1);
-}
+runCli();
 
 interface WorktreeEntry {
   path: string;
@@ -64,24 +27,64 @@ interface RepoInfo {
   worktreesRoot: string;
 }
 
-function printUsage(): void {
-  console.log("Usage: git-worktree <add|list|remove|cd> [branch]");
+function runCli(): void {
+  yargs(hideBin(process.argv))
+    .scriptName("git-worktree")
+    .strict()
+    .command(
+      "add <branch>",
+      "Add a worktree for a branch",
+      (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
+      (argv: ArgumentsCamelCase<{ branch: string }>) =>
+        runOrExit(() => {
+          const info = getRepoInfo();
+          addWorktree(info, argv.branch);
+        })
+    )
+    .command(
+      ["list", "ls"],
+      "List worktrees",
+      () => {},
+      () =>
+        runOrExit(() => {
+          const info = getRepoInfo();
+          listWorktrees(info);
+        })
+    )
+    .command(
+      ["remove <branch>", "rm <branch>"],
+      "Remove a worktree",
+      (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
+      (argv: ArgumentsCamelCase<{ branch: string }>) =>
+        runOrExit(() => {
+          const info = getRepoInfo();
+          removeWorktree(info, argv.branch);
+        })
+    )
+    .command(
+      "cd <branch>",
+      "Print worktree path for a branch",
+      (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
+      (argv: ArgumentsCamelCase<{ branch: string }>) =>
+        runOrExit(() => {
+          const info = getRepoInfo();
+          const target = resolveWorktreePath(info, argv.branch);
+          console.log(target);
+        })
+    )
+    .demandCommand(1, "Command required.")
+    .help()
+    .wrap(100)
+    .parse();
 }
 
-function requireBranch(args: string[]): string {
-  if (args.length !== 1) {
-    throw new Error("Branch name is required.");
-  }
-  const branch = args[0].trim();
-  if (!branch) {
-    throw new Error("Branch name is required.");
-  }
-  return branch;
-}
-
-function ensureNoExtraArgs(args: string[], cmd: string): void {
-  if (args.length > 0) {
-    throw new Error(`Unexpected arguments for ${cmd}.`);
+function runOrExit(fn: () => void): void {
+  try {
+    fn();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(message);
+    process.exit(1);
   }
 }
 
@@ -189,11 +192,13 @@ function addWorktree(info: RepoInfo, branch: string): void {
 }
 
 function listWorktrees(info: RepoInfo): void {
-  const lines = info.worktrees.map(entry => {
+  const rows = info.worktrees.map(entry => {
     const branch = entry.branch ?? "(detached)";
     const label = entry.isMain ? `${branch} (main)` : branch;
-    return `${label}\t${entry.path}`;
+    return { label, path: entry.path };
   });
+  const nameWidth = rows.reduce((max, row) => Math.max(max, row.label.length), 0);
+  const lines = rows.map(row => `${row.label.padEnd(nameWidth + 2)}${row.path}`);
   console.log(lines.join("\n"));
 }
 
