@@ -14,13 +14,30 @@ const links = [
     source: path.join(repoRoot, "src", "git-commit-ai.ts"),
     target: path.join(home, "bin", "gai"),
   },
+  {
+    name: "git-worktree",
+    source: path.join(repoRoot, "src", "git-worktree.ts"),
+    target: path.join(home, "bin", "git-worktree"),
+  },
+  {
+    name: "wt",
+    source: path.join(repoRoot, "src", "git-worktree.ts"),
+    target: path.join(home, "bin", "wt"),
+  },
 ];
 
+const addedLinks: string[] = [];
 for (const link of links) {
-  ensureLink(link);
+  if (ensureLink(link)) {
+    addedLinks.push(`${link.target} -> ${link.source}`);
+  }
 }
 
-function ensureLink(link: { name: string; source: string; target: string }): void {
+for (const added of addedLinks) {
+  console.log(`Added ${added}`);
+}
+
+function ensureLink(link: { name: string; source: string; target: string }): boolean {
   if (!existsSync(link.source)) {
     throw new Error(`Missing source for ${link.name}: ${link.source}`);
   }
@@ -37,12 +54,11 @@ function ensureLink(link: { name: string; source: string; target: string }): voi
       const current = readlinkSync(link.target);
       const resolved = path.resolve(targetDir, current);
       if (resolved === path.resolve(link.source)) {
-        console.log(`Link already set: ${link.target}`);
-        return;
+        return false;
       }
     }
     unlinkSync(link.target);
   }
   symlinkSync(link.source, link.target);
-  console.log(`Linked ${link.target} -> ${link.source}`);
+  return true;
 }

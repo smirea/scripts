@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { spawnSync, SpawnSyncReturns } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import type { SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -325,7 +326,7 @@ function stripAnsi(value: string): string {
   return value.replace(ANSI_REGEX, "");
 }
 
-function handleSpawnErrors(result: SpawnSyncReturns<string>, label: string): void {
+function handleSpawnErrors(result: SpawnSyncReturns<string | Buffer>, label: string): void {
   if (result.error) {
     throw new Error(`${label} failed: ${result.error.message}`);
   }
