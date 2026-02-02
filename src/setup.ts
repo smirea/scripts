@@ -24,6 +24,11 @@ const links = [
     source: path.join(repoRoot, "src", "git-worktree.ts"),
     target: path.join(home, "bin", "wt"),
   },
+  {
+    name: "whoop-pull",
+    source: path.join(repoRoot, "src", "whoop-pull.ts"),
+    target: path.join(home, "bin", "whoop-pull"),
+  },
 ];
 
 const addedLinks: string[] = [];

@@ -16,6 +16,7 @@ interface CliOptions {
 }
 
 const rawArgs = process.argv.slice(2);
+const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
 
 try {
   const { args, who } = parseCliArgs(rawArgs);
@@ -319,8 +320,6 @@ function trimMessageBlock(value: string): string {
   }
   return lines.join("\n");
 }
-
-const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
 
 function stripAnsi(value: string): string {
   return value.replace(ANSI_REGEX, "");
