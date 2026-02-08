@@ -56,7 +56,7 @@ function createSandboxRepo(): SandboxRepo {
 
   writeFileSync(path.join(mainRepoPath, "README.md"), "sandbox\n");
   runGit(["add", "README.md"], mainRepoPath);
-  runGit(["commit", "-m", "init"], mainRepoPath);
+  runGit(["commit", "--no-verify", "-m", "init"], mainRepoPath);
   runGit(["worktree", "add", "-b", "feature/remove-me", featureWorktreePath], mainRepoPath);
 
   return { homeDir, mainRepoPath, featureWorktreePath };
