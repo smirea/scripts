@@ -83,6 +83,10 @@ async function runCli(): Promise<void> {
         runOrExit(async () => {
           const info = getRepoInfo();
           const target = await selectWorktreeInteractive(info);
+          if (shouldSwitchToSelectedWorktree()) {
+            switchToWorktreeShell(target);
+            return;
+          }
           console.log(target);
         })
     )
@@ -252,6 +256,24 @@ async function selectWorktreeInteractive(info: RepoInfo): Promise<string> {
     return addWorktree(info, branch, { stdio: "stderr" });
   }
   return resolveSelectedWorktree(info, selected);
+}
+
+function shouldSwitchToSelectedWorktree(): boolean {
+  return process.stdin.isTTY && process.stdout.isTTY;
+}
+
+function switchToWorktreeShell(worktreePath: string): void {
+  const shell = requireEnv("SHELL");
+  const result = spawnSync(shell, { cwd: worktreePath, stdio: "inherit" });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.signal) {
+    throw new Error(`${path.basename(shell)} exited due to signal ${result.signal}.`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`${path.basename(shell)} exited with status ${result.status}.`);
+  }
 }
 
 function removeWorktree(info: RepoInfo, branch: string): void {
