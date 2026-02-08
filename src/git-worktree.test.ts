@@ -43,10 +43,13 @@ interface SandboxRepo {
 }
 
 function createSandboxRepo(): SandboxRepo {
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  const safeId = id.replace(/[^a-z0-9]+/gi, "_");
   const homeDir = realpathSync(mkdtempSync(path.join(tmpdir(), "git-worktree-home-")));
-  const mainRepoPath = path.join(homeDir, "repo");
+  const mainRepoPath = path.join(homeDir, `repo_${safeId}`);
   const worktreesRoot = path.join(homeDir, "worktrees");
-  const featureWorktreePath = path.join(worktreesRoot, "repo__feature_remove_me");
+  const branchName = `feature/remove-me-${safeId}`;
+  const featureWorktreePath = path.join(worktreesRoot, `repo_${safeId}__feature_remove_me_${safeId}`);
   mkdirSync(mainRepoPath, { recursive: true });
   mkdirSync(worktreesRoot, { recursive: true });
 
@@ -56,8 +59,8 @@ function createSandboxRepo(): SandboxRepo {
 
   writeFileSync(path.join(mainRepoPath, "README.md"), "sandbox\n");
   runGit(["add", "README.md"], mainRepoPath);
-  runGit(["commit", "--no-verify", "-m", "init"], mainRepoPath);
-  runGit(["worktree", "add", "-b", "feature/remove-me", featureWorktreePath], mainRepoPath);
+  runGit(["commit", "--no-verify", "--allow-empty", "-m", "init"], mainRepoPath);
+  runGit(["worktree", "add", "-b", branchName, featureWorktreePath], mainRepoPath);
 
   return { homeDir, mainRepoPath, featureWorktreePath };
 }
