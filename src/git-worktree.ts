@@ -2,7 +2,7 @@
 import { isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
@@ -18,11 +18,13 @@ interface WorktreeEntry {
   branchRef?: string;
   branch?: string;
   detached?: boolean;
+  bare?: boolean;
   isMain?: boolean;
 }
 
 interface RepoInfo {
-  currentWorktree: string;
+  currentWorktree?: string;
+  currentWorktreeEntry?: WorktreeEntry;
   mainWorktree: WorktreeEntry;
   worktrees: WorktreeEntry[];
   repoName: string;
@@ -55,10 +57,10 @@ async function runCli(): Promise<void> {
         })
     )
     .command(
-      ["remove <branch>", "rm <branch>"],
+      ["remove [branch]", "rm [branch]"],
       "Remove a worktree",
-      (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
-      (argv: ArgumentsCamelCase<{ branch: string }>) =>
+      (y: Argv) => y.positional("branch", { type: "string" }),
+      (argv: ArgumentsCamelCase<{ branch?: string }>) =>
         runOrExit(() => {
           const info = getRepoInfo();
           removeWorktree(info, argv.branch);
@@ -106,25 +108,32 @@ async function runOrExit(fn: () => void | Promise<void>): Promise<void> {
 }
 
 function getRepoInfo(): RepoInfo {
-  const currentWorktree = runCommand("git", ["rev-parse", "--show-toplevel"]).trim();
-  if (!currentWorktree) {
-    throw new Error("Unable to determine git root.");
-  }
+  ensureInsideGitRepository();
   const rawWorktrees = runCommand("git", ["worktree", "list", "--porcelain"]);
   const worktrees = parseWorktrees(rawWorktrees).map(entry => ({
     ...entry,
     branch: branchFromRef(entry.branchRef),
   }));
   for (const entry of worktrees) {
-    entry.isMain = isMainWorktree(entry.path);
+    entry.isMain = entry.bare || isMainWorktree(entry.path);
   }
   if (worktrees.length === 0) {
     throw new Error("No git worktrees found.");
   }
   const mainWorktree = worktrees.find(entry => entry.isMain) ?? worktrees[0];
+  mainWorktree.isMain = true;
+  const currentWorktreeEntry = resolveCurrentWorktreeEntry(worktrees);
+  const currentWorktree = currentWorktreeEntry?.path;
   const repoName = path.basename(mainWorktree.path);
   const worktreesRoot = path.join(home, "worktrees");
-  return { currentWorktree, mainWorktree, worktrees, repoName, worktreesRoot };
+  return {
+    currentWorktree,
+    currentWorktreeEntry,
+    mainWorktree,
+    worktrees,
+    repoName,
+    worktreesRoot,
+  };
 }
 
 function parseWorktrees(raw: string): WorktreeEntry[] {
@@ -156,6 +165,10 @@ function parseWorktrees(raw: string): WorktreeEntry[] {
     }
     if (key === "detached") {
       current.detached = true;
+      continue;
+    }
+    if (key === "bare") {
+      current.bare = true;
     }
   }
   if (current) {
@@ -276,16 +289,32 @@ function switchToWorktreeShell(worktreePath: string): void {
   }
 }
 
-function removeWorktree(info: RepoInfo, branch: string): void {
-  const entry = findWorktreeByBranch(info, branch);
+function removeWorktree(info: RepoInfo, branch?: string): void {
+  const normalizedBranch = branch?.trim();
+  if (!normalizedBranch) {
+    const current = info.currentWorktreeEntry;
+    if (!current || current.isMain) {
+      throw new Error("Branch name is required when current directory is not a linked worktree.");
+    }
+    if (!isSafeWorktreePath(info.worktreesRoot, current.path)) {
+      const label = current.branch ?? current.path;
+      throw new Error(`Worktree for ${label} is outside ${info.worktreesRoot}.`);
+    }
+    runCommand("git", ["worktree", "remove", current.path], {
+      cwd: info.mainWorktree.path,
+      stdio: "inherit",
+    });
+    return;
+  }
+  const entry = findWorktreeByBranch(info, normalizedBranch);
   if (!entry) {
-    throw new Error(`No worktree found for branch ${branch}.`);
+    throw new Error(`No worktree found for branch ${normalizedBranch}.`);
   }
   if (entry.isMain) {
     throw new Error(`Refusing to remove main worktree at ${entry.path}.`);
   }
   if (!isSafeWorktreePath(info.worktreesRoot, entry.path)) {
-    throw new Error(`Worktree for ${branch} is outside ${info.worktreesRoot}.`);
+    throw new Error(`Worktree for ${normalizedBranch} is outside ${info.worktreesRoot}.`);
   }
   runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
 }
@@ -352,9 +381,55 @@ function normalizeBranch(branch: string): string {
 }
 
 function isSafeWorktreePath(root: string, target: string): boolean {
-  const resolvedRoot = path.resolve(root);
-  const resolvedTarget = path.resolve(target);
+  const resolvedRoot = canonicalizePath(root);
+  const resolvedTarget = canonicalizePath(target);
   return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(resolvedRoot + path.sep);
+}
+
+function canonicalizePath(value: string): string {
+  const resolved = path.resolve(value);
+  if (existsSync(resolved)) {
+    return realpathSync(resolved);
+  }
+  const parent = path.dirname(resolved);
+  if (parent === resolved) {
+    return resolved;
+  }
+  return path.join(canonicalizePath(parent), path.basename(resolved));
+}
+
+function ensureInsideGitRepository(): void {
+  const result = spawnSync("git", ["rev-parse", "--absolute-git-dir"], { encoding: "utf8" });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error("Current directory is not inside a git repository.");
+  }
+}
+
+function resolveCurrentWorktreeEntry(worktrees: WorktreeEntry[]): WorktreeEntry | undefined {
+  const gitTopLevel = getCurrentWorktreeFromGit();
+  if (gitTopLevel) {
+    return worktrees.find(entry => canonicalizePath(entry.path) === canonicalizePath(gitTopLevel));
+  }
+  const cwd = path.resolve(process.cwd());
+  const candidates = worktrees
+    .filter(entry => isSafeWorktreePath(entry.path, cwd))
+    .sort((a, b) => path.resolve(b.path).length - path.resolve(a.path).length);
+  return candidates[0];
+}
+
+function getCurrentWorktreeFromGit(): string | undefined {
+  const result = spawnSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8" });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    return undefined;
+  }
+  const value = result.stdout?.toString().trim();
+  return value || undefined;
 }
 
 function copyEnvFiles(fromDir: string, toDir: string): void {
