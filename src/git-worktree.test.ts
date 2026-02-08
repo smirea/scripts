@@ -66,7 +66,7 @@ function createSandboxRepo(): SandboxRepo {
 }
 
 function runGit(args: string[], cwd: string): string {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", env: withoutGitEnv() });
   if (result.status !== 0) {
     throw new Error(result.stderr.trim() || `git ${args.join(" ")} failed.`);
   }
@@ -77,9 +77,16 @@ function runWorktreeScript(args: string[], cwd: string, homeDir: string) {
   return spawnSync(bunPath, [scriptPath, ...args], {
     cwd,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      HOME: homeDir,
-    },
+    env: withoutGitEnv({ HOME: homeDir }),
   });
+}
+
+function withoutGitEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_")) {
+      delete env[key];
+    }
+  }
+  return { ...env, ...overrides };
 }
