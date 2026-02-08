@@ -29,6 +29,11 @@ const links = [
     source: path.join(repoRoot, "src", "whoop-pull.ts"),
     target: path.join(home, "bin", "whoop-pull"),
   },
+  {
+    name: "macrofactor",
+    source: path.join(repoRoot, "src", "macrofactor.ts"),
+    target: path.join(home, "bin", "macrofactor"),
+  },
 ];
 
 const addedLinks: string[] = [];
