@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
@@ -19,6 +20,9 @@ const CSV_COLUMNS = [
 ] as const;
 const OUTPUT_FORMATS = ["json", "table", "csv"] as const;
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
+const APP_NAME = "MacroFactor";
+const APP_SYNC_WAIT_MILLISECONDS = 12_000;
+const APP_SYNC_SKIP_WINDOW_MILLISECONDS = 60 * 60 * 1000;
 
 export interface MacrofactorReport {
   generatedAt: string;
@@ -154,6 +158,11 @@ async function runCli(): Promise<void> {
         default: true,
         describe: "Pretty-print JSON output",
       })
+      .option("app", {
+        type: "boolean",
+        default: true,
+        describe: "Open MacroFactor and refresh cache before export when local sync is stale",
+      })
       .help()
       .parseAsync();
 
@@ -162,6 +171,11 @@ async function runCli(): Promise<void> {
     }
 
     const sourcePath = path.resolve(args.source);
+    if (args.app) {
+      await syncFromMacrofactorAppIfNeeded({
+        sourcePath,
+      });
+    }
     if (!existsSync(sourcePath)) {
       throw new Error(`Source file does not exist: ${sourcePath}`);
     }
@@ -203,6 +217,63 @@ function parseFormat(value: string): OutputFormat {
     return value as OutputFormat;
   }
   throw new Error(`Invalid format: ${value}`);
+}
+
+async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): Promise<void> {
+  const sourceExists = existsSync(options.sourcePath);
+  const lastSyncMilliseconds = sourceExists ? getFileModifiedMilliseconds(options.sourcePath) : null;
+  if (
+    !shouldSyncFromApp({
+      lastSyncMilliseconds,
+      nowMilliseconds: Date.now(),
+      skipWindowMilliseconds: APP_SYNC_SKIP_WINDOW_MILLISECONDS,
+      force: !sourceExists,
+    })
+  ) {
+    return;
+  }
+
+  runCommandOrThrow("open", ["-a", APP_NAME], `Failed to open ${APP_NAME}.`);
+  await sleep(APP_SYNC_WAIT_MILLISECONDS);
+  runCommandOrThrow(
+    "osascript",
+    ["-e", `tell application "${APP_NAME}" to quit`],
+    `Failed to quit ${APP_NAME}.`
+  );
+}
+
+export function shouldSyncFromApp(options: {
+  lastSyncMilliseconds: number | null;
+  nowMilliseconds: number;
+  skipWindowMilliseconds: number;
+  force: boolean;
+}): boolean {
+  if (options.force) {
+    return true;
+  }
+  if (!isFiniteNumber(options.lastSyncMilliseconds)) {
+    return true;
+  }
+  return options.nowMilliseconds - options.lastSyncMilliseconds >= options.skipWindowMilliseconds;
+}
+
+function getFileModifiedMilliseconds(filePath: string): number {
+  return statSync(filePath).mtimeMs;
+}
+
+function runCommandOrThrow(command: string, args: string[], errorPrefix: string): void {
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  if (result.status === 0) {
+    return;
+  }
+  const stderr = `${result.stderr ?? ""}`.trim();
+  const stdout = `${result.stdout ?? ""}`.trim();
+  const details = stderr || stdout;
+  throw new Error(details ? `${errorPrefix} ${details}` : errorPrefix);
+}
+
+async function sleep(milliseconds: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 function renderOutput(options: {

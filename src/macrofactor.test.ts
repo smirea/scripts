@@ -5,6 +5,7 @@ import {
   type MacrofactorReport,
   buildMacrofactorReport,
   renderCsv,
+  shouldSyncFromApp,
   toConciseRows,
 } from "./macrofactor";
 
@@ -171,3 +172,46 @@ describe("concise output", () => {
   });
 });
 
+describe("app sync policy", () => {
+  it("skips app refresh when last sync is newer than one hour", () => {
+    const now = 2_000_000;
+    const shouldSync = shouldSyncFromApp({
+      lastSyncMilliseconds: now - 30 * 60 * 1000,
+      nowMilliseconds: now,
+      skipWindowMilliseconds: 60 * 60 * 1000,
+      force: false,
+    });
+    expect(shouldSync).toBe(false);
+  });
+
+  it("refreshes when stale, missing, or forced", () => {
+    const now = 2_000_000;
+
+    expect(
+      shouldSyncFromApp({
+        lastSyncMilliseconds: now - 61 * 60 * 1000,
+        nowMilliseconds: now,
+        skipWindowMilliseconds: 60 * 60 * 1000,
+        force: false,
+      })
+    ).toBe(true);
+
+    expect(
+      shouldSyncFromApp({
+        lastSyncMilliseconds: null,
+        nowMilliseconds: now,
+        skipWindowMilliseconds: 60 * 60 * 1000,
+        force: false,
+      })
+    ).toBe(true);
+
+    expect(
+      shouldSyncFromApp({
+        lastSyncMilliseconds: now - 1_000,
+        nowMilliseconds: now,
+        skipWindowMilliseconds: 60 * 60 * 1000,
+        force: true,
+      })
+    ).toBe(true);
+  });
+});
