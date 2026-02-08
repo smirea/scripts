@@ -55,10 +55,10 @@ async function runCli(): Promise<void> {
         })
     )
     .command(
-      ["remove <branch>", "rm <branch>"],
+      ["remove [branch]", "rm [branch]", "del [branch]"],
       "Remove a worktree",
-      (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
-      (argv: ArgumentsCamelCase<{ branch: string }>) =>
+      (y: Argv) => y.positional("branch", { type: "string" }),
+      (argv: ArgumentsCamelCase<{ branch?: string }>) =>
         runOrExit(() => {
           const info = getRepoInfo();
           removeWorktree(info, argv.branch);
@@ -254,8 +254,8 @@ async function selectWorktreeInteractive(info: RepoInfo): Promise<string> {
   return resolveSelectedWorktree(info, selected);
 }
 
-function removeWorktree(info: RepoInfo, branch: string): void {
-  const entry = findWorktreeByBranch(info, branch);
+function removeWorktree(info: RepoInfo, branch?: string): void {
+  const entry = branch ? findWorktreeByBranch(info, branch) : findCurrentWorktreeForRemoval(info);
   if (!entry) {
     throw new Error(`No worktree found for branch ${branch}.`);
   }
@@ -263,9 +263,27 @@ function removeWorktree(info: RepoInfo, branch: string): void {
     throw new Error(`Refusing to remove main worktree at ${entry.path}.`);
   }
   if (!isSafeWorktreePath(info.worktreesRoot, entry.path)) {
-    throw new Error(`Worktree for ${branch} is outside ${info.worktreesRoot}.`);
+    throw new Error(`Worktree for ${entry.branch ?? branch ?? entry.path} is outside ${info.worktreesRoot}.`);
   }
   runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
+}
+
+function findCurrentWorktreeForRemoval(info: RepoInfo): WorktreeEntry {
+  const currentPath = path.resolve(info.currentWorktree);
+  const entry = info.worktrees.find(item => path.resolve(item.path) === currentPath);
+  if (!entry) {
+    throw new Error("Current directory is not in a git worktree.");
+  }
+  if (entry.branch === "master") {
+    throw new Error("Refusing to remove current worktree on branch master.");
+  }
+  if (entry.isMain) {
+    throw new Error("Current directory is the main worktree. Pass a branch to remove.");
+  }
+  if (!entry.branch) {
+    throw new Error("Current worktree is detached. Pass a branch to remove.");
+  }
+  return entry;
 }
 
 function resolveWorktreePath(info: RepoInfo, branch: string): string {
