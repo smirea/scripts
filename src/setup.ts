@@ -15,6 +15,11 @@ const links = [
     target: path.join(home, "bin", "gai"),
   },
   {
+    name: "git-ai-cim",
+    source: path.join(repoRoot, "src", "git-commit-ai.ts"),
+    target: path.join(home, "bin", "git-ai-cim"),
+  },
+  {
     name: "git-worktree",
     source: path.join(repoRoot, "src", "git-worktree.ts"),
     target: path.join(home, "bin", "git-worktree"),

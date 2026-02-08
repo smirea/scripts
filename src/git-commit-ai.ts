@@ -4,8 +4,13 @@ import type { SpawnSyncReturns } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-const AI_KEY = "AI_COMITTER_NAME";
-const DEFAULT_KEY = "DEFAULT_AI_COMITTER_NAME";
+const AI_NAME_KEYS = ["AI_COMITTER_NAME", "AI_COMMITTER_NAME"] as const;
+const DEFAULT_AI_NAME_KEYS = ["DEFAULT_AI_COMITTER_NAME", "DEFAULT_AI_COMMITTER_NAME"] as const;
+const AI_EMAIL_KEYS = ["AI_COMITTER_EMAIL", "AI_COMMITTER_EMAIL"] as const;
+const DEFAULT_AI_EMAIL_KEYS = ["DEFAULT_AI_COMITTER_EMAIL", "DEFAULT_AI_COMMITTER_EMAIL"] as const;
+const LEGACY_DEFAULT_AI_EMAIL = "me+ai@stefanmirea.com";
+const PRIMARY_AI_NAME_KEY = AI_NAME_KEYS[0];
+const PRIMARY_AI_EMAIL_KEY = AI_EMAIL_KEYS[0];
 const ENV_FILE_NAMES = [".env.local", ".env"] as const;
 
 type WhoAction = { type: "print" } | { type: "set"; value: string };
@@ -13,6 +18,11 @@ type WhoAction = { type: "print" } | { type: "set"; value: string };
 interface CliOptions {
   args: string[];
   who?: WhoAction;
+}
+
+interface AiIdentity {
+  authorName: string;
+  email: string;
 }
 
 const rawArgs = process.argv.slice(2);
@@ -26,9 +36,10 @@ try {
     process.exit(0);
   }
 
-  const aiCommitterName = resolveAiCommitterName();
+  assertInsideGitWorkTree();
+  const aiIdentity = resolveAiIdentity();
   if (args.length > 0) {
-    runGitAiCommit(aiCommitterName, args);
+    runGitCommit(aiIdentity, normalizeCommitArgs(args));
     process.exit(0);
   }
 
@@ -49,7 +60,7 @@ try {
   console.log(commitMessage);
   console.log();
   console.log("\x1b[1mCommitting...\x1b[0m");
-  runGitAiCommit(aiCommitterName, [commitMessage]);
+  runGitCommit(aiIdentity, ["-m", commitMessage]);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`\x1b[31m${message}\x1b[0m`);
@@ -58,19 +69,21 @@ try {
 
 function handleWhoAction(action: WhoAction): void {
   if (action.type === "print") {
-    const current = resolveAiCommitterName();
-    console.log(`AI_COMITTER_NAME=${current}`);
+    const currentName = resolveAiCommitterName();
+    const currentEmail = resolveAiCommitterEmail();
+    console.log(`${PRIMARY_AI_NAME_KEY}=${currentName}`);
+    console.log(`${PRIMARY_AI_EMAIL_KEY}=${currentEmail}`);
     return;
   }
   const targetFile = findFirstEnvFile(process.cwd());
   if (!targetFile) {
     throw new Error(
-      `Unable to set ${AI_KEY}. No .env.local or .env file was found while walking up from ${process.cwd()}.`
+      `Unable to set ${PRIMARY_AI_NAME_KEY}. No .env.local or .env file was found while walking up from ${process.cwd()}.`
     );
   }
-  setEnvVarInFile(targetFile, AI_KEY, action.value);
-  console.log(`Updated ${targetFile} with ${AI_KEY}=${action.value}`);
-  console.log(`AI_COMITTER_NAME=${action.value}`);
+  setEnvVarInFile(targetFile, PRIMARY_AI_NAME_KEY, action.value);
+  console.log(`Updated ${targetFile} with ${PRIMARY_AI_NAME_KEY}=${action.value}`);
+  console.log(`${PRIMARY_AI_NAME_KEY}=${action.value}`);
 }
 
 function parseCliArgs(rawArgs: string[]): CliOptions {
@@ -101,21 +114,53 @@ function parseCliArgs(rawArgs: string[]): CliOptions {
 }
 
 function resolveAiCommitterName(): string {
-  const direct = readEnvVar(AI_KEY);
+  return resolveRequiredValue(PRIMARY_AI_NAME_KEY, AI_NAME_KEYS, DEFAULT_AI_NAME_KEYS);
+}
+
+function resolveAiCommitterEmail(): string {
+  return resolveRequiredValue(PRIMARY_AI_EMAIL_KEY, AI_EMAIL_KEYS, DEFAULT_AI_EMAIL_KEYS, LEGACY_DEFAULT_AI_EMAIL);
+}
+
+function resolveAiIdentity(): AiIdentity {
+  const aiName = resolveAiCommitterName();
+  const aiEmail = resolveAiCommitterEmail();
+  const humanName = resolveGitConfigValue("user.name");
+  return {
+    authorName: humanName ? `${aiName} (${humanName})` : aiName,
+    email: aiEmail,
+  };
+}
+
+function resolveRequiredValue(
+  primaryKey: string,
+  directKeys: readonly string[],
+  fallbackKeys: readonly string[],
+  literalFallback?: string
+): string {
+  const direct = resolveValue(directKeys);
   if (direct) {
     return direct;
   }
-  const fromFiles = findEnvVarFromEnvFiles(process.cwd(), AI_KEY);
-  if (fromFiles) {
-    return fromFiles;
-  }
-  const fallback = readEnvVar(DEFAULT_KEY);
+  const fallback = resolveValue(fallbackKeys);
   if (fallback) {
     return fallback;
   }
+  if (literalFallback) {
+    return literalFallback;
+  }
   throw new Error(
-    `${AI_KEY} is not configured. Define it in the environment, a .env/.env.local file, or set ${DEFAULT_KEY}.`
+    `${primaryKey} is not configured. Define one of [${directKeys.join(", ")}] in the environment or a .env/.env.local file, or set one of [${fallbackKeys.join(", ")}].`
   );
+}
+
+function resolveValue(keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const direct = readEnvVar(key);
+    if (direct) {
+      return direct;
+    }
+  }
+  return findEnvVarFromEnvFiles(process.cwd(), keys);
 }
 
 function readEnvVar(name: string): string | undefined {
@@ -127,14 +172,16 @@ function readEnvVar(name: string): string | undefined {
   return trimmed || undefined;
 }
 
-function findEnvVarFromEnvFiles(startDir: string, key: string): string | undefined {
+function findEnvVarFromEnvFiles(startDir: string, keys: readonly string[]): string | undefined {
   for (const candidate of iterateEnvFileCandidates(startDir)) {
     if (!existsSync(candidate)) {
       continue;
     }
-    const parsed = readFromEnvFile(candidate, key);
-    if (parsed) {
-      return parsed;
+    for (const key of keys) {
+      const parsed = readFromEnvFile(candidate, key);
+      if (parsed) {
+        return parsed;
+      }
     }
   }
   return undefined;
@@ -215,7 +262,7 @@ function sanitizeEnvValue(value: string): string | undefined {
 function setEnvVarInFile(filePath: string, key: string, value: string): void {
   const content = readFileSync(filePath, "utf8");
   const lines = content.split(/\r?\n/);
-  const assignmentPattern = new RegExp(`^(?:s*exports+)?${key}\\s*=`, "i");
+  const assignmentPattern = new RegExp(`^(?:\\s*export\\s+)?${escapeRegExp(key)}\\s*=`, "i");
   let updated = false;
   for (let i = 0; i < lines.length; i++) {
     if (assignmentPattern.test(lines[i])) {
@@ -242,6 +289,10 @@ function quoteEnvValue(value: string): string {
   }
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   return `"${escaped}"`;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function getStagedDiff(): string {
@@ -279,9 +330,61 @@ function callGemini(prompt: string): string {
   return combined;
 }
 
-function runGitAiCommit(aiName: string, args: string[]): void {
-  const result = spawnSync("git", ["ai-cim", aiName, ...args], { stdio: "inherit" });
-  handleSpawnErrors(result, "git ai-cim");
+function normalizeCommitArgs(args: string[]): string[] {
+  if (args.length === 0) {
+    throw new Error("Commit arguments cannot be empty.");
+  }
+  if (args[0] === "--") {
+    const [, ...rest] = args;
+    if (rest.length === 0) {
+      throw new Error("`--` must be followed by git commit arguments.");
+    }
+    args = rest;
+  }
+  if (args.some((arg) => arg === "--author" || arg.startsWith("--author="))) {
+    throw new Error("Do not pass --author. This script sets author and committer identity automatically.");
+  }
+  if (!args[0].startsWith("-")) {
+    return ["-m", args.join(" ")];
+  }
+  return args;
+}
+
+function runGitCommit(identity: AiIdentity, args: string[]): void {
+  const author = `${identity.authorName} <${identity.email}>`;
+  const result = spawnSync("git", ["commit", `--author=${author}`, ...args], {
+    stdio: "inherit",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: identity.authorName,
+      GIT_AUTHOR_EMAIL: identity.email,
+      GIT_COMMITTER_NAME: identity.authorName,
+      GIT_COMMITTER_EMAIL: identity.email,
+    },
+  });
+  handleSpawnErrors(result, "git commit");
+}
+
+function resolveGitConfigValue(key: string): string | undefined {
+  const result = spawnSync("git", ["config", "--get", key], { encoding: "utf8" });
+  if (result.error) {
+    throw new Error(`git config --get ${key} failed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    return undefined;
+  }
+  const value = (result.stdout ?? "").trim();
+  return value || undefined;
+}
+
+function assertInsideGitWorkTree(): void {
+  const result = spawnSync("git", ["rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if (result.error) {
+    throw new Error(`git rev-parse --is-inside-work-tree failed: ${result.error.message}`);
+  }
+  if (result.status !== 0 || (result.stdout ?? "").trim() !== "true") {
+    throw new Error("Current directory is not a git work tree.");
+  }
 }
 
 function printGreyBlock(text: string): void {
