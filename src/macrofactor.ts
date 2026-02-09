@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import chalk from "chalk";
 
 export const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -221,11 +222,16 @@ function parseFormat(value: string): OutputFormat {
 
 async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): Promise<void> {
   const sourceExists = existsSync(options.sourcePath);
-  const lastSyncMilliseconds = sourceExists ? getFileModifiedMilliseconds(options.sourcePath) : null;
+  const nowMilliseconds = Date.now();
+  const lastFileSyncMilliseconds = sourceExists ? getFileModifiedMilliseconds(options.sourcePath) : null;
+  const runningAppAgeSeconds = getRunningAppAgeSeconds(APP_NAME);
+  const lastAppLaunchMilliseconds =
+    runningAppAgeSeconds != null ? nowMilliseconds - runningAppAgeSeconds * 1000 : null;
+  const lastSyncMilliseconds = maxFinite(lastFileSyncMilliseconds, lastAppLaunchMilliseconds);
   if (
     !shouldSyncFromApp({
       lastSyncMilliseconds,
-      nowMilliseconds: Date.now(),
+      nowMilliseconds,
       skipWindowMilliseconds: APP_SYNC_SKIP_WINDOW_MILLISECONDS,
       force: !sourceExists,
     })
@@ -233,13 +239,16 @@ async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): 
     return;
   }
 
+  if (runningAppAgeSeconds != null) {
+    console.error(chalk.yellow(`${APP_NAME} is already running. Waiting briefly for it to sync...`));
+    await sleep(APP_SYNC_WAIT_MILLISECONDS);
+    return;
+  }
+
+  console.error(chalk.yellow(`Opening the ${APP_NAME} app to sync...`));
   runCommandOrThrow("open", ["-a", APP_NAME], `Failed to open ${APP_NAME}.`);
   await sleep(APP_SYNC_WAIT_MILLISECONDS);
-  runCommandOrThrow(
-    "osascript",
-    ["-e", `tell application "${APP_NAME}" to quit`],
-    `Failed to quit ${APP_NAME}.`
-  );
+  runCommandOrThrow("osascript", ["-e", `tell application "${APP_NAME}" to quit`], `Failed to quit ${APP_NAME}.`);
 }
 
 export function shouldSyncFromApp(options: {
@@ -259,6 +268,38 @@ export function shouldSyncFromApp(options: {
 
 function getFileModifiedMilliseconds(filePath: string): number {
   return statSync(filePath).mtimeMs;
+}
+
+function getRunningAppAgeSeconds(appName: string): number | null {
+  const pidResult = spawnSync("pgrep", ["-x", appName], { encoding: "utf8" });
+  if (pidResult.status !== 0) {
+    return null;
+  }
+  const pid = `${pidResult.stdout ?? ""}`.trim().split(/\s+/)[0];
+  if (!pid) {
+    return null;
+  }
+  const elapsedResult = spawnSync("ps", ["-o", "etimes=", "-p", pid], { encoding: "utf8" });
+  if (elapsedResult.status !== 0) {
+    return null;
+  }
+  const elapsedSeconds = Number(`${elapsedResult.stdout ?? ""}`.trim());
+  return Number.isFinite(elapsedSeconds) ? elapsedSeconds : null;
+}
+
+function maxFinite(a: number | null, b: number | null): number | null {
+  const aOk = isFiniteNumber(a);
+  const bOk = isFiniteNumber(b);
+  if (aOk && bOk) {
+    return Math.max(a, b);
+  }
+  if (aOk) {
+    return a;
+  }
+  if (bOk) {
+    return b;
+  }
+  return null;
 }
 
 function runCommandOrThrow(command: string, args: string[], errorPrefix: string): void {
@@ -286,14 +327,14 @@ function renderOutput(options: {
     if (options.outputPath) {
       throw new Error("--output is not supported with --format=table. Use --format=csv or --format=json.");
     }
-    console.table(toConciseRows(options.report));
+    console.table(toConciseRows(options.report, { dateFormat: "table" }));
     return;
   }
 
   const text =
     options.format === "json"
       ? `${JSON.stringify(options.report, null, options.pretty ? 2 : 0)}\n`
-      : renderCsv(toConciseRows(options.report));
+      : renderCsv(toConciseRows(options.report, { dateFormat: "csv" }));
 
   if (options.outputPath) {
     const outputPath = path.resolve(options.outputPath);
@@ -341,15 +382,21 @@ export function buildMacrofactorReport(options: BuildOptions): MacrofactorReport
   };
 }
 
-export function toConciseRows(report: MacrofactorReport): MacrofactorConciseRow[] {
+type ConciseDateFormat = "iso" | "table" | "csv";
+
+export function toConciseRows(
+  report: MacrofactorReport,
+  options?: { dateFormat?: ConciseDateFormat }
+): MacrofactorConciseRow[] {
+  const dateFormat = options?.dateFormat ?? "iso";
   const rows = report.foods.map(food => {
-    const parts = getIsoDateTimeParts(food.latestConsumedAt);
+    const parts = getDateTimeParts(food.latestConsumedAt, dateFormat);
     const serving = formatServing(food.servingUserSelection) || formatServing(food.servingDefault);
     return {
       timestamp: Date.parse(food.latestConsumedAt),
       row: {
         date: parts.date,
-        time: parts.time,
+        time: parts.time.split(':').slice(0, 2).join(':'),
         name: food.title,
         serving,
         calories: roundNullable(food.nutrition.caloriesKcal, 0),
@@ -474,16 +521,64 @@ function toFoodRow(
   };
 }
 
-function getIsoDateTimeParts(value: string): { date: string; time: string } {
+function getDateTimeParts(value: string, dateFormat: ConciseDateFormat): { date: string; time: string } {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) {
     return { date: "", time: "" };
   }
+  const date = formatDate(timestamp, dateFormat);
   const iso = new Date(timestamp).toISOString();
   return {
-    date: iso.slice(0, 10),
+    date,
     time: iso.slice(11, 19),
   };
+}
+
+const WEEKDAYS_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const MONTHS_LONG = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+] as const;
+
+function formatDate(timestamp: number, format: ConciseDateFormat): string {
+  const d = new Date(timestamp);
+  if (format === "iso") {
+    return d.toISOString().slice(0, 10);
+  }
+  if (format === "csv") {
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const yyyy = String(d.getUTCFullYear());
+    return `${dd}.${mm}.${yyyy}`;
+  }
+  const weekday = WEEKDAYS_SHORT[d.getUTCDay()] ?? "";
+  const month = MONTHS_LONG[d.getUTCMonth()] ?? "";
+  const day = formatOrdinal(d.getUTCDate());
+  return `${weekday} ${month} ${day}`.trim();
+}
+
+function formatOrdinal(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  const abs = Math.abs(Math.trunc(value));
+  const mod100 = abs % 100;
+  if (mod100 >= 11 && mod100 <= 13) {
+    return `${abs}th`;
+  }
+  const mod10 = abs % 10;
+  const suffix = mod10 === 1 ? "st" : mod10 === 2 ? "nd" : mod10 === 3 ? "rd" : "th";
+  return `${abs}${suffix}`;
 }
 
 function roundNullable(value: number | null, fractionDigits: number): number | null {
