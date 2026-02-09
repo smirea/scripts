@@ -20,6 +20,7 @@ interface WorktreeEntry {
   detached?: boolean;
   bare?: boolean;
   isMain?: boolean;
+  managed?: boolean;
 }
 
 interface RepoInfo {
@@ -126,6 +127,9 @@ function getRepoInfo(): RepoInfo {
   const currentWorktree = currentWorktreeEntry?.path;
   const repoName = path.basename(mainWorktree.path);
   const worktreesRoot = path.join(home, "worktrees");
+  for (const entry of worktrees) {
+    entry.managed = isManagedWorktree(worktreesRoot, repoName, entry);
+  }
   return {
     currentWorktree,
     currentWorktreeEntry,
@@ -134,6 +138,25 @@ function getRepoInfo(): RepoInfo {
     repoName,
     worktreesRoot,
   };
+}
+
+function isManagedWorktree(worktreesRoot: string, repoName: string, entry: WorktreeEntry): boolean {
+  if (entry.isMain) {
+    return false;
+  }
+  if (!isSafeWorktreePath(worktreesRoot, entry.path)) {
+    return false;
+  }
+  const base = path.basename(entry.path);
+  const prefix = `${repoName}__`;
+  if (!base.startsWith(prefix)) {
+    return false;
+  }
+  if (!entry.branch) {
+    return true;
+  }
+  const expected = `${prefix}${normalizeBranch(entry.branch)}`;
+  return base === expected;
 }
 
 function parseWorktrees(raw: string): WorktreeEntry[] {
@@ -229,7 +252,13 @@ function addWorktree(
 function listWorktrees(info: RepoInfo): void {
   const rows = info.worktrees.map(entry => {
     const branch = entry.branch ?? "(detached)";
-    const label = entry.isMain ? `${branch} (main)` : branch;
+    const tags: string[] = [];
+    if (entry.isMain) {
+      tags.push("main");
+    } else if (!entry.managed) {
+      tags.push("plain");
+    }
+    const label = tags.length === 0 ? branch : `${branch} (${tags.join(", ")})`;
     return { label, path: entry.path };
   });
   const nameWidth = rows.reduce((max, row) => Math.max(max, row.label.length), 0);
@@ -296,10 +325,6 @@ function removeWorktree(info: RepoInfo, branch?: string): void {
     if (!current || current.isMain) {
       throw new Error("Branch name is required when current directory is not a linked worktree.");
     }
-    if (!isSafeWorktreePath(info.worktreesRoot, current.path)) {
-      const label = current.branch ?? current.path;
-      throw new Error(`Worktree for ${label} is outside ${info.worktreesRoot}.`);
-    }
     runCommand("git", ["worktree", "remove", current.path], {
       cwd: info.mainWorktree.path,
       stdio: "inherit",
@@ -312,9 +337,6 @@ function removeWorktree(info: RepoInfo, branch?: string): void {
   }
   if (entry.isMain) {
     throw new Error(`Refusing to remove main worktree at ${entry.path}.`);
-  }
-  if (!isSafeWorktreePath(info.worktreesRoot, entry.path)) {
-    throw new Error(`Worktree for ${normalizedBranch} is outside ${info.worktreesRoot}.`);
   }
   runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
 }
@@ -350,6 +372,9 @@ function formatWorktreeLabel(info: RepoInfo, entry: WorktreeEntry): string {
   }
   if (entry.path === info.currentWorktree) {
     tags.push("current");
+  }
+  if (!entry.isMain && !entry.managed) {
+    tags.push("plain");
   }
   if (tags.length === 0) {
     return branch;

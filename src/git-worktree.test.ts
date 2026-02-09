@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -10,6 +10,7 @@ const scriptPath = path.join(import.meta.dir, "git-worktree.ts");
 interface RepoFixture {
   repoDir: string;
   linkedWorktreeDir: string;
+  plainWorktreeDir: string;
   homeDir: string;
 }
 
@@ -44,6 +45,7 @@ function createRepoFixture(): RepoFixture {
   const repoDir = path.join(rootDir, "repo");
   const homeDir = path.join(rootDir, "home");
   const linkedWorktreeDir = path.join(homeDir, "worktrees", "repo__feature_test");
+  const plainWorktreeDir = path.join(rootDir, "plain");
 
   mkdirSync(repoDir, { recursive: true });
   mkdirSync(homeDir, { recursive: true });
@@ -55,8 +57,9 @@ function createRepoFixture(): RepoFixture {
   runGit(repoDir, ["add", "README.md"]);
   runGit(repoDir, ["commit", "-q", "-m", "init"]);
   runGit(repoDir, ["worktree", "add", "-q", linkedWorktreeDir, "-b", "feature/test"]);
+  runGit(repoDir, ["worktree", "add", "-q", plainWorktreeDir, "-b", "feature/plain"]);
 
-  return { repoDir, linkedWorktreeDir, homeDir };
+  return { repoDir, linkedWorktreeDir, plainWorktreeDir, homeDir };
 }
 
 describe("git-worktree", () => {
@@ -95,5 +98,32 @@ describe("git-worktree", () => {
 
     const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
     expect(listOutput).not.toContain(fixture.linkedWorktreeDir);
+  });
+
+  it("lists plain git worktrees with a (plain) tag", () => {
+    const fixture = createRepoFixture();
+
+    const listResult = runScript(["list"], fixture.repoDir, fixture.homeDir);
+    expect(listResult.status).toBe(0);
+    expect(listResult.stdout).toContain("feature/plain (plain)");
+    expect(listResult.stdout).toContain(fixture.plainWorktreeDir);
+  });
+
+  it("cd works for plain git worktrees", () => {
+    const fixture = createRepoFixture();
+
+    const cdResult = runScript(["cd", "feature/plain"], fixture.repoDir, fixture.homeDir);
+    expect(cdResult.status).toBe(0);
+    expect(realpathSync(cdResult.stdout.trim())).toBe(realpathSync(fixture.plainWorktreeDir));
+  });
+
+  it("removes the current plain git worktree when rm is called without a branch", () => {
+    const fixture = createRepoFixture();
+
+    const removeResult = runScript(["rm"], fixture.plainWorktreeDir, fixture.homeDir);
+    expect(removeResult.status).toBe(0);
+
+    const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
+    expect(listOutput).not.toContain(fixture.plainWorktreeDir);
   });
 });
