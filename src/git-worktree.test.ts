@@ -95,6 +95,8 @@ describe("git-worktree", () => {
 
     const removeResult = runScript(["rm"], fixture.linkedWorktreeDir, fixture.homeDir);
     expect(removeResult.status).toBe(0);
+    const lastLine = removeResult.stdout.trim().split(/\r?\n/).pop() ?? "";
+    expect(realpathSync(lastLine)).toBe(realpathSync(fixture.repoDir));
 
     const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
     expect(listOutput).not.toContain(fixture.linkedWorktreeDir);
@@ -122,6 +124,8 @@ describe("git-worktree", () => {
 
     const removeResult = runScript(["rm"], fixture.plainWorktreeDir, fixture.homeDir);
     expect(removeResult.status).toBe(0);
+    const lastLine = removeResult.stdout.trim().split(/\r?\n/).pop() ?? "";
+    expect(realpathSync(lastLine)).toBe(realpathSync(fixture.repoDir));
 
     const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
     expect(listOutput).not.toContain(fixture.plainWorktreeDir);
