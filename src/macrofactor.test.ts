@@ -156,7 +156,7 @@ describe("concise output", () => {
       ],
     };
 
-    const rows = toConciseRows(report);
+    const rows = toConciseRows(report, { dateFormat: "csv" });
     expect(rows[0]?.name).toBe("Alpha, Food");
     expect(rows[0]?.serving).toBe("1.5 serving");
     expect(rows[0]?.calories).toBe(150);
@@ -164,11 +164,53 @@ describe("concise output", () => {
     expect(rows[0]?.carbs).toBe(19.99);
     expect(rows[0]?.fat).toBe(3.5);
     expect(rows[0]?.fiber).toBe(4.44);
+    expect(rows[0]?.date).toBe("07.02.2026");
 
     const csv = renderCsv(rows);
     expect(csv.startsWith("date,time,name,serving,calories,protein,carbs,fat,fiber\n")).toBe(true);
     expect(csv).toContain("\"Alpha, Food\"");
     expect(csv).toContain(",1.5 serving,150,12.46,19.99,3.5,4.44");
+  });
+
+  it("formats table dates as 'Thu March 3rd'", () => {
+    const report: MacrofactorReport = {
+      generatedAt: "2026-02-08T00:00:00.000Z",
+      sourcePath: "/tmp/historyFood.json",
+      window: { start: "2026-02-01T00:00:00.000Z", end: "2026-02-08T00:00:00.000Z" },
+      matchedFoods: 1,
+      returnedFoods: 1,
+      foods: [
+        {
+          itemId: "x",
+          title: "X",
+          brandName: null,
+          source: "t",
+          isCustom: false,
+          firstConsumedAt: null,
+          latestConsumedAt: "2026-02-07T10:00:00.000Z",
+          recipeCount: 0,
+          recipe: [],
+          servingDefault: { name: "g", quantity: 100 },
+          servingUserSelection: null,
+          servingAlternatives: [],
+          nutrition: {
+            caloriesKcal: 100,
+            proteinG: 5,
+            carbsG: 10,
+            fatG: 1,
+            fiberG: null,
+            sugarG: null,
+            netCarbsG: null,
+            alcoholG: null,
+            byCode: {},
+            named: {},
+          },
+        },
+      ],
+    };
+
+    const rows = toConciseRows(report, { dateFormat: "table" });
+    expect(rows[0]?.date).toBe("Sat February 7th");
   });
 });
 
