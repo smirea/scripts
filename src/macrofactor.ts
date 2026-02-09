@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
@@ -24,6 +24,7 @@ type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 const APP_NAME = "MacroFactor";
 const APP_SYNC_WAIT_MILLISECONDS = 12_000;
 const APP_SYNC_SKIP_WINDOW_MILLISECONDS = 60 * 60 * 1000;
+const APP_SYNC_STATE_FILENAME = "macrofactor-sync.json";
 
 export interface MacrofactorReport {
   generatedAt: string;
@@ -224,10 +225,15 @@ async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): 
   const sourceExists = existsSync(options.sourcePath);
   const nowMilliseconds = Date.now();
   const lastFileSyncMilliseconds = sourceExists ? getFileModifiedMilliseconds(options.sourcePath) : null;
-  const runningAppAgeSeconds = getRunningAppAgeSeconds(APP_NAME);
+  const lastRecordedAppOpenMilliseconds = readLastAppOpenMilliseconds();
+  const isRunning = isAppRunning(APP_NAME);
+  const runningAppAgeSeconds = isRunning ? getRunningAppAgeSeconds(APP_NAME) : null;
   const lastAppLaunchMilliseconds =
     runningAppAgeSeconds != null ? nowMilliseconds - runningAppAgeSeconds * 1000 : null;
-  const lastSyncMilliseconds = maxFinite(lastFileSyncMilliseconds, lastAppLaunchMilliseconds);
+  const lastSyncMilliseconds = maxFinite(
+    lastFileSyncMilliseconds,
+    maxFinite(lastRecordedAppOpenMilliseconds, lastAppLaunchMilliseconds)
+  );
   if (
     !shouldSyncFromApp({
       lastSyncMilliseconds,
@@ -239,7 +245,8 @@ async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): 
     return;
   }
 
-  if (runningAppAgeSeconds != null) {
+  if (isRunning) {
+    writeLastAppOpenMilliseconds(nowMilliseconds);
     console.error(chalk.yellow(`${APP_NAME} is already running. Waiting briefly for it to sync...`));
     await sleep(APP_SYNC_WAIT_MILLISECONDS);
     return;
@@ -247,6 +254,7 @@ async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): 
 
   console.error(chalk.yellow(`Opening the ${APP_NAME} app to sync...`));
   runCommandOrThrow("open", ["-a", APP_NAME], `Failed to open ${APP_NAME}.`);
+  writeLastAppOpenMilliseconds(nowMilliseconds);
   await sleep(APP_SYNC_WAIT_MILLISECONDS);
   runCommandOrThrow("osascript", ["-e", `tell application "${APP_NAME}" to quit`], `Failed to quit ${APP_NAME}.`);
 }
@@ -270,6 +278,21 @@ function getFileModifiedMilliseconds(filePath: string): number {
   return statSync(filePath).mtimeMs;
 }
 
+function isAppRunning(appName: string): boolean {
+  const result = spawnSync(
+    "osascript",
+    [
+      "-e",
+      `tell application "System Events" to (name of processes) contains "${appName.replaceAll('"', '\\"')}"`,
+    ],
+    { encoding: "utf8" }
+  );
+  if (result.status !== 0) {
+    return false;
+  }
+  return `${result.stdout ?? ""}`.trim().toLowerCase() === "true";
+}
+
 function getRunningAppAgeSeconds(appName: string): number | null {
   const pidResult = spawnSync("pgrep", ["-x", appName], { encoding: "utf8" });
   if (pidResult.status !== 0) {
@@ -285,6 +308,41 @@ function getRunningAppAgeSeconds(appName: string): number | null {
   }
   const elapsedSeconds = Number(`${elapsedResult.stdout ?? ""}`.trim());
   return Number.isFinite(elapsedSeconds) ? elapsedSeconds : null;
+}
+
+function getSyncStatePath(): string | null {
+  const home = process.env.HOME;
+  if (!home) {
+    return null;
+  }
+  const dir = path.join(home, "Library", "Caches", "scripts");
+  mkdirSync(dir, { recursive: true });
+  return path.join(dir, APP_SYNC_STATE_FILENAME);
+}
+
+function readLastAppOpenMilliseconds(): number | null {
+  const statePath = getSyncStatePath();
+  if (!statePath || !existsSync(statePath)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(statePath, "utf8")) as unknown;
+    const value =
+      parsed && typeof parsed === "object" && "lastAppOpenMilliseconds" in parsed
+        ? (parsed as { lastAppOpenMilliseconds?: unknown }).lastAppOpenMilliseconds
+        : null;
+    return isFiniteNumber(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastAppOpenMilliseconds(nowMilliseconds: number): void {
+  const statePath = getSyncStatePath();
+  if (!statePath) {
+    return;
+  }
+  writeFileSync(statePath, `${JSON.stringify({ lastAppOpenMilliseconds: nowMilliseconds })}\n`, "utf8");
 }
 
 function maxFinite(a: number | null, b: number | null): number | null {
