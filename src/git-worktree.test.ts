@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -129,5 +129,28 @@ describe("git-worktree", () => {
 
     const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
     expect(listOutput).not.toContain(fixture.plainWorktreeDir);
+  });
+
+  it("fails merge without a branch outside interactive mode", () => {
+    const fixture = createRepoFixture();
+
+    const mergeResult = runScript(["merge"], fixture.repoDir, fixture.homeDir);
+    expect(mergeResult.status).not.toBe(0);
+    expect(mergeResult.stderr).toContain("Interactive mode requires a TTY. Use `git-worktree merge <branch>` instead.");
+  });
+
+  it("merges a selected branch and removes its worktree and branch by default", () => {
+    const fixture = createRepoFixture();
+    writeFileSync(path.join(fixture.linkedWorktreeDir, "feature.txt"), "feature\n");
+    runGit(fixture.linkedWorktreeDir, ["add", "feature.txt"]);
+    runGit(fixture.linkedWorktreeDir, ["commit", "-q", "-m", "feature change"]);
+
+    const mergeResult = runScript(["merge", "feature/test"], fixture.repoDir, fixture.homeDir);
+    expect(mergeResult.status).toBe(0);
+    expect(existsSync(path.join(fixture.repoDir, "feature.txt"))).toBe(true);
+
+    const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
+    expect(listOutput).not.toContain(fixture.linkedWorktreeDir);
+    expect(runGit(fixture.repoDir, ["branch", "--list", "feature/test"])).toBe("");
   });
 });
