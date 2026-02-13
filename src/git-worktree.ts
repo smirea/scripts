@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { isCancel, select, text } from "@clack/prompts";
+import { confirm, isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
@@ -76,6 +76,20 @@ async function runCli(): Promise<void> {
           const info = getRepoInfo();
           const target = resolveWorktreePath(info, argv.branch);
           console.log(target);
+        })
+    )
+    .command(
+      "merge [branch]",
+      "Select a worktree branch to merge into the current branch",
+      (y: Argv) =>
+        y.positional("branch", {
+          type: "string",
+          description: "Branch to merge. If omitted, choose from an interactive worktree list.",
+        }),
+      (argv: ArgumentsCamelCase<{ branch?: string }>) =>
+        runOrExit(async () => {
+          const info = getRepoInfo();
+          await mergeBranchFromWorktree(info, argv.branch);
         })
     )
     .command(
@@ -267,9 +281,7 @@ function listWorktrees(info: RepoInfo): void {
 }
 
 async function selectWorktreeInteractive(info: RepoInfo): Promise<string> {
-  if (!process.stdin.isTTY) {
-    throw new Error("Interactive mode requires a TTY. Use `git-worktree list` instead.");
-  }
+  ensureInteractiveStdin("Interactive mode requires a TTY. Use `git-worktree list` instead.");
   const options = info.worktrees.map(entry => ({
     value: entry.path,
     label: formatWorktreeLabel(info, entry),
@@ -300,8 +312,115 @@ async function selectWorktreeInteractive(info: RepoInfo): Promise<string> {
   return resolveSelectedWorktree(info, selected);
 }
 
+async function mergeBranchFromWorktree(info: RepoInfo, branch?: string): Promise<void> {
+  const currentBranch = getCurrentBranch();
+  const target = await resolveMergeTargetWorktree(info, branch, currentBranch);
+  const targetBranch = target.branch;
+  if (!targetBranch) {
+    throw new Error(`Selected worktree at ${target.path} does not have a branch.`);
+  }
+  if (currentBranch && currentBranch === targetBranch) {
+    throw new Error(`Cannot merge branch ${targetBranch} into itself.`);
+  }
+  if (currentBranch !== "master") {
+    const source = currentBranch || "detached HEAD";
+    const shouldContinue = await confirmDefaultYes(
+      `You are on ${source}, not master. Continue merging ${targetBranch}?`
+    );
+    if (!shouldContinue) {
+      return;
+    }
+  }
+  runCommand("git", ["merge", targetBranch], { cwd: process.cwd(), stdio: "inherit" });
+  if (target.isMain) {
+    return;
+  }
+  const shouldCleanup = await confirmDefaultYes(
+    `Remove merged branch ${targetBranch} and worktree ${target.path}?`
+  );
+  if (!shouldCleanup) {
+    return;
+  }
+  cleanupMergedWorktree(info, target);
+}
+
+async function resolveMergeTargetWorktree(
+  info: RepoInfo,
+  branch: string | undefined,
+  currentBranch: string | undefined
+): Promise<WorktreeEntry> {
+  const requestedBranch = branch?.trim();
+  if (requestedBranch) {
+    const entry = findWorktreeByBranch(info, requestedBranch);
+    if (!entry) {
+      throw new Error(`No worktree found for branch ${requestedBranch}.`);
+    }
+    return entry;
+  }
+  return selectMergeWorktreeInteractive(info, currentBranch);
+}
+
+async function selectMergeWorktreeInteractive(
+  info: RepoInfo,
+  currentBranch: string | undefined
+): Promise<WorktreeEntry> {
+  ensureInteractiveStdin("Interactive mode requires a TTY. Use `git-worktree merge <branch>` instead.");
+  const options = info.worktrees.map(entry => {
+    const branch = entry.branch;
+    if (!branch) {
+      return {
+        value: entry.path,
+        label: `${formatWorktreeLabel(info, entry)} (unmergeable)`,
+        hint: entry.path,
+        disabled: true,
+      };
+    }
+    const isSameAsCurrent = Boolean(currentBranch && currentBranch === branch);
+    return {
+      value: entry.path,
+      label: formatWorktreeLabel(info, entry),
+      hint: isSameAsCurrent ? "Already the current branch" : entry.path,
+      disabled: isSameAsCurrent,
+    };
+  });
+  const hasMergeableOption = options.some(option => !option.disabled);
+  if (!hasMergeableOption) {
+    throw new Error("No mergeable worktree branches found.");
+  }
+  const selected = await select({
+    message: "Select worktree branch to merge",
+    options,
+    output: process.stderr,
+  });
+  if (isCancel(selected)) {
+    process.exit(0);
+  }
+  return resolveSelectedWorktreeEntry(info, selected);
+}
+
 function shouldSwitchToSelectedWorktree(): boolean {
   return process.stdin.isTTY && process.stdout.isTTY;
+}
+
+function ensureInteractiveStdin(message: string): void {
+  if (!process.stdin.isTTY) {
+    throw new Error(message);
+  }
+}
+
+async function confirmDefaultYes(message: string): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return true;
+  }
+  const confirmed = await confirm({
+    message,
+    initialValue: true,
+    output: process.stderr,
+  });
+  if (isCancel(confirmed)) {
+    process.exit(0);
+  }
+  return confirmed;
 }
 
 function switchToWorktreeShell(worktreePath: string): void {
@@ -377,15 +496,31 @@ function findWorktreeByBranch(info: RepoInfo, branch: string): WorktreeEntry | u
   return info.worktrees.find(entry => entry.branch === branch);
 }
 
-function resolveSelectedWorktree(info: RepoInfo, selection: string): string {
-  const entry = info.worktrees.find(item => item.path === selection);
-  if (!entry) {
-    throw new Error(`Unknown worktree selection: ${selection}`);
+function cleanupMergedWorktree(info: RepoInfo, entry: WorktreeEntry): void {
+  if (!entry.branch) {
+    return;
   }
+  if (entry.isMain) {
+    throw new Error(`Refusing to remove main worktree at ${entry.path}.`);
+  }
+  runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
+  runCommand("git", ["branch", "-d", entry.branch], { cwd: info.mainWorktree.path, stdio: "inherit" });
+}
+
+function resolveSelectedWorktree(info: RepoInfo, selection: string): string {
+  const entry = resolveSelectedWorktreeEntry(info, selection);
   if (entry.branch) {
     return resolveWorktreePath(info, entry.branch);
   }
   return entry.path;
+}
+
+function resolveSelectedWorktreeEntry(info: RepoInfo, selection: string): WorktreeEntry {
+  const entry = info.worktrees.find(item => item.path === selection);
+  if (!entry) {
+    throw new Error(`Unknown worktree selection: ${selection}`);
+  }
+  return entry;
 }
 
 function formatWorktreeLabel(info: RepoInfo, entry: WorktreeEntry): string {
@@ -479,6 +614,11 @@ function getCurrentWorktreeFromGit(): string | undefined {
   }
   const value = result.stdout?.toString().trim();
   return value || undefined;
+}
+
+function getCurrentBranch(): string | undefined {
+  const branch = runCommand("git", ["branch", "--show-current"]).trim();
+  return branch || undefined;
 }
 
 function copyEnvFiles(fromDir: string, toDir: string): void {
