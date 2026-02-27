@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { findFirstEnvFile, getScriptsRepoRoot, readFirstEnvValue, setEnvVarInFile } from "./utils/env";
 
 const AI_NAME_KEYS = ["AI_COMITTER_NAME", "AI_COMMITTER_NAME"] as const;
 const DEFAULT_AI_NAME_KEYS = ["DEFAULT_AI_COMITTER_NAME", "DEFAULT_AI_COMMITTER_NAME"] as const;
@@ -11,7 +11,6 @@ const DEFAULT_AI_EMAIL_KEYS = ["DEFAULT_AI_COMITTER_EMAIL", "DEFAULT_AI_COMMITTE
 const LEGACY_DEFAULT_AI_EMAIL = "me+ai@stefanmirea.com";
 const PRIMARY_AI_NAME_KEY = AI_NAME_KEYS[0];
 const PRIMARY_AI_EMAIL_KEY = AI_EMAIL_KEYS[0];
-const ENV_FILE_NAMES = [".env.local", ".env"] as const;
 
 type WhoAction = { type: "print" } | { type: "set"; value: string };
 
@@ -75,12 +74,7 @@ function handleWhoAction(action: WhoAction): void {
     console.log(`${PRIMARY_AI_EMAIL_KEY}=${currentEmail}`);
     return;
   }
-  const targetFile = findFirstEnvFile(process.cwd());
-  if (!targetFile) {
-    throw new Error(
-      `Unable to set ${PRIMARY_AI_NAME_KEY}. No .env.local or .env file was found while walking up from ${process.cwd()}.`
-    );
-  }
+  const targetFile = findFirstEnvFile() ?? path.join(getScriptsRepoRoot(), ".env.local");
   setEnvVarInFile(targetFile, PRIMARY_AI_NAME_KEY, action.value);
   console.log(`Updated ${targetFile} with ${PRIMARY_AI_NAME_KEY}=${action.value}`);
   console.log(`${PRIMARY_AI_NAME_KEY}=${action.value}`);
@@ -149,150 +143,12 @@ function resolveRequiredValue(
     return literalFallback;
   }
   throw new Error(
-    `${primaryKey} is not configured. Define one of [${directKeys.join(", ")}] in the environment or a .env/.env.local file, or set one of [${fallbackKeys.join(", ")}].`
+    `${primaryKey} is not configured. Define one of [${directKeys.join(", ")}] in the environment or scripts repo .env/.env.local, or set one of [${fallbackKeys.join(", ")}].`
   );
 }
 
 function resolveValue(keys: readonly string[]): string | undefined {
-  for (const key of keys) {
-    const direct = readEnvVar(key);
-    if (direct) {
-      return direct;
-    }
-  }
-  return findEnvVarFromEnvFiles(process.cwd(), keys);
-}
-
-function readEnvVar(name: string): string | undefined {
-  const value = process.env[name];
-  if (!value) {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed || undefined;
-}
-
-function findEnvVarFromEnvFiles(startDir: string, keys: readonly string[]): string | undefined {
-  for (const candidate of iterateEnvFileCandidates(startDir)) {
-    if (!existsSync(candidate)) {
-      continue;
-    }
-    for (const key of keys) {
-      const parsed = readFromEnvFile(candidate, key);
-      if (parsed) {
-        return parsed;
-      }
-    }
-  }
-  return undefined;
-}
-
-function findFirstEnvFile(startDir: string): string | undefined {
-  for (const candidate of iterateEnvFileCandidates(startDir)) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return undefined;
-}
-
-function* iterateEnvFileCandidates(startDir: string): Generator<string> {
-  let currentDir = path.resolve(startDir);
-  const visited = new Set<string>();
-  while (!visited.has(currentDir)) {
-    visited.add(currentDir);
-    for (const fileName of ENV_FILE_NAMES) {
-      yield path.join(currentDir, fileName);
-    }
-    const parent = path.dirname(currentDir);
-    if (parent === currentDir) {
-      break;
-    }
-    currentDir = parent;
-  }
-}
-
-function readFromEnvFile(filePath: string, key: string): string | undefined {
-  const content = readFileSync(filePath, "utf8");
-  const lines = content.split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith("#")) {
-      continue;
-    }
-    const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
-    if (!match) {
-      continue;
-    }
-    if (match[1] !== key) {
-      continue;
-    }
-    const value = sanitizeEnvValue(match[2]);
-    if (value) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function sanitizeEnvValue(value: string): string | undefined {
-  let trimmed = value.trim();
-  const isSingleQuoted = trimmed.startsWith("'") && trimmed.endsWith("'");
-  const isDoubleQuoted = trimmed.startsWith('"') && trimmed.endsWith('"');
-  if (isSingleQuoted || isDoubleQuoted) {
-    trimmed = trimmed.slice(1, -1);
-    if (isDoubleQuoted) {
-      trimmed = trimmed
-        .replace(/\\n/g, "\n")
-        .replace(/\\r/g, "\r")
-        .replace(/\\t/g, "\t")
-        .replace(/\\"/g, '"')
-        .replace(/\\\\/g, "\\");
-    }
-  } else {
-    const hashIndex = trimmed.indexOf("#");
-    if (hashIndex !== -1) {
-      trimmed = trimmed.slice(0, hashIndex).trim();
-    }
-  }
-  trimmed = trimmed.trim();
-  return trimmed || undefined;
-}
-
-function setEnvVarInFile(filePath: string, key: string, value: string): void {
-  const content = readFileSync(filePath, "utf8");
-  const lines = content.split(/\r?\n/);
-  const assignmentPattern = new RegExp(`^(?:\\s*export\\s+)?${escapeRegExp(key)}\\s*=`, "i");
-  let updated = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (assignmentPattern.test(lines[i])) {
-      const hasExport = /^\s*export\s+/.test(lines[i]);
-      const prefix = hasExport ? "export " : "";
-      lines[i] = `${prefix}${key}=${quoteEnvValue(value)}`;
-      updated = true;
-      break;
-    }
-  }
-  if (!updated) {
-    if (lines.length > 0 && lines[lines.length - 1] !== "") {
-      lines.push("");
-    }
-    lines.push(`export ${key}=${quoteEnvValue(value)}`);
-  }
-  const output = lines.join("\n");
-  writeFileSync(filePath, output.endsWith("\n") ? output : `${output}\n`);
-}
-
-function quoteEnvValue(value: string): string {
-  if (/^[A-Za-z0-9_./:-]+$/.test(value)) {
-    return value;
-  }
-  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-  return `"${escaped}"`;
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return readFirstEnvValue(keys);
 }
 
 function getStagedDiff(): string {

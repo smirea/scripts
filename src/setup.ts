@@ -39,6 +39,11 @@ const links = [
     source: path.join(repoRoot, "src", "macrofactor.ts"),
     target: path.join(home, "bin", "macrofactor"),
   },
+  {
+    name: "voice-memo-parse",
+    source: path.join(repoRoot, "src", "voice-memo-parse.ts"),
+    target: path.join(home, "bin", "voice-memo-parse"),
+  },
 ];
 
 const addedLinks: string[] = [];

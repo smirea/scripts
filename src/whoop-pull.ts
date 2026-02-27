@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import { readEnvValue } from "./utils/env";
 
 const BASE_URL = "https://api.prod.whoop.com/developer/v2";
 const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
@@ -10,7 +11,7 @@ const DEFAULT_DAYS = 2;
 
 const ALL_TYPES = ["profile", "body", "cycles", "recovery", "sleep", "workout"] as const;
 type DataType = (typeof ALL_TYPES)[number];
-type EnvSource = "process" | "env-manager";
+type EnvSource = "process" | "env-file" | "env-manager";
 
 const TYPE_ALIASES: Record<string, DataType> = {
   profile: "profile",
@@ -201,12 +202,16 @@ function readRequiredEnv(name: string): { value: string; source: EnvSource } {
   if (fromProcess) {
     return { value: fromProcess, source: "process" };
   }
+  const fromEnvFile = readEnvValue(name, { includeProcessEnv: false });
+  if (fromEnvFile) {
+    return { value: fromEnvFile, source: "env-file" };
+  }
   const fromEnvManager = readEnvManagerValue(name);
   if (fromEnvManager) {
     return { value: fromEnvManager, source: "env-manager" };
   }
   throw new Error(
-    `${name} is required. Set it with env-manager (env-manager global set ${name} <value>) or in the environment.`
+    `${name} is required. Set it in environment, scripts repo .env.local/.env, or env-manager (env-manager global set ${name} <value>).`
   );
 }
 
