@@ -2,7 +2,7 @@
 import { confirm, isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import path from "node:path";
 import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
@@ -258,7 +258,6 @@ function addWorktree(
     : ["worktree", "add", "-b", branch, worktreePath];
   const stdio = options.stdio ?? "inherit";
   runCommand("git", args, { cwd: info.mainWorktree.path, stdio });
-  copyEnvFiles(info.mainWorktree.path, worktreePath);
   runCommand("bun", ["install"], { cwd: worktreePath, stdio });
   return worktreePath;
 }
@@ -619,21 +618,6 @@ function getCurrentWorktreeFromGit(): string | undefined {
 function getCurrentBranch(): string | undefined {
   const branch = runCommand("git", ["branch", "--show-current"]).trim();
   return branch || undefined;
-}
-
-function copyEnvFiles(fromDir: string, toDir: string): void {
-  const entries = readdirSync(fromDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    if (!entry.name.startsWith(".env")) {
-      continue;
-    }
-    const src = path.join(fromDir, entry.name);
-    const dest = path.join(toDir, entry.name);
-    copyFileSync(src, dest);
-  }
 }
 
 function runCommand(

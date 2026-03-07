@@ -19,7 +19,7 @@ import {
 import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { readEnvValue } from "./utils/env";
+import env from "./env";
 
 const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const APP_NAME = "Voice Memos";
@@ -138,12 +138,7 @@ async function runCli(): Promise<void> {
       return;
     }
 
-    const geminiApiKey = readGeminiApiKey();
-    if (!geminiApiKey) {
-      throw new Error(
-        `${GEMINI_API_KEY_ENV} is required. Set it in your shell environment or in a nearby .env.local/.env file.`
-      );
-    }
+    const geminiApiKey = env.GEMINI_API_KEY;
 
     ensureOutputDirWritable(args.outDir);
     ensureVoiceMemosAppExists();
@@ -506,14 +501,14 @@ function checkAppleEventsAutomation(): SetupCheckResult {
 }
 
 function checkGeminiApiKey(): SetupCheckResult {
-  const ok = Boolean(readGeminiApiKey());
+  void env.GEMINI_API_KEY;
   return {
     id: "gemini-api-key",
     label: GEMINI_API_KEY_ENV,
-    ok,
+    ok: true,
     required: false,
-    details: ok ? `${GEMINI_API_KEY_ENV} is set.` : `${GEMINI_API_KEY_ENV} is not set.`,
-    fix: `Set ${GEMINI_API_KEY_ENV} in your shell environment or in .env.local/.env.`,
+    details: `${GEMINI_API_KEY_ENV} is configured via src/env.ts schema.`,
+    fix: "",
   };
 }
 
@@ -1657,10 +1652,6 @@ function inferMimeType(filePath: string): string {
     default:
       return "application/octet-stream";
   }
-}
-
-function readGeminiApiKey(): string | null {
-  return readEnvValue(GEMINI_API_KEY_ENV) ?? null;
 }
 
 function probePath(filePath: string): { exists: boolean; permissionDenied: boolean } {

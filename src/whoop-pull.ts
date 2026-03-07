@@ -1,8 +1,7 @@
 #!/usr/bin/env bun
-import { spawnSync } from "node:child_process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { readEnvValue } from "./utils/env";
+import env from "./env";
 
 const BASE_URL = "https://api.prod.whoop.com/developer/v2";
 const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
@@ -11,7 +10,6 @@ const DEFAULT_DAYS = 2;
 
 const ALL_TYPES = ["profile", "body", "cycles", "recovery", "sleep", "workout"] as const;
 type DataType = (typeof ALL_TYPES)[number];
-type EnvSource = "process" | "env-file" | "env-manager";
 
 const TYPE_ALIASES: Record<string, DataType> = {
   profile: "profile",
@@ -64,11 +62,6 @@ const args = await yargs(hideBin(process.argv))
     default: MAX_LIMIT,
     describe: "Page size for WHOOP collection endpoints (max 25)",
   })
-  .option("save-refresh", {
-    type: "boolean",
-    default: true,
-    describe: "Persist rotated refresh tokens with env-manager when possible",
-  })
   .help()
   .parseAsync();
 
@@ -77,28 +70,18 @@ try {
   const { start, end } = resolveRange(args.start, args.end, args.days);
   const limit = resolveLimit(args.limit);
 
-  const clientId = readRequiredEnv("WHOOP_CLIENT_ID");
-  const clientSecret = readRequiredEnv("WHOOP_CLIENT_SECRET");
-  const refreshToken = readRequiredEnv("WHOOP_REFRESH_TOKEN");
+  const clientId = env.WHOOP_CLIENT_ID;
+  const clientSecret = env.WHOOP_CLIENT_SECRET;
+  const refreshToken = env.WHOOP_REFRESH_TOKEN;
 
   const tokenResponse = await refreshAccessToken({
-    clientId: clientId.value,
-    clientSecret: clientSecret.value,
-    refreshToken: refreshToken.value,
+    clientId,
+    clientSecret,
+    refreshToken,
   });
 
-  if (
-    args["save-refresh"] &&
-    tokenResponse.refresh_token &&
-    tokenResponse.refresh_token !== refreshToken.value
-  ) {
-    if (refreshToken.source === "env-manager") {
-      saveEnvManagerValue("WHOOP_REFRESH_TOKEN", tokenResponse.refresh_token);
-    } else {
-      console.error(
-        "WHOOP refresh token rotated. Update WHOOP_REFRESH_TOKEN to keep future requests working."
-      );
-    }
+  if (tokenResponse.refresh_token && tokenResponse.refresh_token !== refreshToken) {
+    console.error("WHOOP refresh token rotated. Update WHOOP_REFRESH_TOKEN to keep future requests working.");
   }
 
   const data: Record<string, unknown> = {};
@@ -195,63 +178,6 @@ function parseDate(value: string, label: string): Date {
     throw new Error(`Invalid ${label} date: ${value}`);
   }
   return date;
-}
-
-function readRequiredEnv(name: string): { value: string; source: EnvSource } {
-  const fromProcess = process.env[name]?.trim();
-  if (fromProcess) {
-    return { value: fromProcess, source: "process" };
-  }
-  const fromEnvFile = readEnvValue(name, { includeProcessEnv: false });
-  if (fromEnvFile) {
-    return { value: fromEnvFile, source: "env-file" };
-  }
-  const fromEnvManager = readEnvManagerValue(name);
-  if (fromEnvManager) {
-    return { value: fromEnvManager, source: "env-manager" };
-  }
-  throw new Error(
-    `${name} is required. Set it in environment, scripts repo .env.local/.env, or env-manager (env-manager global set ${name} <value>).`
-  );
-}
-
-function readEnvManagerValue(name: string): string | undefined {
-  const result = spawnSync("env-manager", ["global", "get", name], { encoding: "utf8" });
-  if (result.error) {
-    throw new Error(`env-manager failed: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    return undefined;
-  }
-  const output = `${result.stdout ?? ""}`.trim();
-  if (!output) {
-    return undefined;
-  }
-  for (const rawLine of output.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (!line || /^name\b/i.test(line) || /^-+$/.test(line)) {
-      continue;
-    }
-    const parts = line.split(/\s{2,}/);
-    if (parts[0] === name && parts[1]) {
-      return parts[1].trim();
-    }
-  }
-  return undefined;
-}
-
-function saveEnvManagerValue(name: string, value: string): void {
-  const result = spawnSync("env-manager", ["global", "set", name, value], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  if (result.error) {
-    throw new Error(`env-manager failed: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    const stderr = `${result.stderr ?? ""}`.trim();
-    throw new Error(`env-manager failed to save ${name}${stderr ? `: ${stderr}` : ""}`);
-  }
 }
 
 async function refreshAccessToken(params: {
