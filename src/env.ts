@@ -4,7 +4,7 @@ import { z } from "zod";
 const envSchema = z.object({
   WHOOP_CLIENT_ID: z.string(),
   WHOOP_CLIENT_SECRET: z.string(),
-  WHOOP_REFRESH_TOKEN: z.string(),
+  WHOOP_REFRESH_TOKEN: z.string().optional(),
   GEMINI_API_KEY: z.string(),
   AI_COMITTER_NAME: z.string().optional(),
   AI_COMMITTER_NAME: z.string().optional(),

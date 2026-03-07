@@ -183,7 +183,7 @@ function parseDate(value: string, label: string): Date {
 async function refreshAccessToken(params: {
   clientId: string;
   clientSecret: string;
-  refreshToken: string;
+  refreshToken?: string;
 }): Promise<{
   access_token: string;
   refresh_token?: string;
@@ -193,11 +193,13 @@ async function refreshAccessToken(params: {
 }> {
   const body = new URLSearchParams({
     grant_type: "refresh_token",
-    refresh_token: params.refreshToken,
     client_id: params.clientId,
     client_secret: params.clientSecret,
     scope: "offline",
   });
+  if (params.refreshToken) {
+    body.set("refresh_token", params.refreshToken);
+  }
 
   const response = await fetch(TOKEN_URL, {
     method: "POST",
