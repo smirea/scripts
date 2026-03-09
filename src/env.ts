@@ -7,6 +7,7 @@ const envSchema = z.object({
   WHOOP_REFRESH_TOKEN: z.string().optional(),
   WHOOP_REDIRECT_URI: z.string().optional(),
   GEMINI_API_KEY: z.string(),
+  MACROFACTOR_CREDENTIALS: z.string().optional(),
   AI_COMITTER_NAME: z.string().optional(),
   AI_COMMITTER_NAME: z.string().optional(),
   DEFAULT_AI_COMITTER_NAME: z.string().optional(),

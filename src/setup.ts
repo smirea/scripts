@@ -40,6 +40,11 @@ const links = [
     target: path.join(home, "bin", "macrofactor"),
   },
   {
+    name: "macrofactor-new",
+    source: path.join(repoRoot, "src", "macrofactor-new.ts"),
+    target: path.join(home, "bin", "macrofactor-new"),
+  },
+  {
     name: "voice-memo-parse",
     source: path.join(repoRoot, "src", "voice-memo-parse.ts"),
     target: path.join(home, "bin", "voice-memo-parse"),

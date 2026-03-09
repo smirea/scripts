@@ -1,0 +1,225 @@
+import { describe, expect, it } from 'bun:test';
+
+import { renderCsv, toConciseRows } from './macrofactor-report';
+import { parseFirestoreFields } from './utils/macrofactorApi';
+import {
+  buildMacrofactorApiReport,
+  parseFoodLogTimestamp,
+  parseMacrofactorCredentials,
+} from './macrofactor-new';
+
+function toEntryId(iso: string): string {
+  return String(Date.parse(iso) * 1000);
+}
+
+describe('parseMacrofactorCredentials', () => {
+  it('parses email and password and preserves colons in the password', () => {
+    expect(parseMacrofactorCredentials('user@example.com:abc:def')).toEqual({
+      email: 'user@example.com',
+      password: 'abc:def',
+    });
+  });
+
+  it('rejects missing or malformed credentials', () => {
+    expect(() => parseMacrofactorCredentials(undefined)).toThrow('MACROFACTOR_CREDENTIALS is not set');
+    expect(() => parseMacrofactorCredentials('user@example.com')).toThrow('format <email>:<password>');
+    expect(() => parseMacrofactorCredentials(':secret')).toThrow('non-empty email and password');
+  });
+});
+
+describe('parseFirestoreFields', () => {
+  it('parses nested Firestore typed values', () => {
+    expect(
+      parseFirestoreFields({
+        name: { stringValue: 'Chicken' },
+        count: { integerValue: '3' },
+        score: { doubleValue: 1.5 },
+        ok: { booleanValue: true },
+        nested: {
+          mapValue: {
+            fields: {
+              child: { stringValue: 'value' },
+            },
+          },
+        },
+        list: {
+          arrayValue: {
+            values: [{ stringValue: 'a' }, { nullValue: null }, { integerValue: '2' }],
+          },
+        },
+      })
+    ).toEqual({
+      name: 'Chicken',
+      count: 3,
+      score: 1.5,
+      ok: true,
+      nested: { child: 'value' },
+      list: ['a', null, 2],
+    });
+  });
+});
+
+describe('parseFoodLogTimestamp', () => {
+  it('prefers the Firestore entry id timestamp', () => {
+    const timestampMs = Date.parse('2026-02-07T10:00:00.000Z');
+    expect(parseFoodLogTimestamp(String(timestampMs * 1000))).toBe(timestampMs);
+  });
+
+  it('falls back to the document date and time when needed', () => {
+    expect(parseFoodLogTimestamp('entry', '2026-02-07', '5', '30')).toBe(Date.parse('2026-02-07T05:30:00.000Z'));
+  });
+});
+
+describe('buildMacrofactorApiReport', () => {
+  it('groups by food id, skips deleted rows, scales macros, and preserves CSV output', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 7,
+      start: '2026-02-05T00:00:00.000Z',
+      end: '2026-02-08T00:00:00.000Z',
+      dayDocuments: [
+        {
+          date: '2026-02-06',
+          document: {
+            [toEntryId('2026-02-06T09:00:00.000Z')]: {
+              id: 'food-a',
+              t: 'Alpha, Food',
+              b: 'Alpha Brand',
+              c: '90',
+              p: '8',
+              e: '18',
+              f: '4',
+              g: '100',
+              w: '100',
+              y: '1',
+              q: '1',
+              s: 'serving',
+              k: 't',
+              m: [{ m: 'serving', q: '1', w: '100' }],
+              291: '2',
+            },
+            [toEntryId('2026-02-06T08:30:00.000Z')]: {
+              id: 'food-b',
+              t: 'Beta Food',
+              b: 'Quick Add',
+              c: '120',
+              p: '12',
+              e: '15',
+              f: '3',
+              g: '80',
+              w: '40',
+              y: '2',
+              q: '1',
+              s: 'wrap',
+              k: 'n',
+              291: '2',
+              269: '1',
+            },
+          },
+        },
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'food-a',
+              t: 'Alpha, Food',
+              b: 'Alpha Brand',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1.5',
+              q: '1',
+              s: 'serving',
+              k: 't',
+              m: [{ m: 'serving', q: '1', w: '100' }],
+              291: '4',
+              269: '3',
+            },
+            [toEntryId('2026-02-07T11:00:00.000Z')]: {
+              id: 'food-c',
+              t: 'Deleted Food',
+              c: '200',
+              d: true,
+              g: '100',
+              w: '100',
+              y: '1',
+              q: '1',
+              s: 'serving',
+            },
+          },
+        },
+      ],
+    });
+
+    expect(report.matchedFoods).toBe(2);
+    expect(report.returnedFoods).toBe(2);
+
+    const alpha = report.foods[0];
+    expect(alpha?.itemId).toBe('food-a');
+    expect(alpha?.firstConsumedAt).toBe('2026-02-06T09:00:00.000Z');
+    expect(alpha?.latestConsumedAt).toBe('2026-02-07T10:00:00.000Z');
+    expect(alpha?.nutrition.caloriesKcal).toBe(150);
+    expect(alpha?.nutrition.proteinG).toBe(15);
+    expect(alpha?.nutrition.carbsG).toBe(30);
+    expect(alpha?.nutrition.fatG).toBe(7.5);
+    expect(alpha?.nutrition.fiberG).toBe(6);
+    expect(alpha?.nutrition.sugarG).toBe(4.5);
+    expect(alpha?.nutrition.byCode['291']).toBe(6);
+    expect(alpha?.nutrition.byCode.e).toBe(6);
+    expect(alpha?.servingUserSelection).toEqual({ quantity: 1.5, name: 'serving' });
+    expect(alpha?.servingAlternatives).toEqual([{ name: 'serving', quantity: 1, weight: 100 }]);
+
+    const beta = report.foods[1];
+    expect(beta?.itemId).toBe('food-b');
+    expect(beta?.isCustom).toBe(true);
+    expect(beta?.nutrition.caloriesKcal).toBe(120);
+    expect(beta?.nutrition.fiberG).toBe(2);
+
+    const rows = toConciseRows(report, { dateFormat: 'csv' });
+    expect(rows[0]?.name).toBe('Alpha, Food');
+    expect(rows[0]?.serving).toBe('1.5 serving');
+
+    const csv = renderCsv(rows);
+    expect(csv).toContain('"Alpha, Food"');
+    expect(csv).toContain(',1.5 serving,150,15,30,7.5,6');
+  });
+
+  it('applies limit after grouping and sorting by latest consumption', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 30,
+      limit: 1,
+      nowUnixSeconds: Date.parse('2026-02-08T00:00:00.000Z') / 1000,
+      dayDocuments: [
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'food-a',
+              t: 'A',
+              c: '100',
+              g: '100',
+              w: '100',
+              y: '1',
+            },
+            [toEntryId('2026-02-07T11:00:00.000Z')]: {
+              id: 'food-b',
+              t: 'B',
+              c: '200',
+              g: '100',
+              w: '100',
+              y: '1',
+            },
+          },
+        },
+      ],
+    });
+
+    expect(report.matchedFoods).toBe(2);
+    expect(report.returnedFoods).toBe(1);
+    expect(report.foods[0]?.itemId).toBe('food-b');
+  });
+});
