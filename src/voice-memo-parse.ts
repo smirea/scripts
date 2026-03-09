@@ -1309,7 +1309,7 @@ function extractTranscriptFromTsrpJson(value: unknown): string | null {
     collectTextFragments(root.transcript, fragments);
   }
 
-  const combined = fragments.join("").replace(/\u0000/g, "").trim();
+  const combined = fragments.join('').replaceAll('\0', '').trim();
   return combined.length > 0 ? combined : null;
 }
 
@@ -1758,7 +1758,7 @@ function readBestEffortFileDate(filePath: string): Date | null {
 
 function normalizeString(value: unknown): string | null {
   if (typeof value === "string") {
-    const normalized = value.replace(/\u0000/g, "").trim();
+    const normalized = value.replaceAll('\0', '').trim();
     return normalized.length > 0 ? normalized : null;
   }
   if (typeof value === "number" && Number.isFinite(value)) {
