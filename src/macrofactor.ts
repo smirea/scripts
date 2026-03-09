@@ -104,6 +104,11 @@ async function runCli(): Promise<void> {
         default: true,
         describe: 'Pretty-print JSON output',
       })
+      .option('full', {
+        type: 'boolean',
+        default: false,
+        describe: 'Include all nutrients in CSV/table output and serving alternatives in JSON output',
+      })
       .help()
       .parseAsync();
 
@@ -133,6 +138,7 @@ async function runCli(): Promise<void> {
       format: parseOutputFormat(args.format),
       outputPath: args.output,
       pretty: args.pretty,
+      full: args.full,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

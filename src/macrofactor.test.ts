@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { renderCsv, toConciseRows } from './macrofactor-report';
+import { renderCsv, renderCsvRecords, serializeReport, toConciseRows, toFullRows } from './macrofactor-report';
 import { parseFirestoreFields } from './utils/macrofactorApi';
 import {
   buildMacrofactorApiReport,
@@ -185,6 +185,110 @@ describe('buildMacrofactorApiReport', () => {
     const csv = renderCsv(rows);
     expect(csv).toContain('"Alpha, Food"');
     expect(csv).toContain(',1.5 serving,150,15,30,7.5,6');
+  });
+
+  it('serializes json with flattened named nutrients and hides serving alternatives unless full is set', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 7,
+      start: '2026-02-05T00:00:00.000Z',
+      end: '2026-02-08T00:00:00.000Z',
+      dayDocuments: [
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'food-a',
+              t: 'Alpha',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1.5',
+              q: '1',
+              s: 'serving',
+              k: 't',
+              291: '4.44',
+              269: '3.66',
+              306: '44.2',
+              m: [{ m: 'serving', q: '1', w: '100' }],
+            },
+          },
+        },
+      ],
+    });
+
+    const defaultJson = serializeReport(report);
+    const defaultFood = (defaultJson.foods as Array<Record<string, unknown>>)[0];
+    expect(defaultFood?.servingAlternatives).toBeUndefined();
+    expect(defaultFood?.nutrition).toEqual({
+      calories_kcal: 150,
+      protein_g: 15,
+      carbs_g: 30,
+      fat_g: 7.5,
+      fiber_g: 6.7,
+      sugars_g: 5.5,
+      potassium_mg: 66,
+    });
+
+    const fullJson = serializeReport(report, { full: true });
+    const fullFood = (fullJson.foods as Array<Record<string, unknown>>)[0];
+    expect(fullFood?.servingAlternatives).toEqual([{ name: 'serving', quantity: 1, weight: 100 }]);
+  });
+
+  it('renders full csv rows with all named nutrients', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 7,
+      start: '2026-02-05T00:00:00.000Z',
+      end: '2026-02-08T00:00:00.000Z',
+      dayDocuments: [
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'food-a',
+              t: 'Alpha',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1.5',
+              q: '1',
+              s: 'serving',
+              291: '4.44',
+              269: '3.66',
+              306: '44.2',
+            },
+          },
+        },
+      ],
+    });
+
+    const fullRows = toFullRows(report, { dateFormat: 'csv' });
+    expect(fullRows.columns).toEqual([
+      'date',
+      'time',
+      'name',
+      'serving',
+      'calories_kcal',
+      'protein_g',
+      'carbs_g',
+      'fat_g',
+      'fiber_g',
+      'sugars_g',
+      'potassium_mg',
+    ]);
+    expect(fullRows.rows[0]?.fiber_g).toBe(6.7);
+    expect(fullRows.rows[0]?.potassium_mg).toBe(66);
+
+    const csv = renderCsvRecords(fullRows.rows, fullRows.columns);
+    expect(csv.startsWith('date,time,name,serving,calories_kcal,protein_g,carbs_g,fat_g,fiber_g,sugars_g,potassium_mg\n')).toBe(true);
+    expect(csv).toContain('07.02.2026,10:00,Alpha,1.5 serving,150,15,30,7.5,6.7,5.5,66');
   });
 
   it('applies limit after grouping and sorting by latest consumption', () => {
