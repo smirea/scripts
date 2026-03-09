@@ -1,12 +1,20 @@
 #!/usr/bin/env bun
+import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import env from "./env";
 
 const BASE_URL = "https://api.prod.whoop.com/developer/v2";
+const AUTH_URL = "https://api.prod.whoop.com/oauth/oauth2/auth";
 const TOKEN_URL = "https://api.prod.whoop.com/oauth/oauth2/token";
 const MAX_LIMIT = 25;
 const DEFAULT_DAYS = 2;
+const WHOOP_SCOPE =
+  "offline read:profile read:recovery read:sleep read:cycles read:workout read:body_measurement";
+const WHOOP_STATE = "whooppull";
+const ENV_LOCAL_PATH = path.resolve(import.meta.dir, "..", ".env.local");
 
 const ALL_TYPES = ["profile", "body", "cycles", "recovery", "sleep", "workout"] as const;
 type DataType = (typeof ALL_TYPES)[number];
@@ -62,32 +70,64 @@ const args = await yargs(hideBin(process.argv))
     default: MAX_LIMIT,
     describe: "Page size for WHOOP collection endpoints (max 25)",
   })
+  .option("auth-code", {
+    type: "string",
+    describe: "OAuth authorization code copied from the redirect URL after approving access in your browser",
+  })
+  .option("redirect-uri", {
+    type: "string",
+    describe: "OAuth redirect URI registered in WHOOP Developer Dashboard",
+  })
+  .option("token", {
+    type: "string",
+    describe: "Manually set WHOOP_REFRESH_TOKEN in .env.local before fetching data",
+  })
   .help()
   .parseAsync();
 
 try {
+  const providedToken = normalizeOptionalString(args.token);
   const types = resolveTypes(args.include, args.exclude);
   const { start, end } = resolveRange(args.start, args.end, args.days);
   const limit = resolveLimit(args.limit);
 
   const clientId = env.WHOOP_CLIENT_ID;
   const clientSecret = env.WHOOP_CLIENT_SECRET;
-  const refreshToken = env.WHOOP_REFRESH_TOKEN;
+  const redirectUri = normalizeOptionalString(args["redirect-uri"]) ?? env.WHOOP_REDIRECT_URI;
+  const authCode = normalizeOptionalString(args["auth-code"]);
+  let bearerToken = providedToken ?? env.WHOOP_REFRESH_TOKEN;
 
-  const tokenResponse = await refreshAccessToken({
-    clientId,
-    clientSecret,
-    refreshToken,
-  });
+  if (providedToken) {
+    saveRefreshToken(providedToken);
+  }
 
-  if (tokenResponse.refresh_token && tokenResponse.refresh_token !== refreshToken) {
-    console.error("WHOOP refresh token rotated. Update WHOOP_REFRESH_TOKEN to keep future requests working.");
+  if (!bearerToken) {
+    if (!redirectUri) {
+      throw new Error(
+        "WHOOP_REFRESH_TOKEN is not set. Configure WHOOP_REDIRECT_URI in env-manager or pass --redirect-uri so the script can open the WHOOP authorization URL."
+      );
+    }
+    if (!authCode) {
+      openAuthorizationUrl(clientId, redirectUri);
+      throw new Error(buildManualAuthorizationMessage(clientId, redirectUri));
+    }
+    const tokenResponse = await exchangeAuthCodeForTokens({
+      clientId,
+      clientSecret,
+      authCode,
+      redirectUri,
+    });
+    if (!tokenResponse.refresh_token) {
+      throw new Error("WHOOP auth-code exchange did not return a refresh token.");
+    }
+    bearerToken = tokenResponse.refresh_token;
+    saveRefreshToken(bearerToken);
   }
 
   const data: Record<string, unknown> = {};
   for (const type of types) {
     data[type] = await fetchType(type, {
-      accessToken: tokenResponse.access_token,
+      accessToken: bearerToken,
       start,
       end,
       limit,
@@ -180,10 +220,56 @@ function parseDate(value: string, label: string): Date {
   return date;
 }
 
-async function refreshAccessToken(params: {
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed || undefined;
+}
+
+function buildAuthUrl(clientId: string, redirectUri: string): string {
+  const url = new URL(AUTH_URL);
+  url.searchParams.set("client_id", clientId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", WHOOP_SCOPE);
+  url.searchParams.set("state", WHOOP_STATE);
+  return url.toString();
+}
+
+function openAuthorizationUrl(clientId: string, redirectUri: string): void {
+  const authUrl = buildAuthUrl(clientId, redirectUri);
+  const result = spawnSync("open", [authUrl], { encoding: "utf8" });
+  if (result.error) {
+    throw new Error(`Failed to open browser for WHOOP authorization: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const stderr = `${result.stderr ?? ""}`.trim();
+    const stdout = `${result.stdout ?? ""}`.trim();
+    throw new Error(`Failed to open browser for WHOOP authorization: ${stderr || stdout || `exit code ${result.status}`}`);
+  }
+}
+
+function buildManualAuthorizationMessage(clientId: string, redirectUri: string): string {
+  const authUrl = buildAuthUrl(clientId, redirectUri);
+  return [
+    "WHOOP_REFRESH_TOKEN is not set.",
+    "The WHOOP authorization URL has been opened in your default browser.",
+    "Approve access, then copy the `code` query parameter from the redirect URL and rerun:",
+    `  whoop-pull --auth-code <code>`,
+    "If you already have a refresh token, save it directly with:",
+    "  whoop-pull --token <refresh-token>",
+    "",
+    `Auth URL: ${authUrl}`,
+  ].join("\n");
+}
+
+async function exchangeAuthCodeForTokens(params: {
   clientId: string;
   clientSecret: string;
-  refreshToken?: string;
+  authCode: string;
+  redirectUri: string;
 }): Promise<{
   access_token: string;
   refresh_token?: string;
@@ -192,14 +278,13 @@ async function refreshAccessToken(params: {
   token_type?: string;
 }> {
   const body = new URLSearchParams({
-    grant_type: "refresh_token",
+    grant_type: "authorization_code",
+    code: params.authCode,
+    redirect_uri: params.redirectUri,
     client_id: params.clientId,
     client_secret: params.clientSecret,
-    scope: "offline",
+    scope: WHOOP_SCOPE,
   });
-  if (params.refreshToken) {
-    body.set("refresh_token", params.refreshToken);
-  }
 
   const response = await fetch(TOKEN_URL, {
     method: "POST",
@@ -208,7 +293,7 @@ async function refreshAccessToken(params: {
   });
 
   if (!response.ok) {
-    throw new Error(`WHOOP token request failed: ${await formatError(response)}`);
+    throw new Error(`WHOOP auth-code token request failed: ${await formatError(response)}`);
   }
 
   const data = (await response.json()) as {
@@ -220,10 +305,39 @@ async function refreshAccessToken(params: {
   };
 
   if (!data.access_token) {
-    throw new Error("WHOOP token response missing access_token.");
+    throw new Error("WHOOP auth-code token response missing access_token.");
+  }
+  if (!data.refresh_token) {
+    throw new Error("WHOOP auth-code token response missing refresh_token. Make sure the app requests offline scope.");
   }
 
-  return data as Required<typeof data> & { access_token: string };
+  return data as Required<typeof data> & { access_token: string; refresh_token: string };
+}
+
+function saveRefreshToken(refreshToken: string): void {
+  const assignment = `WHOOP_REFRESH_TOKEN=${quoteEnvValue(refreshToken)} # {optional string}`;
+  const current = existsSync(ENV_LOCAL_PATH) ? readFileSync(ENV_LOCAL_PATH, "utf8") : "";
+  const lines = current === "" ? [] : current.split(/\r?\n/);
+  const index = lines.findIndex(line => /^\s*WHOOP_REFRESH_TOKEN\s*=/.test(line));
+
+  if (index === -1) {
+    if (lines.length > 0 && lines[lines.length - 1] !== "") {
+      lines.push("");
+    }
+    lines.push(assignment);
+  } else {
+    lines[index] = assignment;
+  }
+  const next = lines.join("\n").replace(/\n*$/, "\n");
+  writeFileSync(ENV_LOCAL_PATH, next, "utf8");
+  process.env.WHOOP_REFRESH_TOKEN = refreshToken;
+}
+
+function quoteEnvValue(value: string): string {
+  if (/^[A-Za-z0-9._:/=-]+$/.test(value)) {
+    return value;
+  }
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 async function fetchType(
@@ -284,7 +398,7 @@ async function fetchJson(pathOrUrl: string, accessToken: string): Promise<unknow
 }
 
 function buildUrl(path: string, params: Record<string, string | number | undefined>): string {
-  const url = new URL(path, BASE_URL);
+  const url = new URL(path.startsWith("http") ? path : `${BASE_URL}${path}`);
   for (const [key, value] of Object.entries(params)) {
     if (value == null || value === "") {
       continue;
