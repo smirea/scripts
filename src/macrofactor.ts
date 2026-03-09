@@ -1,13 +1,9 @@
 #!/usr/bin/env bun
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
-import chalk from 'chalk';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
+import env from './env';
 import {
-  APPLE_REFERENCE_UNIX_SECONDS,
   OUTPUT_FORMATS,
   parseOutputFormat,
   renderOutput,
@@ -15,53 +11,52 @@ import {
   toIso,
   type MacrofactorFoodRecord,
   type MacrofactorReport,
+  type ResolvedWindow,
 } from './macrofactor-report';
+import { MacroFactorApiClient } from './utils/macrofactorApi';
 
-export {
-  APPLE_REFERENCE_UNIX_SECONDS,
-  renderCsv,
-  resolveWindow,
-  toConciseRows,
-  type MacrofactorConciseRow,
-  type MacrofactorFoodRecord,
-  type MacrofactorReport,
-  type OutputFormat,
-} from './macrofactor-report';
+const SOURCE_PATH = 'api://macrofactor/food-log';
+const FOOD_DOC_BATCH_SIZE = 10;
+const CODE_NAME_MAP: Record<string, string> = {
+  a: 'alcohol_g',
+  c: 'carbs_g',
+  e: 'fiber_g',
+  f: 'fat_g',
+  k: 'calories_kcal',
+  nc: 'net_carbs_g',
+  p: 'protein_g',
+  s: 'sugars_g',
+  ea: 'added_sugars_g',
+};
 
-const APP_NAME = 'MacroFactor';
-const APP_SYNC_WAIT_MILLISECONDS = 12_000;
-const APP_SYNC_SKIP_WINDOW_MILLISECONDS = 60 * 60 * 1000;
-const APP_SYNC_STATE_FILENAME = 'macrofactor-sync.json';
-
-interface HistoryFile {
-  food: Record<string, HistoryFoodEntry>;
-}
-
-interface HistoryFoodEntry {
-  itemId?: string;
-  firstConsumedTimeUTC?: number;
-  latestConsumedTimeUTC?: number;
-  food?: {
-    title?: string;
-    brandName?: string;
-    source?: string;
-    isCustom?: boolean;
-    recipe?: unknown[];
-    servingDefault?: unknown;
-    servingUserSelection?: unknown;
-    servingAlternatives?: unknown[];
-    micros?: unknown[];
-  };
-}
-
-interface BuildOptions {
+interface BuildApiReportOptions {
   sourcePath: string;
-  jsonText: string;
+  dayDocuments: ApiFoodLogDay[];
   days: number;
   start?: string;
   end?: string;
   limit?: number;
   nowUnixSeconds?: number;
+}
+
+export interface ApiFoodLogDay {
+  date: string;
+  document: Record<string, unknown> | null;
+}
+
+interface ParsedFoodLogEntry {
+  groupKey: string;
+  itemId: string;
+  title: string;
+  brandName: string | null;
+  source: string | null;
+  isCustom: boolean;
+  consumedAt: string;
+  timestampMs: number;
+  servingDefault: unknown;
+  servingUserSelection: unknown;
+  servingAlternatives: unknown[];
+  nutrition: MacrofactorFoodRecord['nutrition'];
 }
 
 if (import.meta.main) {
@@ -70,16 +65,9 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    const defaultSourcePath = getDefaultSourcePath();
     const args = await yargs(hideBin(process.argv))
       .scriptName('macrofactor')
       .strict()
-      .option('source', {
-        alias: ['s'],
-        type: 'string',
-        default: defaultSourcePath,
-        describe: 'Path to MacroFactor historyFood.json',
-      })
       .option('days', {
         alias: ['d'],
         type: 'number',
@@ -116,11 +104,6 @@ async function runCli(): Promise<void> {
         default: true,
         describe: 'Pretty-print JSON output',
       })
-      .option('app', {
-        type: 'boolean',
-        default: true,
-        describe: 'Open MacroFactor and refresh cache before export when local sync is stale',
-      })
       .help()
       .parseAsync();
 
@@ -128,30 +111,26 @@ async function runCli(): Promise<void> {
       throw new Error('--limit must be a positive number.');
     }
 
-    const sourcePath = path.resolve(args.source);
-    if (args.app) {
-      await syncFromMacrofactorAppIfNeeded({
-        sourcePath,
-      });
-    }
-    if (!existsSync(sourcePath)) {
-      throw new Error(`Source file does not exist: ${sourcePath}`);
-    }
-
-    const jsonText = readFileSync(sourcePath, 'utf8');
-    const report = buildMacrofactorReport({
-      sourcePath,
-      jsonText,
+    const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
+    const client = await MacroFactorApiClient.login(credentials.email, credentials.password);
+    const window = resolveWindow({
+      days: args.days,
+      start: args.start,
+      end: args.end,
+    });
+    const dayDocuments = await fetchFoodLogDays(client, window);
+    const report = buildMacrofactorApiReport({
+      sourcePath: SOURCE_PATH,
+      dayDocuments,
       days: args.days,
       start: args.start,
       end: args.end,
       limit: args.limit,
     });
-    const format = parseOutputFormat(args.format);
 
     renderOutput({
       report,
-      format,
+      format: parseOutputFormat(args.format),
       outputPath: args.output,
       pretty: args.pretty,
     });
@@ -162,186 +141,82 @@ async function runCli(): Promise<void> {
   }
 }
 
-function getDefaultSourcePath(): string {
-  const home = process.env.HOME;
-  if (!home) {
-    throw new Error('HOME is not set.');
+export async function fetchFoodLogDays(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
+  const dateKeys = listFetchDateKeys(window);
+  const days: ApiFoodLogDay[] = [];
+  for (let index = 0; index < dateKeys.length; index += FOOD_DOC_BATCH_SIZE) {
+    const batch = dateKeys.slice(index, index + FOOD_DOC_BATCH_SIZE);
+    const batchDays = await Promise.all(
+      batch.map(async date => ({
+        date,
+        document: await client.getFoodLogDocument(date),
+      }))
+    );
+    days.push(...batchDays);
   }
-  return path.join(home, 'Library', 'Group Containers', 'group.com.sbs.diet.widgetgroup', 'historyFood.json');
+  return days;
 }
 
-async function syncFromMacrofactorAppIfNeeded(options: { sourcePath: string }): Promise<void> {
-  const sourceExists = existsSync(options.sourcePath);
-  const nowMilliseconds = Date.now();
-  const lastFileSyncMilliseconds = sourceExists ? getFileModifiedMilliseconds(options.sourcePath) : null;
-  const lastRecordedAppOpenMilliseconds = readLastAppOpenMilliseconds();
-  const isRunning = isAppRunning(APP_NAME);
-  const runningAppAgeSeconds = isRunning ? getRunningAppAgeSeconds(APP_NAME) : null;
-  const lastAppLaunchMilliseconds =
-    runningAppAgeSeconds != null ? nowMilliseconds - runningAppAgeSeconds * 1000 : null;
-  const lastSyncMilliseconds = maxFinite(
-    lastFileSyncMilliseconds,
-    maxFinite(lastRecordedAppOpenMilliseconds, lastAppLaunchMilliseconds)
-  );
-  if (
-    !shouldSyncFromApp({
-      lastSyncMilliseconds,
-      nowMilliseconds,
-      skipWindowMilliseconds: APP_SYNC_SKIP_WINDOW_MILLISECONDS,
-      force: !sourceExists,
-    })
-  ) {
-    return;
-  }
-
-  if (isRunning) {
-    writeLastAppOpenMilliseconds(nowMilliseconds);
-    console.error(chalk.yellow(`${APP_NAME} is already running. Waiting briefly for it to sync...`));
-    await sleep(APP_SYNC_WAIT_MILLISECONDS);
-    return;
-  }
-
-  console.error(chalk.yellow(`Opening the ${APP_NAME} app to sync...`));
-  runCommandOrThrow('open', ['-a', APP_NAME], `Failed to open ${APP_NAME}.`);
-  writeLastAppOpenMilliseconds(nowMilliseconds);
-  await sleep(APP_SYNC_WAIT_MILLISECONDS);
-  runCommandOrThrow('osascript', ['-e', `tell application "${APP_NAME}" to quit`], `Failed to quit ${APP_NAME}.`);
-}
-
-export function shouldSyncFromApp(options: {
-  lastSyncMilliseconds: number | null;
-  nowMilliseconds: number;
-  skipWindowMilliseconds: number;
-  force: boolean;
-}): boolean {
-  if (options.force) {
-    return true;
-  }
-  if (!isFiniteNumber(options.lastSyncMilliseconds)) {
-    return true;
-  }
-  return options.nowMilliseconds - options.lastSyncMilliseconds >= options.skipWindowMilliseconds;
-}
-
-function getFileModifiedMilliseconds(filePath: string): number {
-  return statSync(filePath).mtimeMs;
-}
-
-function isAppRunning(appName: string): boolean {
-  const result = spawnSync(
-    'osascript',
-    [
-      '-e',
-      `tell application "System Events" to (name of processes) contains "${appName.replaceAll('"', '\\"')}"`,
-    ],
-    { encoding: 'utf8' }
-  );
-  if (result.status !== 0) {
-    return false;
-  }
-  return `${result.stdout ?? ''}`.trim().toLowerCase() === 'true';
-}
-
-function getRunningAppAgeSeconds(appName: string): number | null {
-  const pidResult = spawnSync('pgrep', ['-x', appName], { encoding: 'utf8' });
-  if (pidResult.status !== 0) {
-    return null;
-  }
-  const pid = `${pidResult.stdout ?? ''}`.trim().split(/\s+/)[0];
-  if (!pid) {
-    return null;
-  }
-  const elapsedResult = spawnSync('ps', ['-o', 'etimes=', '-p', pid], { encoding: 'utf8' });
-  if (elapsedResult.status !== 0) {
-    return null;
-  }
-  const elapsedSeconds = Number(`${elapsedResult.stdout ?? ''}`.trim());
-  return Number.isFinite(elapsedSeconds) ? elapsedSeconds : null;
-}
-
-function getSyncStatePath(): string | null {
-  const home = process.env.HOME;
-  if (!home) {
-    return null;
-  }
-  const dir = path.join(home, 'Library', 'Caches', 'scripts');
-  mkdirSync(dir, { recursive: true });
-  return path.join(dir, APP_SYNC_STATE_FILENAME);
-}
-
-function readLastAppOpenMilliseconds(): number | null {
-  const statePath = getSyncStatePath();
-  if (!statePath || !existsSync(statePath)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
-    const value =
-      parsed && typeof parsed === 'object' && 'lastAppOpenMilliseconds' in parsed
-        ? (parsed as { lastAppOpenMilliseconds?: unknown }).lastAppOpenMilliseconds
-        : null;
-    return isFiniteNumber(value) ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeLastAppOpenMilliseconds(nowMilliseconds: number): void {
-  const statePath = getSyncStatePath();
-  if (!statePath) {
-    return;
-  }
-  writeFileSync(statePath, `${JSON.stringify({ lastAppOpenMilliseconds: nowMilliseconds })}\n`, 'utf8');
-}
-
-function maxFinite(a: number | null, b: number | null): number | null {
-  const aOk = isFiniteNumber(a);
-  const bOk = isFiniteNumber(b);
-  if (aOk && bOk) {
-    return Math.max(a, b);
-  }
-  if (aOk) {
-    return a;
-  }
-  if (bOk) {
-    return b;
-  }
-  return null;
-}
-
-function runCommandOrThrow(command: string, args: string[], errorPrefix: string): void {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
-  if (result.status === 0) {
-    return;
-  }
-  const stderr = `${result.stderr ?? ''}`.trim();
-  const stdout = `${result.stdout ?? ''}`.trim();
-  const details = stderr || stdout;
-  throw new Error(details ? `${errorPrefix} ${details}` : errorPrefix);
-}
-
-async function sleep(milliseconds: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, milliseconds));
-}
-
-export function buildMacrofactorReport(options: BuildOptions): MacrofactorReport {
-  const input = parseHistoryJson(options.jsonText);
+export function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
   const window = resolveWindow({
     days: options.days,
     start: options.start,
     end: options.end,
     nowUnixSeconds: options.nowUnixSeconds,
   });
+  const startMs = window.startUnixSeconds * 1000;
+  const endMs = window.endUnixSeconds * 1000;
+  const groups = new Map<
+    string,
+    {
+      firstTimestampMs: number;
+      latestTimestampMs: number;
+      representative: ParsedFoodLogEntry;
+    }
+  >();
 
-  const rows: MacrofactorFoodRecord[] = [];
-  for (const value of Object.values(input.food)) {
-    const row = toFoodRow(value, window.startUnixSeconds, window.endUnixSeconds);
-    if (row) {
-      rows.push(row);
+  for (const day of options.dayDocuments) {
+    for (const entry of parseFoodLogEntries(day)) {
+      if (entry.timestampMs < startMs || entry.timestampMs > endMs) {
+        continue;
+      }
+      const existing = groups.get(entry.groupKey);
+      if (!existing) {
+        groups.set(entry.groupKey, {
+          firstTimestampMs: entry.timestampMs,
+          latestTimestampMs: entry.timestampMs,
+          representative: entry,
+        });
+        continue;
+      }
+      existing.firstTimestampMs = Math.min(existing.firstTimestampMs, entry.timestampMs);
+      if (entry.timestampMs >= existing.latestTimestampMs) {
+        existing.latestTimestampMs = entry.timestampMs;
+        existing.representative = entry;
+      }
     }
   }
 
-  rows.sort((a, b) => Date.parse(b.latestConsumedAt) - Date.parse(a.latestConsumedAt));
+  const rows = Array.from(groups.values())
+    .map(group => {
+      const representative = group.representative;
+      return {
+        itemId: representative.itemId,
+        title: representative.title,
+        brandName: representative.brandName,
+        source: representative.source,
+        isCustom: representative.isCustom,
+        firstConsumedAt: new Date(group.firstTimestampMs).toISOString(),
+        latestConsumedAt: new Date(group.latestTimestampMs).toISOString(),
+        recipeCount: 0,
+        recipe: [],
+        servingDefault: representative.servingDefault,
+        servingUserSelection: representative.servingUserSelection,
+        servingAlternatives: representative.servingAlternatives,
+        nutrition: representative.nutrition,
+      } satisfies MacrofactorFoodRecord;
+    })
+    .sort((a, b) => Date.parse(b.latestConsumedAt) - Date.parse(a.latestConsumedAt));
 
   const limitedRows =
     options.limit && Number.isFinite(options.limit) && options.limit > 0
@@ -361,124 +236,261 @@ export function buildMacrofactorReport(options: BuildOptions): MacrofactorReport
   };
 }
 
-function parseHistoryJson(jsonText: string): HistoryFile {
-  const parsed = JSON.parse(jsonText) as unknown;
-  if (!parsed || typeof parsed !== 'object' || !('food' in parsed)) {
-    throw new Error('Invalid MacroFactor history file: missing top-level `food`.');
+export function parseMacrofactorCredentials(value: string | undefined): { email: string; password: string } {
+  const raw = value?.trim();
+  if (!raw) {
+    throw new Error('MACROFACTOR_CREDENTIALS is not set. Expected <email>:<password>.');
   }
-  const food = (parsed as { food?: unknown }).food;
-  if (!food || typeof food !== 'object' || Array.isArray(food)) {
-    throw new Error('Invalid MacroFactor history file: `food` must be an object.');
+
+  const separatorIndex = raw.indexOf(':');
+  if (separatorIndex === -1) {
+    throw new Error('MACROFACTOR_CREDENTIALS must use the format <email>:<password>.');
   }
-  return parsed as HistoryFile;
+
+  const email = raw.slice(0, separatorIndex).trim();
+  const password = raw.slice(separatorIndex + 1);
+  if (!email || !password) {
+    throw new Error('MACROFACTOR_CREDENTIALS must include both a non-empty email and password.');
+  }
+
+  return { email, password };
 }
 
-function toFoodRow(
-  entry: HistoryFoodEntry,
-  startUnixSeconds: number,
-  endUnixSeconds: number
-): MacrofactorFoodRecord | null {
-  const latestAppleSeconds = entry.latestConsumedTimeUTC;
-  if (!isFiniteNumber(latestAppleSeconds)) {
-    return null;
-  }
-  const latestUnixSeconds = appleToUnixSeconds(latestAppleSeconds);
-  if (latestUnixSeconds < startUnixSeconds || latestUnixSeconds > endUnixSeconds) {
-    return null;
-  }
-
-  const firstAppleSeconds = entry.firstConsumedTimeUTC;
-  const firstUnixSeconds = isFiniteNumber(firstAppleSeconds) ? appleToUnixSeconds(firstAppleSeconds) : null;
-  const food = entry.food ?? {};
-  const title = toStringOrNull(food.title) ?? toStringOrNull(food.brandName) ?? '(untitled)';
-  const byCode = parseMicros(food.micros);
-
-  const named: Record<string, number> = {};
-  for (const [key, value] of Object.entries(byCode)) {
-    const mapped = CODE_NAME_MAP[key];
-    if (mapped) {
-      named[mapped] = value;
+export function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
+  const asNumber = Number(entryId);
+  if (Number.isSafeInteger(asNumber) && asNumber > 0) {
+    if (asNumber >= 1_000_000_000_000_000) {
+      return Math.trunc(asNumber / 1000);
+    }
+    if (asNumber >= 1_000_000_000_000) {
+      return Math.trunc(asNumber);
     }
   }
 
-  const recipe = Array.isArray(food.recipe) ? food.recipe : [];
-  const servingAlternatives = Array.isArray(food.servingAlternatives) ? food.servingAlternatives : [];
+  if (!fallbackDate) {
+    return null;
+  }
+  const [year, month, day] = fallbackDate.split('-').map(part => Number(part));
+  if (![year, month, day].every(Number.isFinite)) {
+    return null;
+  }
+  const hour = parseNumberLike(fallbackHour) ?? 0;
+  const minute = parseNumberLike(fallbackMinute) ?? 0;
+  const fallbackMs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  return Number.isFinite(fallbackMs) ? fallbackMs : null;
+}
+
+function parseFoodLogEntries(day: ApiFoodLogDay): ParsedFoodLogEntry[] {
+  if (!day.document) {
+    return [];
+  }
+
+  const entries: ParsedFoodLogEntry[] = [];
+  for (const [entryId, rawValue] of Object.entries(day.document)) {
+    if (entryId.startsWith('_')) {
+      continue;
+    }
+    const raw = asRecord(rawValue);
+    if (!raw) {
+      continue;
+    }
+    if (raw.d === true) {
+      continue;
+    }
+
+    const timestampMs = parseFoodLogTimestamp(entryId, day.date, raw.h, raw.mi);
+    if (timestampMs == null) {
+      continue;
+    }
+
+    const itemId = parseString(raw.id) ?? entryId;
+    const title = parseString(raw.t) ?? parseString(raw.b) ?? '(untitled)';
+    const source = parseString(raw.k);
+
+    entries.push({
+      groupKey: itemId,
+      itemId,
+      title,
+      brandName: parseOptionalString(raw.b),
+      source,
+      isCustom: source != null && source !== 't',
+      consumedAt: new Date(timestampMs).toISOString(),
+      timestampMs,
+      servingDefault: buildServing(parseNumberLike(raw.q), parseOptionalString(raw.s)),
+      servingUserSelection: buildServing(parseNumberLike(raw.y), parseOptionalString(raw.s)),
+      servingAlternatives: buildServingAlternatives(raw.m),
+      nutrition: buildNutrition(raw),
+    });
+  }
+
+  return entries;
+}
+
+function buildNutrition(raw: Record<string, unknown>): MacrofactorFoodRecord['nutrition'] {
+  const multiplier = computeMultiplier(raw);
+  const calories = scaleValue(raw.c, multiplier);
+  const protein = scaleValue(raw.p, multiplier);
+  const carbs = scaleValue(raw.e, multiplier);
+  const fat = scaleValue(raw.f, multiplier);
+  const nutrientCodes = parseNumericNutrientCodes(raw, multiplier);
+  const fiber = maybeNumber(nutrientCodes['291']);
+  const sugar = maybeNumber(nutrientCodes['269']);
+  const alcohol = maybeNumber(nutrientCodes['221']);
+  const byCode: Record<string, number> = { ...nutrientCodes };
+
+  setByCodeValue(byCode, 'k', calories);
+  setByCodeValue(byCode, 'p', protein);
+  setByCodeValue(byCode, 'c', carbs);
+  setByCodeValue(byCode, 'f', fat);
+  setByCodeValue(byCode, 'e', fiber);
+  setByCodeValue(byCode, 's', sugar);
+  setByCodeValue(byCode, 'a', alcohol);
+
+  const named: Record<string, number> = {};
+  for (const [code, value] of Object.entries(byCode)) {
+    const name = CODE_NAME_MAP[code];
+    if (name) {
+      named[name] = value;
+    }
+  }
 
   return {
-    itemId: toStringOrNull(entry.itemId) ?? '(missing-item-id)',
-    title,
-    brandName: toStringOrNull(food.brandName),
-    source: toStringOrNull(food.source),
-    isCustom: Boolean(food.isCustom),
-    firstConsumedAt: firstUnixSeconds ? toIso(firstUnixSeconds) : null,
-    latestConsumedAt: toIso(latestUnixSeconds),
-    recipeCount: recipe.length,
-    recipe,
-    servingDefault: food.servingDefault ?? null,
-    servingUserSelection: food.servingUserSelection ?? null,
-    servingAlternatives,
-    nutrition: {
-      caloriesKcal: maybeNumber(byCode.k),
-      proteinG: maybeNumber(byCode.p),
-      carbsG: maybeNumber(byCode.c),
-      fatG: maybeNumber(byCode.f),
-      fiberG: maybeNumber(byCode.e),
-      sugarG: maybeNumber(byCode.s),
-      netCarbsG: maybeNumber(byCode.nc),
-      alcoholG: maybeNumber(byCode.a),
-      byCode,
-      named,
-    },
+    caloriesKcal: calories,
+    proteinG: protein,
+    carbsG: carbs,
+    fatG: fat,
+    fiberG: fiber,
+    sugarG: sugar,
+    netCarbsG: null,
+    alcoholG: alcohol,
+    byCode,
+    named,
   };
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
+function buildServing(quantity: number | null, name: string | null): { quantity?: number; name?: string } | null {
+  if (quantity == null && name == null) {
+    return null;
+  }
+  const serving: { quantity?: number; name?: string } = {};
+  if (quantity != null) {
+    serving.quantity = quantity;
+  }
+  if (name != null) {
+    serving.name = name;
+  }
+  return serving;
+}
+
+function buildServingAlternatives(value: unknown): unknown[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap(item => {
+    const record = asRecord(item);
+    if (!record) {
+      return [];
+    }
+    const name = parseOptionalString(record.m);
+    const quantity = parseNumberLike(record.q);
+    const weight = parseNumberLike(record.w);
+    if (name == null && quantity == null && weight == null) {
+      return [];
+    }
+    return [
+      {
+        ...(name != null ? { name } : {}),
+        ...(quantity != null ? { quantity } : {}),
+        ...(weight != null ? { weight } : {}),
+      },
+    ];
+  });
+}
+
+function parseNumericNutrientCodes(raw: Record<string, unknown>, multiplier: number): Record<string, number> {
+  const nutrients: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!/^\d+$/.test(key)) {
+      continue;
+    }
+    const parsed = parseNumberLike(value);
+    if (parsed == null) {
+      continue;
+    }
+    nutrients[key] = parsed * multiplier;
+  }
+  return nutrients;
+}
+
+function computeMultiplier(raw: Record<string, unknown>): number {
+  const servingGrams = parseNumberLike(raw.g);
+  const userQuantity = parseNumberLike(raw.y);
+  const unitWeight = parseNumberLike(raw.w);
+  if (servingGrams != null && userQuantity != null && unitWeight != null && servingGrams > 0) {
+    return (userQuantity * unitWeight) / servingGrams;
+  }
+  return 1;
+}
+
+function scaleValue(value: unknown, multiplier: number): number | null {
+  const parsed = parseNumberLike(value);
+  if (parsed == null) {
+    return null;
+  }
+  return parsed * multiplier;
+}
+
+function setByCodeValue(target: Record<string, number>, code: string, value: number | null): void {
+  if (value != null) {
+    target[code] = value;
+  }
 }
 
 function maybeNumber(value: unknown): number | null {
-  return Number.isFinite(value) ? (value as number) : null;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-function parseMicros(micros: unknown[] | undefined): Record<string, number> {
-  if (!Array.isArray(micros)) {
-    return {};
+function parseNumberLike(value: unknown): number | null {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : null;
   }
-  const byCode: Record<string, number> = {};
-  for (let i = 0; i + 1 < micros.length; i += 2) {
-    const codeRaw = micros[i];
-    const valueRaw = micros[i + 1];
-    const code = String(codeRaw);
-    const value =
-      typeof valueRaw === "number"
-        ? valueRaw
-        : typeof valueRaw === "string"
-          ? Number(valueRaw)
-          : Number.NaN;
-    if (!Number.isFinite(value)) {
-      continue;
-    }
-    byCode[code] = value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
-  return byCode;
+  return null;
 }
 
-function toStringOrNull(value: unknown): string | null {
+function parseString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
-function appleToUnixSeconds(secondsSince2001: number): number {
-  return secondsSince2001 + APPLE_REFERENCE_UNIX_SECONDS;
+function parseOptionalString(value: unknown): string | null {
+  const parsed = parseString(value);
+  return parsed === '' ? null : parsed;
 }
 
-const CODE_NAME_MAP: Record<string, string> = {
-  a: 'alcohol_g',
-  c: 'carbs_g',
-  e: 'fiber_g',
-  f: 'fat_g',
-  k: 'calories_kcal',
-  nc: 'net_carbs_g',
-  p: 'protein_g',
-  s: 'sugars_g',
-  ea: 'added_sugars_g',
-};
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function listFetchDateKeys(window: ResolvedWindow): string[] {
+  const startDate = new Date((window.startUnixSeconds - 24 * 60 * 60) * 1000);
+  const endDate = new Date((window.endUnixSeconds + 24 * 60 * 60) * 1000);
+  const current = Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate());
+  const end = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
+  const dateKeys: string[] = [];
+
+  for (let timestamp = current; timestamp <= end; timestamp += 24 * 60 * 60 * 1000) {
+    dateKeys.push(formatDateKey(timestamp));
+  }
+  return dateKeys;
+}
+
+function formatDateKey(timestampMs: number): string {
+  return new Date(timestampMs).toISOString().slice(0, 10);
+}
