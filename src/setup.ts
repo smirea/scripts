@@ -1,48 +1,53 @@
 #!/usr/bin/env bun
-import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
-import path from "node:path";
+import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
 
 const home = process.env.HOME;
 if (!home) {
-  throw new Error("HOME is not set.");
+  throw new Error('HOME is not set.');
 }
 
-const repoRoot = path.resolve(import.meta.dir, "..");
+const repoRoot = path.resolve(import.meta.dir, '..');
 const links = [
   {
-    name: "gai",
-    source: path.join(repoRoot, "src", "git-commit-ai.ts"),
-    target: path.join(home, "bin", "gai"),
+    name: 'gai',
+    source: path.join(repoRoot, 'src', 'git-commit-ai.ts'),
+    target: path.join(home, 'bin', 'gai'),
   },
   {
-    name: "git-ai-cim",
-    source: path.join(repoRoot, "src", "git-commit-ai.ts"),
-    target: path.join(home, "bin", "git-ai-cim"),
+    name: 'git-ai-cim',
+    source: path.join(repoRoot, 'src', 'git-commit-ai.ts'),
+    target: path.join(home, 'bin', 'git-ai-cim'),
   },
   {
-    name: "git-worktree",
-    source: path.join(repoRoot, "src", "git-worktree.ts"),
-    target: path.join(home, "bin", "git-worktree"),
+    name: 'git-worktree',
+    source: path.join(repoRoot, 'src', 'git-worktree.ts'),
+    target: path.join(home, 'bin', 'git-worktree'),
   },
   {
-    name: "wt",
-    source: path.join(repoRoot, "src", "git-worktree.ts"),
-    target: path.join(home, "bin", "wt"),
+    name: 'wt',
+    source: path.join(repoRoot, 'src', 'git-worktree.ts'),
+    target: path.join(home, 'bin', 'wt'),
   },
   {
-    name: "whoop-pull",
-    source: path.join(repoRoot, "src", "whoop-pull.ts"),
-    target: path.join(home, "bin", "whoop-pull"),
+    name: 'whoop-pull',
+    source: path.join(repoRoot, 'src', 'whoop-pull.ts'),
+    target: path.join(home, 'bin', 'whoop-pull'),
   },
   {
-    name: "macrofactor",
-    source: path.join(repoRoot, "src", "macrofactor.ts"),
-    target: path.join(home, "bin", "macrofactor"),
+    name: 'macrofactor',
+    source: path.join(repoRoot, 'src', 'macrofactor.ts'),
+    target: path.join(home, 'bin', 'macrofactor'),
   },
   {
-    name: "voice-memo-parse",
-    source: path.join(repoRoot, "src", "voice-memo-parse.ts"),
-    target: path.join(home, "bin", "voice-memo-parse"),
+    name: 'workouts',
+    source: path.join(repoRoot, 'src', 'workouts.ts'),
+    target: path.join(home, 'bin', 'workouts'),
+  },
+  {
+    name: 'voice-memo-parse',
+    source: path.join(repoRoot, 'src', 'voice-memo-parse.ts'),
+    target: path.join(home, 'bin', 'voice-memo-parse'),
   },
 ];
 
