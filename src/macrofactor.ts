@@ -23,7 +23,6 @@ const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREB
 const IOS_BUNDLE_ID = 'com.sbs.diet';
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 const FOOD_DOC_BATCH_SIZE = 10;
-export const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const CSV_COLUMNS = [
   'date',
@@ -216,7 +215,7 @@ interface BuildApiReportOptions {
   nowUnixSeconds?: number;
 }
 
-export interface ApiFoodLogDay {
+interface ApiFoodLogDay {
   date: string;
   document: Record<string, unknown> | null;
 }
@@ -251,7 +250,7 @@ interface ProgramTarget {
   fat: Array<number | null>;
 }
 
-export interface MacrofactorReport {
+interface MacrofactorReport {
   generatedAt: string;
   sourcePath: string;
   window: {
@@ -265,7 +264,7 @@ export interface MacrofactorReport {
   recipeBreakdown: MacrofactorRecipeBreakdownRecord[];
 }
 
-export interface MacrofactorFoodRecord {
+interface MacrofactorFoodRecord {
   itemId: string;
   title: string;
   brandName: string | null;
@@ -291,7 +290,7 @@ export interface MacrofactorFoodRecord {
   };
 }
 
-export interface MacrofactorDailyOverviewRecord {
+interface MacrofactorDailyOverviewRecord {
   date: string;
   weightKg: number | null;
   calories: number;
@@ -306,7 +305,7 @@ export interface MacrofactorDailyOverviewRecord {
   foods_logged: number;
 }
 
-export interface MacrofactorRecipeBreakdownRecord {
+interface MacrofactorRecipeBreakdownRecord {
   recipeId: string;
   name: string;
   ingredients: string[];
@@ -314,7 +313,7 @@ export interface MacrofactorRecipeBreakdownRecord {
   consumed_on: string[];
 }
 
-export interface MacrofactorConciseRow {
+interface MacrofactorConciseRow {
   date: string;
   time: string;
   name: string;
@@ -327,7 +326,7 @@ export interface MacrofactorConciseRow {
   fiber: number | null;
 }
 
-export interface ResolvedWindow {
+interface ResolvedWindow {
   startUnixSeconds: number;
   endUnixSeconds: number;
 }
@@ -338,7 +337,7 @@ if (import.meta.main) {
   void runCli();
 }
 
-export function renderOutput(options: {
+function renderOutput(options: {
   report: MacrofactorReport;
   format: OutputFormat;
   outputPath?: string;
@@ -356,7 +355,7 @@ export function renderOutput(options: {
 
   const text = (() => {
     if (options.format === 'json') {
-      return `${JSON.stringify(serializeReport(options.report, { full }), null, options.pretty ? 2 : 0)}\n`;
+      return `${JSON.stringify(serializeReport(options.report), null, options.pretty ? 2 : 0)}\n`;
     }
     if (options.format === 'csv:full') {
       return renderFullCsv(options.report, { full });
@@ -377,10 +376,7 @@ export function renderOutput(options: {
   process.stdout.write(text);
 }
 
-export function serializeReport(
-  report: MacrofactorReport,
-  _options?: { full?: boolean }
-): Record<string, unknown> {
+function serializeReport(report: MacrofactorReport): Record<string, unknown> {
   return {
     ...report,
     dailyOverview: report.dailyOverview,
@@ -408,7 +404,7 @@ export function serializeReport(
   };
 }
 
-export function toConciseRows(
+function toConciseRows(
   report: MacrofactorReport,
   options?: { dateFormat?: ConciseDateFormat }
 ): MacrofactorConciseRow[] {
@@ -435,7 +431,7 @@ export function toConciseRows(
   return rows.map(row => row.row);
 }
 
-export function renderCsv(rows: MacrofactorConciseRow[]): string {
+function renderCsv(rows: MacrofactorConciseRow[]): string {
   return renderCsvRecords(
     rows.map(row => ({
       ...row,
@@ -444,7 +440,7 @@ export function renderCsv(rows: MacrofactorConciseRow[]): string {
   );
 }
 
-export function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }): string {
+function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }): string {
   const full = options?.full ?? false;
   const sections = [
     {
@@ -469,7 +465,7 @@ export function renderFullCsv(report: MacrofactorReport, options?: { full?: bool
   return `${sections.map(section => `\n==== ${section.name} ===\n${section.csv}`).join('')}`;
 }
 
-export function toFullRows(
+function toFullRows(
   report: MacrofactorReport,
   options?: { dateFormat?: ConciseDateFormat }
 ): { columns: string[]; rows: Record<string, CsvValue>[] } {
@@ -503,7 +499,7 @@ export function toFullRows(
   };
 }
 
-export function resolveWindow(options: {
+function resolveWindow(options: {
   days: number;
   start?: string;
   end?: string;
@@ -526,7 +522,7 @@ export function resolveWindow(options: {
   return { startUnixSeconds, endUnixSeconds };
 }
 
-export function toIso(unixSeconds: number): string {
+function toIso(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toISOString();
 }
 
@@ -622,7 +618,7 @@ async function runCli(): Promise<void> {
   }
 }
 
-export async function fetchFoodLogDays(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
+async function fetchFoodLogDays(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
   const dateKeys = listFetchDateKeys(window);
   const days: ApiFoodLogDay[] = [];
   for (let index = 0; index < dateKeys.length; index += FOOD_DOC_BATCH_SIZE) {
@@ -638,7 +634,7 @@ export async function fetchFoodLogDays(client: MacroFactorApiClient, window: Res
   return days;
 }
 
-export async function fetchProgramTargets(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
+async function fetchProgramTargets(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
   const years = listProgramYears(window);
   const documents = await Promise.all(
     years.map(async year => ({
@@ -698,7 +694,7 @@ async function fetchScaleWeights(client: MacroFactorApiClient, window: ResolvedW
   return weights;
 }
 
-export function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
+function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
   const window = resolveWindow({
     days: options.days,
     start: options.start,
@@ -776,7 +772,7 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
   };
 }
 
-export function parseMacrofactorCredentials(value: string | undefined): { email: string; password: string } {
+function parseMacrofactorCredentials(value: string | undefined): { email: string; password: string } {
   const raw = value?.trim();
   if (!raw) {
     throw new Error('MACROFACTOR_CREDENTIALS is not set. Expected <email>:<password>.');
@@ -796,7 +792,7 @@ export function parseMacrofactorCredentials(value: string | undefined): { email:
   return { email, password };
 }
 
-export function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
+function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
   const asNumber = Number(entryId);
   if (Number.isSafeInteger(asNumber) && asNumber > 0) {
     if (asNumber >= 1_000_000_000_000_000) {
@@ -982,8 +978,7 @@ function parseString(value: unknown): string | null {
 }
 
 function parseOptionalString(value: unknown): string | null {
-  const parsed = parseString(value);
-  return parsed === '' ? null : parsed;
+  return parseString(value);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -1237,13 +1232,11 @@ function parseNullableNumberArray(value: unknown): Array<number | null> {
 }
 
 function listProgramYears(window: ResolvedWindow): number[] {
-  const startYear = new Date(window.startUnixSeconds * 1000).getUTCFullYear() - 1;
-  const endYear = new Date(window.endUnixSeconds * 1000).getUTCFullYear();
-  return listYearsInRange(startYear, endYear);
+  return listWindowYears(window, -1);
 }
 
-function listWindowYears(window: ResolvedWindow): number[] {
-  const startYear = new Date(window.startUnixSeconds * 1000).getUTCFullYear();
+function listWindowYears(window: ResolvedWindow, startYearOffset = 0): number[] {
+  const startYear = new Date(window.startUnixSeconds * 1000).getUTCFullYear() + startYearOffset;
   const endYear = new Date(window.endUnixSeconds * 1000).getUTCFullYear();
   return listYearsInRange(startYear, endYear);
 }
@@ -1475,8 +1468,8 @@ function collectNutrientColumns(nutrientsList: Record<string, number>[]): string
   });
 }
 
-export function parseFirestoreValue(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+function parseFirestoreValue(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return value;
   }
   const typedValue = value as Record<string, unknown>;
@@ -1528,7 +1521,7 @@ export function parseFirestoreValue(value: unknown): unknown {
   return typedValue;
 }
 
-export function parseFirestoreFields(fields: unknown): Record<string, unknown> {
+function parseFirestoreFields(fields: unknown): Record<string, unknown> {
   if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
     return {};
   }
