@@ -9,7 +9,9 @@ import {
   renderOutput,
   resolveWindow,
   toIso,
+  type MacrofactorDailyOverviewRecord,
   type MacrofactorFoodRecord,
+  type MacrofactorRecipeBreakdownRecord,
   type MacrofactorReport,
   type ResolvedWindow,
 } from './macrofactor-report';
@@ -17,6 +19,7 @@ import { MacroFactorApiClient } from './utils/macrofactorApi';
 
 const SOURCE_PATH = 'api://macrofactor/food-log';
 const FOOD_DOC_BATCH_SIZE = 10;
+const SECONDS_PER_DAY = 24 * 60 * 60;
 const CODE_NAME_MAP: Record<string, string> = {
   a: 'alcohol_g',
   c: 'carbs_g',
@@ -32,7 +35,8 @@ const CODE_NAME_MAP: Record<string, string> = {
 interface BuildApiReportOptions {
   sourcePath: string;
   dayDocuments: ApiFoodLogDay[];
-  customFoodInfo?: Record<string, CustomFoodInfo>;
+  customFoodDetails?: Record<string, CustomFoodDetails>;
+  programTargets?: ProgramTarget[];
   days: number;
   start?: string;
   end?: string;
@@ -55,14 +59,24 @@ interface ParsedFoodLogEntry {
   kind: MacrofactorFoodRecord['kind'];
   recipeId: string | null;
   timestampMs: number;
+  consumedDate: string;
   serving: string;
   servingGrams: number | null;
   nutrition: MacrofactorFoodRecord['nutrition'];
 }
 
-interface CustomFoodInfo {
+interface CustomFoodDetails {
   kind: MacrofactorFoodRecord['kind'];
   recipeId: string | null;
+  ingredients: string[];
+}
+
+interface ProgramTarget {
+  effectiveDate: string;
+  calories: Array<number | null>;
+  protein: Array<number | null>;
+  carbs: Array<number | null>;
+  fat: Array<number | null>;
 }
 
 if (import.meta.main) {
@@ -130,11 +144,15 @@ async function runCli(): Promise<void> {
       end: args.end,
     });
     const dayDocuments = await fetchFoodLogDays(client, window);
-    const customFoodInfo = await fetchCustomFoodInfo(client, dayDocuments);
+    const [customFoodDetails, programTargets] = await Promise.all([
+      fetchCustomFoodDetails(client, dayDocuments),
+      fetchProgramTargets(client, window),
+    ]);
     const report = buildMacrofactorApiReport({
       sourcePath: SOURCE_PATH,
       dayDocuments,
-      customFoodInfo,
+      customFoodDetails,
+      programTargets,
       days: args.days,
       start: args.start,
       end: args.end,
@@ -171,6 +189,39 @@ export async function fetchFoodLogDays(client: MacroFactorApiClient, window: Res
   return days;
 }
 
+export async function fetchProgramTargets(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
+  const years = listProgramYears(window);
+  const documents = await Promise.all(
+    years.map(async year => ({
+      year,
+      document: await client.getProgramDocument(year),
+    }))
+  );
+  const targets: ProgramTarget[] = [];
+
+  for (const { year, document } of documents) {
+    if (!document) {
+      continue;
+    }
+    for (const [monthDay, rawValue] of Object.entries(document)) {
+      const raw = asRecord(rawValue);
+      if (!raw || !/^\d{4}$/.test(monthDay)) {
+        continue;
+      }
+      targets.push({
+        effectiveDate: `${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`,
+        calories: parseNullableNumberArray(raw.calories),
+        protein: parseNullableNumberArray(raw.protein),
+        carbs: parseNullableNumberArray(raw.carbs),
+        fat: parseNullableNumberArray(raw.fat),
+      });
+    }
+  }
+
+  targets.sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
+  return targets;
+}
+
 export function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
   const window = resolveWindow({
     days: options.days,
@@ -180,6 +231,9 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
   });
   const startMs = window.startUnixSeconds * 1000;
   const endMs = window.endUnixSeconds * 1000;
+  const entries = options.dayDocuments
+    .flatMap(day => parseFoodLogEntries(day, options.customFoodDetails ?? {}))
+    .filter(entry => entry.timestampMs >= startMs && entry.timestampMs <= endMs);
   const groups = new Map<
     string,
     {
@@ -189,25 +243,20 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
     }
   >();
 
-  for (const day of options.dayDocuments) {
-    for (const entry of parseFoodLogEntries(day, options.customFoodInfo ?? {})) {
-      if (entry.timestampMs < startMs || entry.timestampMs > endMs) {
-        continue;
-      }
-      const existing = groups.get(entry.groupKey);
-      if (!existing) {
-        groups.set(entry.groupKey, {
-          firstTimestampMs: entry.timestampMs,
-          latestTimestampMs: entry.timestampMs,
-          representative: entry,
-        });
-        continue;
-      }
-      existing.firstTimestampMs = Math.min(existing.firstTimestampMs, entry.timestampMs);
-      if (entry.timestampMs >= existing.latestTimestampMs) {
-        existing.latestTimestampMs = entry.timestampMs;
-        existing.representative = entry;
-      }
+  for (const entry of entries) {
+    const existing = groups.get(entry.groupKey);
+    if (!existing) {
+      groups.set(entry.groupKey, {
+        firstTimestampMs: entry.timestampMs,
+        latestTimestampMs: entry.timestampMs,
+        representative: entry,
+      });
+      continue;
+    }
+    existing.firstTimestampMs = Math.min(existing.firstTimestampMs, entry.timestampMs);
+    if (entry.timestampMs >= existing.latestTimestampMs) {
+      existing.latestTimestampMs = entry.timestampMs;
+      existing.representative = entry;
     }
   }
 
@@ -245,7 +294,9 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
     },
     matchedFoods: rows.length,
     returnedFoods: limitedRows.length,
+    dailyOverview: buildDailyOverview(window, entries, options.programTargets ?? []),
     foods: limitedRows,
+    recipeBreakdown: buildRecipeBreakdown(entries, options.customFoodDetails ?? {}),
   };
 }
 
@@ -293,7 +344,7 @@ export function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fa
   return Number.isFinite(fallbackMs) ? fallbackMs : null;
 }
 
-function parseFoodLogEntries(day: ApiFoodLogDay, customFoodInfo: Record<string, CustomFoodInfo>): ParsedFoodLogEntry[] {
+function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<string, CustomFoodDetails>): ParsedFoodLogEntry[] {
   if (!day.document) {
     return [];
   }
@@ -319,7 +370,7 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodInfo: Record<string, 
     const itemId = parseString(raw.id) ?? entryId;
     const title = parseString(raw.t) ?? parseString(raw.b) ?? '(untitled)';
     const source = parseString(raw.k);
-    const customInfo = customFoodInfo[itemId] ?? { kind: 'food', recipeId: null };
+    const customInfo = customFoodDetails[itemId] ?? { kind: 'food', recipeId: null, ingredients: [] };
 
     entries.push({
       groupKey: itemId,
@@ -331,6 +382,7 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodInfo: Record<string, 
       kind: customInfo.kind,
       recipeId: customInfo.recipeId,
       timestampMs,
+      consumedDate: formatDateKey(timestampMs),
       serving: buildServingString(parseNumberLike(raw.y), parseOptionalString(raw.s)),
       servingGrams: parseNumberLike(raw.g),
       nutrition: buildNutrition(raw),
@@ -482,18 +534,112 @@ function formatDateKey(timestampMs: number): string {
   return new Date(timestampMs).toISOString().slice(0, 10);
 }
 
-async function fetchCustomFoodInfo(
+function buildDailyOverview(
+  window: ResolvedWindow,
+  entries: ParsedFoodLogEntry[],
+  programTargets: ProgramTarget[]
+): MacrofactorDailyOverviewRecord[] {
+  const totals = new Map(
+    listWindowDateKeys(window).map(date => [
+      date,
+      {
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        foods_logged: 0,
+      },
+    ])
+  );
+
+  for (const entry of entries) {
+    const day = totals.get(entry.consumedDate);
+    if (!day) {
+      continue;
+    }
+    day.calories += entry.nutrition.caloriesKcal ?? 0;
+    day.carbs += entry.nutrition.carbsG ?? 0;
+    day.protein += entry.nutrition.proteinG ?? 0;
+    day.fat += entry.nutrition.fatG ?? 0;
+    day.fiber += entry.nutrition.fiberG ?? 0;
+    day.foods_logged += 1;
+  }
+
+  return Array.from(totals.entries()).map(([date, totalsForDate]) => {
+    const goals = findProgramGoalsForDate(date, programTargets);
+    return {
+      date,
+      calories: roundNumber(totalsForDate.calories, 0),
+      carbs: roundNumber(totalsForDate.carbs, 2),
+      protein: roundNumber(totalsForDate.protein, 2),
+      fat: roundNumber(totalsForDate.fat, 2),
+      fiber: roundNumber(totalsForDate.fiber, 2),
+      goal_calories: goals.goal_calories,
+      goal_protein: goals.goal_protein,
+      goal_carbs: goals.goal_carbs,
+      goal_fat: goals.goal_fat,
+      foods_logged: totalsForDate.foods_logged,
+    };
+  });
+}
+
+function buildRecipeBreakdown(
+  entries: ParsedFoodLogEntry[],
+  customFoodDetails: Record<string, CustomFoodDetails>
+): MacrofactorRecipeBreakdownRecord[] {
+  const groups = new Map<
+    string,
+    {
+      latestTimestampMs: number;
+      representative: ParsedFoodLogEntry;
+      consumedOn: Set<string>;
+    }
+  >();
+
+  for (const entry of entries) {
+    if (entry.kind !== 'recipe' || !entry.recipeId) {
+      continue;
+    }
+    const existing = groups.get(entry.recipeId);
+    if (!existing) {
+      groups.set(entry.recipeId, {
+        latestTimestampMs: entry.timestampMs,
+        representative: entry,
+        consumedOn: new Set([entry.consumedDate]),
+      });
+      continue;
+    }
+    existing.consumedOn.add(entry.consumedDate);
+    if (entry.timestampMs >= existing.latestTimestampMs) {
+      existing.latestTimestampMs = entry.timestampMs;
+      existing.representative = entry;
+    }
+  }
+
+  return Array.from(groups.entries())
+    .map(([recipeId, group]) => ({
+      recipeId,
+      name: group.representative.title,
+      ingredients: customFoodDetails[recipeId]?.ingredients ?? [],
+      nutrition: group.representative.nutrition,
+      consumed_on: Array.from(group.consumedOn).sort((a, b) => a.localeCompare(b)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function fetchCustomFoodDetails(
   client: MacroFactorApiClient,
   dayDocuments: ApiFoodLogDay[]
-): Promise<Record<string, CustomFoodInfo>> {
+): Promise<Record<string, CustomFoodDetails>> {
   const ids = collectCustomFoodIds(dayDocuments);
-  const info: Record<string, CustomFoodInfo> = {};
+  const info: Record<string, CustomFoodDetails> = {};
   for (const id of ids) {
     const document = await client.getCustomFoodDocument(id);
     if (!document) {
       continue;
     }
-    info[id] = parseCustomFoodInfo(id, document);
+    info[id] = parseCustomFoodDetails(id, document);
   }
   return info;
 }
@@ -520,7 +666,7 @@ function collectCustomFoodIds(dayDocuments: ApiFoodLogDay[]): string[] {
   return Array.from(ids);
 }
 
-function parseCustomFoodInfo(id: string, document: Record<string, unknown>): CustomFoodInfo {
+function parseCustomFoodDetails(id: string, document: Record<string, unknown>): CustomFoodDetails {
   const ingredients = document.r;
   const brandName = parseString(document.b);
   const isRecipe =
@@ -529,5 +675,113 @@ function parseCustomFoodInfo(id: string, document: Record<string, unknown>): Cus
   return {
     kind: isRecipe ? 'recipe' : 'food',
     recipeId: isRecipe ? id : null,
+    ingredients: isRecipe ? parseRecipeIngredients(ingredients) : [],
   };
+}
+
+function parseRecipeIngredients(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map(rawIngredient => {
+      const ingredient = asRecord(rawIngredient);
+      if (!ingredient) {
+        return null;
+      }
+      const name = parseString(ingredient.t) ?? parseString(ingredient.b);
+      if (!name) {
+        return null;
+      }
+      const unit = parseOptionalString(ingredient.u) ?? parseOptionalString(ingredient.s);
+      return `[${buildServingString(parseNumberLike(ingredient.y), unit)}] ${name}`;
+    })
+    .filter((ingredient): ingredient is string => ingredient != null);
+}
+
+function findProgramGoalsForDate(
+  date: string,
+  programTargets: ProgramTarget[]
+): Pick<MacrofactorDailyOverviewRecord, 'goal_calories' | 'goal_protein' | 'goal_carbs' | 'goal_fat'> {
+  let activeTarget: ProgramTarget | null = null;
+  for (const target of programTargets) {
+    if (target.effectiveDate > date) {
+      break;
+    }
+    activeTarget = target;
+  }
+  if (!activeTarget) {
+    return {
+      goal_calories: null,
+      goal_protein: null,
+      goal_carbs: null,
+      goal_fat: null,
+    };
+  }
+  return {
+    goal_calories: pickProgramValue(activeTarget.calories, activeTarget.effectiveDate, date, 0),
+    goal_protein: pickProgramValue(activeTarget.protein, activeTarget.effectiveDate, date, 2),
+    goal_carbs: pickProgramValue(activeTarget.carbs, activeTarget.effectiveDate, date, 2),
+    goal_fat: pickProgramValue(activeTarget.fat, activeTarget.effectiveDate, date, 2),
+  };
+}
+
+function pickProgramValue(
+  values: Array<number | null>,
+  effectiveDate: string,
+  date: string,
+  fractionDigits: number
+): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const effectiveMs = Date.parse(`${effectiveDate}T00:00:00.000Z`);
+  const dateMs = Date.parse(`${date}T00:00:00.000Z`);
+  if (!Number.isFinite(effectiveMs) || !Number.isFinite(dateMs) || dateMs < effectiveMs) {
+    return null;
+  }
+  const dayOffset = Math.floor((dateMs - effectiveMs) / (SECONDS_PER_DAY * 1000));
+  const index = dayOffset % values.length;
+  const value = values[index] ?? values[0];
+  return value == null ? null : roundNumber(value, fractionDigits);
+}
+
+function parseNullableNumberArray(value: unknown): Array<number | null> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map(entry => parseNumberLike(entry));
+}
+
+function listProgramYears(window: ResolvedWindow): number[] {
+  const startYear = new Date(window.startUnixSeconds * 1000).getUTCFullYear() - 1;
+  const endYear = new Date(window.endUnixSeconds * 1000).getUTCFullYear();
+  const years: number[] = [];
+  for (let year = startYear; year <= endYear; year += 1) {
+    years.push(year);
+  }
+  return years;
+}
+
+function listWindowDateKeys(window: ResolvedWindow): string[] {
+  const start = Date.UTC(
+    new Date(window.startUnixSeconds * 1000).getUTCFullYear(),
+    new Date(window.startUnixSeconds * 1000).getUTCMonth(),
+    new Date(window.startUnixSeconds * 1000).getUTCDate()
+  );
+  const end = Date.UTC(
+    new Date(window.endUnixSeconds * 1000).getUTCFullYear(),
+    new Date(window.endUnixSeconds * 1000).getUTCMonth(),
+    new Date(window.endUnixSeconds * 1000).getUTCDate()
+  );
+  const dates: string[] = [];
+  for (let timestamp = start; timestamp <= end; timestamp += SECONDS_PER_DAY * 1000) {
+    dates.push(formatDateKey(timestamp));
+  }
+  return dates;
+}
+
+function roundNumber(value: number, fractionDigits: number): number {
+  const factor = 10 ** fractionDigits;
+  return Math.round(value * factor) / factor;
 }

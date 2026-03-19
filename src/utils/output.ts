@@ -1,4 +1,4 @@
-export const OUTPUT_FORMATS = ['json', 'table', 'csv'] as const;
+export const OUTPUT_FORMATS = ['json', 'table', 'csv', 'csv:full'] as const;
 
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 export type CsvValue = string | number | null;

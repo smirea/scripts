@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { renderCsv, renderCsvRecords, serializeReport, toConciseRows, toFullRows } from './macrofactor-report';
+import { renderCsv, renderCsvRecords, renderFullCsv, serializeReport, toConciseRows, toFullRows } from './macrofactor-report';
 import { parseFirestoreFields } from './utils/macrofactorApi';
 import {
   buildMacrofactorApiReport,
@@ -77,6 +77,15 @@ describe('buildMacrofactorApiReport', () => {
       days: 7,
       start: '2026-02-05T00:00:00.000Z',
       end: '2026-02-08T00:00:00.000Z',
+      programTargets: [
+        {
+          effectiveDate: '2026-02-03',
+          calories: [2000],
+          protein: [160],
+          carbs: [180],
+          fat: [70],
+        },
+      ],
       dayDocuments: [
         {
           date: '2026-02-06',
@@ -182,6 +191,61 @@ describe('buildMacrofactorApiReport', () => {
     expect(beta?.nutrition.caloriesKcal).toBe(120);
     expect(beta?.nutrition.fiberG).toBe(2);
 
+    expect(report.dailyOverview).toEqual([
+      {
+        date: '2026-02-05',
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        goal_calories: 2000,
+        goal_protein: 160,
+        goal_carbs: 180,
+        goal_fat: 70,
+        foods_logged: 0,
+      },
+      {
+        date: '2026-02-06',
+        calories: 210,
+        carbs: 33,
+        protein: 20,
+        fat: 7,
+        fiber: 4,
+        goal_calories: 2000,
+        goal_protein: 160,
+        goal_carbs: 180,
+        goal_fat: 70,
+        foods_logged: 2,
+      },
+      {
+        date: '2026-02-07',
+        calories: 150,
+        carbs: 30,
+        protein: 15,
+        fat: 7.5,
+        fiber: 6,
+        goal_calories: 2000,
+        goal_protein: 160,
+        goal_carbs: 180,
+        goal_fat: 70,
+        foods_logged: 1,
+      },
+      {
+        date: '2026-02-08',
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        goal_calories: 2000,
+        goal_protein: 160,
+        goal_carbs: 180,
+        goal_fat: 70,
+        foods_logged: 0,
+      },
+    ]);
+
     const rows = toConciseRows(report, { dateFormat: 'csv' });
     expect(rows[0]?.name).toBe('Alpha, Food');
     expect(rows[0]?.serving).toBe('1.5 serving');
@@ -226,6 +290,60 @@ describe('buildMacrofactorApiReport', () => {
     });
 
     const defaultJson = serializeReport(report);
+    expect(defaultJson.dailyOverview).toEqual([
+      {
+        date: '2026-02-05',
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        goal_calories: null,
+        goal_protein: null,
+        goal_carbs: null,
+        goal_fat: null,
+        foods_logged: 0,
+      },
+      {
+        date: '2026-02-06',
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        goal_calories: null,
+        goal_protein: null,
+        goal_carbs: null,
+        goal_fat: null,
+        foods_logged: 0,
+      },
+      {
+        date: '2026-02-07',
+        calories: 150,
+        carbs: 30,
+        protein: 15,
+        fat: 7.5,
+        fiber: 6.66,
+        goal_calories: null,
+        goal_protein: null,
+        goal_carbs: null,
+        goal_fat: null,
+        foods_logged: 1,
+      },
+      {
+        date: '2026-02-08',
+        calories: 0,
+        carbs: 0,
+        protein: 0,
+        fat: 0,
+        fiber: 0,
+        goal_calories: null,
+        goal_protein: null,
+        goal_carbs: null,
+        goal_fat: null,
+        foods_logged: 0,
+      },
+    ]);
     const defaultFood = (defaultJson.foods as Array<Record<string, unknown>>)[0];
     expect(defaultFood?.serving).toBe('1.5 serving');
     expect(defaultFood?.servingGrams).toBe(100);
@@ -245,6 +363,7 @@ describe('buildMacrofactorApiReport', () => {
       sugars_g: 5.5,
       potassium_mg: 66,
     });
+    expect(defaultJson.recipeBreakdown).toEqual([]);
 
     const fullJson = serializeReport(report, { full: true });
     const fullFood = (fullJson.foods as Array<Record<string, unknown>>)[0];
@@ -261,10 +380,11 @@ describe('buildMacrofactorApiReport', () => {
       days: 7,
       start: '2026-02-05T00:00:00.000Z',
       end: '2026-02-08T00:00:00.000Z',
-      customFoodInfo: {
+      customFoodDetails: {
         recipe_1: {
           kind: 'recipe',
           recipeId: 'recipe_1',
+          ingredients: ['[2 slices] Bread', '[1 tbsp] Butter'],
         },
       },
       dayDocuments: [
@@ -296,6 +416,15 @@ describe('buildMacrofactorApiReport', () => {
     expect(food?.recipeId).toBe('recipe_1');
     expect(food?.title).toBe('Morning Pancake');
     expect(food?.serving).toBe('1 serving');
+    expect(report.recipeBreakdown).toEqual([
+      {
+        recipeId: 'recipe_1',
+        name: 'Morning Pancake',
+        ingredients: ['[2 slices] Bread', '[1 tbsp] Butter'],
+        nutrition: food?.nutrition,
+        consumed_on: ['2026-02-07'],
+      },
+    ]);
 
     const json = serializeReport(report);
     const serializedFood = (json.foods as Array<Record<string, unknown>>)[0];
@@ -308,6 +437,15 @@ describe('buildMacrofactorApiReport', () => {
       carbs_g: 20,
       fat_g: 5,
     });
+    expect(json.recipeBreakdown).toEqual([
+      {
+        recipeId: 'recipe_1',
+        name: 'Morning Pancake',
+        ingredients: ['[2 slices] Bread', '[1 tbsp] Butter'],
+        nutrition: ['calories: 100 kcal', 'protein: 10 g', 'carbs: 20 g', 'fat: 5 g'],
+        consumed_on: ['2026-02-07'],
+      },
+    ]);
   });
 
   it('renders full csv rows with all named nutrients', () => {
@@ -364,6 +502,86 @@ describe('buildMacrofactorApiReport', () => {
     const csv = renderCsvRecords(fullRows.rows, fullRows.columns);
     expect(csv.startsWith('date,time,name,serving,servingGrams,calories_kcal,protein_g,carbs_g,fat_g,fiber_g,sugars_g,potassium_mg\n')).toBe(true);
     expect(csv).toContain('07.02.2026,10:00,Alpha,1.5 serving,100,150,15,30,7.5,6.7,5.5,66');
+  });
+
+  it('renders csv:full as three separated csv tables', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 7,
+      start: '2026-02-05T00:00:00.000Z',
+      end: '2026-02-08T00:00:00.000Z',
+      programTargets: [
+        {
+          effectiveDate: '2026-02-03',
+          calories: [2000],
+          protein: [160],
+          carbs: [180],
+          fat: [70],
+        },
+      ],
+      customFoodDetails: {
+        recipe_1: {
+          kind: 'recipe',
+          recipeId: 'recipe_1',
+          ingredients: ['[2 slices] Bread', '[1 tbsp] Butter'],
+        },
+      },
+      dayDocuments: [
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'recipe_1',
+              t: 'Morning Pancake',
+              b: 'Custom Recipe',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1',
+              q: '1',
+              s: 'serving',
+              k: 'c',
+              291: '4',
+            },
+          },
+        },
+        {
+          date: '2026-02-06',
+          document: {
+            [toEntryId('2026-02-06T12:00:00.000Z')]: {
+              id: 'recipe_1',
+              t: 'Morning Pancake',
+              b: 'Custom Recipe',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1',
+              q: '1',
+              s: 'serving',
+              k: 'c',
+              291: '4',
+            },
+          },
+        },
+      ],
+    });
+
+    const csv = renderFullCsv(report);
+    expect(csv.startsWith('\n==== daily_overview ===\n')).toBe(true);
+    expect(csv).toContain('\n==== detailed_foods_day ===\n');
+    expect(csv).toContain('\n==== recipe_meal_breakdown ===\n');
+    expect(csv).toContain('date,calories,carbs,protein,fat,fiber,goal_calories,goal_protein,goal_carbs,goal_fat,foods_logged');
+    expect(csv).toContain('date,time,name,serving,servingGrams,calories,protein,carbs,fat,fiber');
+    expect(csv).toContain('name,ingredients,nutrition,consumed_on');
+    expect(csv).toContain('Morning Pancake');
+    expect(csv).toContain('"[2 slices] Bread\n[1 tbsp] Butter"');
+    expect(csv).toContain('2026-02-06, 2026-02-07');
   });
 
   it('applies limit after grouping and sorting by latest consumption', () => {

@@ -23,6 +23,20 @@ const CSV_COLUMNS = [
   'fat',
   'fiber',
 ] as const;
+const DAILY_OVERVIEW_COLUMNS = [
+  'date',
+  'calories',
+  'carbs',
+  'protein',
+  'fat',
+  'fiber',
+  'goal_calories',
+  'goal_protein',
+  'goal_carbs',
+  'goal_fat',
+  'foods_logged',
+] as const;
+const RECIPE_BREAKDOWN_COLUMNS = ['name', 'ingredients', 'nutrition', 'consumed_on'] as const;
 const FULL_BASE_COLUMNS = ['date', 'time', 'name', 'serving', 'servingGrams'] as const;
 const NUTRIENT_CODE_NAME_MAP: Record<string, string> = {
   a: 'alcohol_g',
@@ -150,7 +164,9 @@ export interface MacrofactorReport {
   };
   matchedFoods: number;
   returnedFoods: number;
+  dailyOverview: MacrofactorDailyOverviewRecord[];
   foods: MacrofactorFoodRecord[];
+  recipeBreakdown: MacrofactorRecipeBreakdownRecord[];
 }
 
 export interface MacrofactorFoodRecord {
@@ -177,6 +193,28 @@ export interface MacrofactorFoodRecord {
     byCode: Record<string, number>;
     named: Record<string, number>;
   };
+}
+
+export interface MacrofactorDailyOverviewRecord {
+  date: string;
+  calories: number;
+  carbs: number;
+  protein: number;
+  fat: number;
+  fiber: number;
+  goal_calories: number | null;
+  goal_protein: number | null;
+  goal_carbs: number | null;
+  goal_fat: number | null;
+  foods_logged: number;
+}
+
+export interface MacrofactorRecipeBreakdownRecord {
+  recipeId: string;
+  name: string;
+  ingredients: string[];
+  nutrition: MacrofactorFoodRecord['nutrition'];
+  consumed_on: string[];
 }
 
 export interface MacrofactorConciseRow {
@@ -211,13 +249,16 @@ export function renderOutput(options: {
     if (options.outputPath) {
       throw new Error('--output is not supported with --format=table. Use --format=csv or --format=json.');
     }
-    console.table(full ? toFullRows(options.report, { dateFormat: 'table' }).rows : toConciseRows(options.report, { dateFormat: 'table' }));
+    renderTable(options.report, { full });
     return;
   }
 
   const text = (() => {
     if (options.format === 'json') {
       return `${JSON.stringify(serializeReport(options.report, { full }), null, options.pretty ? 2 : 0)}\n`;
+    }
+    if (options.format === 'csv:full') {
+      return renderFullCsv(options.report, { full });
     }
     if (!full) {
       return renderCsv(toConciseRows(options.report, { dateFormat: 'csv' }));
@@ -241,6 +282,18 @@ export function serializeReport(
 ): Record<string, unknown> {
   return {
     ...report,
+    dailyOverview: report.dailyOverview.map(row => ({
+      ...row,
+      calories: roundNullable(row.calories, 0) ?? 0,
+      carbs: roundNullable(row.carbs, 2) ?? 0,
+      protein: roundNullable(row.protein, 2) ?? 0,
+      fat: roundNullable(row.fat, 2) ?? 0,
+      fiber: roundNullable(row.fiber, 2) ?? 0,
+      goal_calories: roundNullable(row.goal_calories, 0),
+      goal_protein: roundNullable(row.goal_protein, 2),
+      goal_carbs: roundNullable(row.goal_carbs, 2),
+      goal_fat: roundNullable(row.goal_fat, 2),
+    })),
     foods: report.foods.map(food => ({
       itemId: food.itemId,
       title: food.title,
@@ -254,6 +307,13 @@ export function serializeReport(
       serving: food.serving,
       servingGrams: roundNamedNutrientNullable(food.servingGrams),
       nutrition: flattenNamedNutrients(food.nutrition),
+    })),
+    recipeBreakdown: report.recipeBreakdown.map(recipe => ({
+      recipeId: recipe.recipeId,
+      name: recipe.name,
+      ingredients: [...recipe.ingredients],
+      nutrition: formatNutritionLines(recipe.nutrition),
+      consumed_on: [...recipe.consumed_on],
     })),
   };
 }
@@ -294,6 +354,31 @@ export function renderCsv(rows: MacrofactorConciseRow[]): string {
   );
 }
 
+export function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }): string {
+  const full = options?.full ?? false;
+  const sections = [
+    {
+      name: 'daily_overview',
+      csv: renderCsvRecords(toDailyOverviewCsvRows(report), DAILY_OVERVIEW_COLUMNS),
+    },
+    {
+      name: 'detailed_foods_day',
+      csv: full
+        ? (() => {
+            const rows = toFullRows(report, { dateFormat: 'csv' });
+            return renderCsvRecords(rows.rows, rows.columns);
+          })()
+        : renderCsv(toConciseRows(report, { dateFormat: 'csv' })),
+    },
+    {
+      name: 'recipe_meal_breakdown',
+      csv: renderCsvRecords(toRecipeBreakdownCsvRows(report), RECIPE_BREAKDOWN_COLUMNS),
+    },
+  ];
+
+  return `${sections.map(section => `\n==== ${section.name} ===\n${section.csv}`).join('')}`;
+}
+
 export function toFullRows(
   report: MacrofactorReport,
   options?: { dateFormat?: ConciseDateFormat }
@@ -326,6 +411,75 @@ export function toFullRows(
       return record;
     }),
   };
+}
+
+function renderTable(report: MacrofactorReport, options: { full: boolean }): void {
+  process.stdout.write('Daily Overview\n');
+  printTable(
+    report.dailyOverview.map(row => ({
+      ...row,
+      calories: roundNullable(row.calories, 0) ?? 0,
+      carbs: roundNullable(row.carbs, 2) ?? 0,
+      protein: roundNullable(row.protein, 2) ?? 0,
+      fat: roundNullable(row.fat, 2) ?? 0,
+      fiber: roundNullable(row.fiber, 2) ?? 0,
+      goal_calories: roundNullable(row.goal_calories, 0),
+      goal_protein: roundNullable(row.goal_protein, 2),
+      goal_carbs: roundNullable(row.goal_carbs, 2),
+      goal_fat: roundNullable(row.goal_fat, 2),
+    }))
+  );
+  process.stdout.write('\nDetailed Foods / Day\n');
+  printTable(options.full ? toFullRows(report, { dateFormat: 'table' }).rows : toConciseRows(report, { dateFormat: 'table' }));
+  process.stdout.write('\nRecipe / Meal Breakdown\n');
+  printTable(
+    report.recipeBreakdown.map(recipe => ({
+      name: recipe.name,
+      ingredients: recipe.ingredients.join('\n'),
+      nutrition: formatNutritionLines(recipe.nutrition).join('\n'),
+      consumed_on: recipe.consumed_on.join(', '),
+    }))
+  );
+}
+
+function toDailyOverviewCsvRows(report: MacrofactorReport): Record<string, CsvValue>[] {
+  return report.dailyOverview.map(row => ({
+    date: row.date,
+    calories: roundNullable(row.calories, 0) ?? 0,
+    carbs: roundNullable(row.carbs, 2) ?? 0,
+    protein: roundNullable(row.protein, 2) ?? 0,
+    fat: roundNullable(row.fat, 2) ?? 0,
+    fiber: roundNullable(row.fiber, 2) ?? 0,
+    goal_calories: roundNullable(row.goal_calories, 0),
+    goal_protein: roundNullable(row.goal_protein, 2),
+    goal_carbs: roundNullable(row.goal_carbs, 2),
+    goal_fat: roundNullable(row.goal_fat, 2),
+    foods_logged: row.foods_logged,
+  }));
+}
+
+function toRecipeBreakdownCsvRows(report: MacrofactorReport): Record<string, CsvValue>[] {
+  return report.recipeBreakdown.map(recipe => ({
+    name: recipe.name,
+    ingredients: recipe.ingredients.join('\n'),
+    nutrition: formatNutritionLines(recipe.nutrition).join('\n'),
+    consumed_on: recipe.consumed_on.join(', '),
+  }));
+}
+
+function printTable(rows: object[]): void {
+  console.table(rows.map(row => normalizeTableRow(row as Record<string, unknown>)));
+}
+
+function normalizeTableRow(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeTableValue(value)]));
+}
+
+function normalizeTableValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.replaceAll(/\s*\n\s*/g, '; ');
+  }
+  return value;
 }
 
 export function resolveWindow(options: {
@@ -458,11 +612,29 @@ function flattenNamedNutrients(nutrition: MacrofactorFoodRecord['nutrition']): R
   return flattened;
 }
 
+function formatNutritionLines(nutrition: MacrofactorFoodRecord['nutrition']): string[] {
+  return Object.entries(flattenNamedNutrients(nutrition)).map(([name, value]) => {
+    const { label, unit } = splitNutrientNameAndUnit(name);
+    return `${label}: ${value} ${unit}`.trimEnd();
+  });
+}
+
 function setNamedNutrient(target: Record<string, number>, name: string, value: number | null | undefined): void {
   if (target[name] != null || !Number.isFinite(value)) {
     return;
   }
   target[name] = roundNamedNutrient(value as number);
+}
+
+function splitNutrientNameAndUnit(name: string): { label: string; unit: string } {
+  const match = name.match(/^(.*)_(kcal|mg|ug|g|ug_rae)$/);
+  if (!match) {
+    return { label: name, unit: '' };
+  }
+  return {
+    label: match[1],
+    unit: match[2],
+  };
 }
 
 function mapNutrientCodeToName(code: string): string | null {
