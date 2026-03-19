@@ -1,6 +1,14 @@
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
+import {
+  OUTPUT_FORMATS,
+  parseOutputFormat,
+  renderCsvRecords,
+  type CsvValue,
+  type OutputFormat,
+} from './utils/output';
+
 export const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const CSV_COLUMNS = [
@@ -8,14 +16,14 @@ const CSV_COLUMNS = [
   'time',
   'name',
   'serving',
+  'servingGrams',
   'calories',
   'protein',
   'carbs',
   'fat',
   'fiber',
 ] as const;
-const FULL_BASE_COLUMNS = ['date', 'time', 'name', 'serving'] as const;
-export const OUTPUT_FORMATS = ['json', 'table', 'csv'] as const;
+const FULL_BASE_COLUMNS = ['date', 'time', 'name', 'serving', 'servingGrams'] as const;
 const NUTRIENT_CODE_NAME_MAP: Record<string, string> = {
   a: 'alcohol_g',
   c: 'carbs_g',
@@ -131,8 +139,7 @@ const PREFERRED_NUTRIENT_ORDER = [
   'histidine_g',
 ] as const;
 
-export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
-type CsvValue = string | number | null;
+export { OUTPUT_FORMATS, parseOutputFormat, renderCsvRecords };
 
 export interface MacrofactorReport {
   generatedAt: string;
@@ -152,13 +159,12 @@ export interface MacrofactorFoodRecord {
   brandName: string | null;
   source: string | null;
   isCustom: boolean;
+  kind: 'food' | 'recipe';
+  recipeId: string | null;
   firstConsumedAt: string | null;
   latestConsumedAt: string;
-  recipeCount: number;
-  recipe: unknown[];
-  servingDefault: unknown;
-  servingUserSelection: unknown;
-  servingAlternatives: unknown[];
+  serving: string;
+  servingGrams: number | null;
   nutrition: {
     caloriesKcal: number | null;
     proteinG: number | null;
@@ -178,6 +184,7 @@ export interface MacrofactorConciseRow {
   time: string;
   name: string;
   serving: string;
+  servingGrams: number | null;
   calories: number | null;
   protein: number | null;
   carbs: number | null;
@@ -191,13 +198,6 @@ export interface ResolvedWindow {
 }
 
 type ConciseDateFormat = 'iso' | 'table' | 'csv';
-
-export function parseOutputFormat(value: string): OutputFormat {
-  if ((OUTPUT_FORMATS as readonly string[]).includes(value)) {
-    return value as OutputFormat;
-  }
-  throw new Error(`Invalid format: ${value}`);
-}
 
 export function renderOutput(options: {
   report: MacrofactorReport;
@@ -237,9 +237,8 @@ export function renderOutput(options: {
 
 export function serializeReport(
   report: MacrofactorReport,
-  options?: { full?: boolean }
+  _options?: { full?: boolean }
 ): Record<string, unknown> {
-  const includeServingAlternatives = options?.full ?? false;
   return {
     ...report,
     foods: report.foods.map(food => ({
@@ -248,13 +247,12 @@ export function serializeReport(
       brandName: food.brandName,
       source: food.source,
       isCustom: food.isCustom,
+      kind: food.kind,
+      recipeId: food.recipeId,
       firstConsumedAt: food.firstConsumedAt,
       latestConsumedAt: food.latestConsumedAt,
-      recipeCount: food.recipeCount,
-      recipe: food.recipe,
-      servingDefault: food.servingDefault,
-      servingUserSelection: food.servingUserSelection,
-      ...(includeServingAlternatives ? { servingAlternatives: food.servingAlternatives } : {}),
+      serving: food.serving,
+      servingGrams: roundNamedNutrientNullable(food.servingGrams),
       nutrition: flattenNamedNutrients(food.nutrition),
     })),
   };
@@ -267,14 +265,14 @@ export function toConciseRows(
   const dateFormat = options?.dateFormat ?? 'iso';
   const rows = report.foods.map(food => {
     const parts = getDateTimeParts(food.latestConsumedAt, dateFormat);
-    const serving = formatServing(food.servingUserSelection) || formatServing(food.servingDefault);
     return {
       timestamp: Date.parse(food.latestConsumedAt),
       row: {
         date: parts.date,
         time: parts.time.split(':').slice(0, 2).join(':'),
         name: food.title,
-        serving,
+        serving: food.serving,
+        servingGrams: roundNamedNutrientNullable(food.servingGrams),
         calories: roundNullable(food.nutrition.caloriesKcal, 0),
         protein: roundNullable(food.nutrition.proteinG, 2),
         carbs: roundNullable(food.nutrition.carbsG, 2),
@@ -288,9 +286,12 @@ export function toConciseRows(
 }
 
 export function renderCsv(rows: MacrofactorConciseRow[]): string {
-  const header = CSV_COLUMNS.join(',');
-  const lines = rows.map(row => CSV_COLUMNS.map(column => escapeCsvValue(row[column])).join(','));
-  return `${[header, ...lines].join('\n')}\n`;
+  return renderCsvRecords(
+    rows.map(row => ({
+      ...row,
+    })) as Record<string, CsvValue>[],
+    CSV_COLUMNS,
+  );
 }
 
 export function toFullRows(
@@ -306,7 +307,8 @@ export function toFullRows(
         date: parts.date,
         time: parts.time.split(':').slice(0, 2).join(':'),
         name: food.title,
-        serving: formatServing(food.servingUserSelection) || formatServing(food.servingDefault),
+        serving: food.serving,
+        servingGrams: roundNamedNutrientNullable(food.servingGrams),
       } satisfies Record<(typeof FULL_BASE_COLUMNS)[number], CsvValue>,
       nutrients: flattenNamedNutrients(food.nutrition),
     };
@@ -324,12 +326,6 @@ export function toFullRows(
       return record;
     }),
   };
-}
-
-export function renderCsvRecords(rows: Record<string, CsvValue>[], columns: string[]): string {
-  const header = columns.join(',');
-  const lines = rows.map(row => columns.map(column => escapeCsvValue(row[column] ?? null)).join(','));
-  return `${[header, ...lines].join('\n')}\n`;
 }
 
 export function resolveWindow(options: {
@@ -435,59 +431,6 @@ function roundNullable(value: number | null, fractionDigits: number): number | n
   return Math.round((value as number) * factor) / factor;
 }
 
-function formatServing(value: unknown): string {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return '';
-  }
-  const maybeServing = value as { quantity?: unknown; name?: unknown };
-  const quantity = toFiniteNumber(maybeServing.quantity);
-  const name = toStringOrNull(maybeServing.name);
-
-  if (quantity != null && name) {
-    return `${formatQuantity(quantity)} ${name}`;
-  }
-  if (name) {
-    return name;
-  }
-  if (quantity != null) {
-    return formatQuantity(quantity);
-  }
-  return '';
-}
-
-function formatQuantity(value: number): string {
-  if (Number.isInteger(value)) {
-    return String(value);
-  }
-  return Number(value.toFixed(3)).toString();
-}
-
-function toFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : null;
-  }
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function toStringOrNull(value: unknown): string | null {
-  return typeof value === 'string' && value.trim() ? value : null;
-}
-
-function escapeCsvValue(value: string | number | null): string {
-  if (value == null) {
-    return '';
-  }
-  const stringValue = String(value);
-  if (!/[",\n\r]/.test(stringValue)) {
-    return stringValue;
-  }
-  return `"${stringValue.replaceAll('"', '""')}"`;
-}
-
 function flattenNamedNutrients(nutrition: MacrofactorFoodRecord['nutrition']): Record<string, number> {
   const flattened: Record<string, number> = {};
 
@@ -538,6 +481,13 @@ function roundNamedNutrient(value: number): number {
     return Math.round(value * 10) / 10;
   }
   return Math.round(value);
+}
+
+function roundNamedNutrientNullable(value: number | null): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return roundNamedNutrient(value as number);
 }
 
 function collectNutrientColumns(nutrientsList: Record<string, number>[]): string[] {

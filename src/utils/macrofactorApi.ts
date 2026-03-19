@@ -148,6 +148,25 @@ export class MacroFactorApiClient {
     return parseFirestoreFields(document.fields);
   }
 
+  async getCustomFoodDocument(id: string): Promise<Record<string, unknown> | null> {
+    const token = await this.getIdToken();
+    const response = await fetch(`${FIRESTORE_BASE_URL}/users/${this.session.userId}/customFoods/${id}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (response.status === 404) {
+      return null;
+    }
+    if (!response.ok) {
+      throw new Error(`MacroFactor custom food request failed for ${id}: ${await formatError(response)}`);
+    }
+
+    const document = (await response.json()) as FirestoreDocumentResponse;
+    return parseFirestoreFields(document.fields);
+  }
+
   private async getIdToken(): Promise<string> {
     if (this.session.expiresAtMs - TOKEN_REFRESH_MARGIN_MS > Date.now()) {
       return this.session.idToken;

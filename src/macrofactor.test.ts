@@ -159,6 +159,8 @@ describe('buildMacrofactorApiReport', () => {
 
     const alpha = report.foods[0];
     expect(alpha?.itemId).toBe('food-a');
+    expect(alpha?.kind).toBe('food');
+    expect(alpha?.recipeId).toBeNull();
     expect(alpha?.firstConsumedAt).toBe('2026-02-06T09:00:00.000Z');
     expect(alpha?.latestConsumedAt).toBe('2026-02-07T10:00:00.000Z');
     expect(alpha?.nutrition.caloriesKcal).toBe(150);
@@ -169,11 +171,13 @@ describe('buildMacrofactorApiReport', () => {
     expect(alpha?.nutrition.sugarG).toBe(4.5);
     expect(alpha?.nutrition.byCode['291']).toBe(6);
     expect(alpha?.nutrition.byCode.e).toBe(6);
-    expect(alpha?.servingUserSelection).toEqual({ quantity: 1.5, name: 'serving' });
-    expect(alpha?.servingAlternatives).toEqual([{ name: 'serving', quantity: 1, weight: 100 }]);
+    expect(alpha?.serving).toBe('1.5 serving');
+    expect(alpha?.servingGrams).toBe(100);
 
     const beta = report.foods[1];
     expect(beta?.itemId).toBe('food-b');
+    expect(beta?.kind).toBe('food');
+    expect(beta?.recipeId).toBeNull();
     expect(beta?.isCustom).toBe(true);
     expect(beta?.nutrition.caloriesKcal).toBe(120);
     expect(beta?.nutrition.fiberG).toBe(2);
@@ -181,10 +185,11 @@ describe('buildMacrofactorApiReport', () => {
     const rows = toConciseRows(report, { dateFormat: 'csv' });
     expect(rows[0]?.name).toBe('Alpha, Food');
     expect(rows[0]?.serving).toBe('1.5 serving');
+    expect(rows[0]?.servingGrams).toBe(100);
 
     const csv = renderCsv(rows);
     expect(csv).toContain('"Alpha, Food"');
-    expect(csv).toContain(',1.5 serving,150,15,30,7.5,6');
+    expect(csv).toContain(',1.5 serving,100,150,15,30,7.5,6');
   });
 
   it('serializes json with flattened named nutrients and hides serving alternatives unless full is set', () => {
@@ -222,6 +227,14 @@ describe('buildMacrofactorApiReport', () => {
 
     const defaultJson = serializeReport(report);
     const defaultFood = (defaultJson.foods as Array<Record<string, unknown>>)[0];
+    expect(defaultFood?.serving).toBe('1.5 serving');
+    expect(defaultFood?.servingGrams).toBe(100);
+    expect(defaultFood?.kind).toBe('food');
+    expect(defaultFood?.recipeId).toBeNull();
+    expect(defaultFood?.recipeCount).toBeUndefined();
+    expect(defaultFood?.recipe).toBeUndefined();
+    expect(defaultFood?.servingDefault).toBeUndefined();
+    expect(defaultFood?.servingUserSelection).toBeUndefined();
     expect(defaultFood?.servingAlternatives).toBeUndefined();
     expect(defaultFood?.nutrition).toEqual({
       calories_kcal: 150,
@@ -235,7 +248,66 @@ describe('buildMacrofactorApiReport', () => {
 
     const fullJson = serializeReport(report, { full: true });
     const fullFood = (fullJson.foods as Array<Record<string, unknown>>)[0];
-    expect(fullFood?.servingAlternatives).toEqual([{ name: 'serving', quantity: 1, weight: 100 }]);
+    expect(fullFood?.kind).toBe('food');
+    expect(fullFood?.recipeId).toBeNull();
+    expect(fullFood?.serving).toBe('1.5 serving');
+    expect(fullFood?.servingGrams).toBe(100);
+    expect(fullFood?.servingAlternatives).toBeUndefined();
+  });
+
+  it('marks custom recipe items with a recipe reference while keeping the normal item shape', () => {
+    const report = buildMacrofactorApiReport({
+      sourcePath: 'api://macrofactor/food-log',
+      days: 7,
+      start: '2026-02-05T00:00:00.000Z',
+      end: '2026-02-08T00:00:00.000Z',
+      customFoodInfo: {
+        recipe_1: {
+          kind: 'recipe',
+          recipeId: 'recipe_1',
+        },
+      },
+      dayDocuments: [
+        {
+          date: '2026-02-07',
+          document: {
+            [toEntryId('2026-02-07T10:00:00.000Z')]: {
+              id: 'recipe_1',
+              t: 'Morning Pancake',
+              b: 'Custom Recipe',
+              c: '100',
+              p: '10',
+              e: '20',
+              f: '5',
+              g: '100',
+              w: '100',
+              y: '1',
+              q: '1',
+              s: 'serving',
+              k: 'c',
+            },
+          },
+        },
+      ],
+    });
+
+    const food = report.foods[0];
+    expect(food?.kind).toBe('recipe');
+    expect(food?.recipeId).toBe('recipe_1');
+    expect(food?.title).toBe('Morning Pancake');
+    expect(food?.serving).toBe('1 serving');
+
+    const json = serializeReport(report);
+    const serializedFood = (json.foods as Array<Record<string, unknown>>)[0];
+    expect(serializedFood?.kind).toBe('recipe');
+    expect(serializedFood?.recipeId).toBe('recipe_1');
+    expect(serializedFood?.title).toBe('Morning Pancake');
+    expect(serializedFood?.nutrition).toEqual({
+      calories_kcal: 100,
+      protein_g: 10,
+      carbs_g: 20,
+      fat_g: 5,
+    });
   });
 
   it('renders full csv rows with all named nutrients', () => {
@@ -275,6 +347,7 @@ describe('buildMacrofactorApiReport', () => {
       'time',
       'name',
       'serving',
+      'servingGrams',
       'calories_kcal',
       'protein_g',
       'carbs_g',
@@ -283,12 +356,14 @@ describe('buildMacrofactorApiReport', () => {
       'sugars_g',
       'potassium_mg',
     ]);
+    expect(fullRows.rows[0]?.serving).toBe('1.5 serving');
+    expect(fullRows.rows[0]?.servingGrams).toBe(100);
     expect(fullRows.rows[0]?.fiber_g).toBe(6.7);
     expect(fullRows.rows[0]?.potassium_mg).toBe(66);
 
     const csv = renderCsvRecords(fullRows.rows, fullRows.columns);
-    expect(csv.startsWith('date,time,name,serving,calories_kcal,protein_g,carbs_g,fat_g,fiber_g,sugars_g,potassium_mg\n')).toBe(true);
-    expect(csv).toContain('07.02.2026,10:00,Alpha,1.5 serving,150,15,30,7.5,6.7,5.5,66');
+    expect(csv.startsWith('date,time,name,serving,servingGrams,calories_kcal,protein_g,carbs_g,fat_g,fiber_g,sugars_g,potassium_mg\n')).toBe(true);
+    expect(csv).toContain('07.02.2026,10:00,Alpha,1.5 serving,100,150,15,30,7.5,6.7,5.5,66');
   });
 
   it('applies limit after grouping and sorting by latest consumption', () => {

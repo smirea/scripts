@@ -32,6 +32,7 @@ const CODE_NAME_MAP: Record<string, string> = {
 interface BuildApiReportOptions {
   sourcePath: string;
   dayDocuments: ApiFoodLogDay[];
+  customFoodInfo?: Record<string, CustomFoodInfo>;
   days: number;
   start?: string;
   end?: string;
@@ -51,12 +52,17 @@ interface ParsedFoodLogEntry {
   brandName: string | null;
   source: string | null;
   isCustom: boolean;
-  consumedAt: string;
+  kind: MacrofactorFoodRecord['kind'];
+  recipeId: string | null;
   timestampMs: number;
-  servingDefault: unknown;
-  servingUserSelection: unknown;
-  servingAlternatives: unknown[];
+  serving: string;
+  servingGrams: number | null;
   nutrition: MacrofactorFoodRecord['nutrition'];
+}
+
+interface CustomFoodInfo {
+  kind: MacrofactorFoodRecord['kind'];
+  recipeId: string | null;
 }
 
 if (import.meta.main) {
@@ -107,7 +113,7 @@ async function runCli(): Promise<void> {
       .option('full', {
         type: 'boolean',
         default: false,
-        describe: 'Include all nutrients in CSV/table output and serving alternatives in JSON output',
+        describe: 'Include all nutrients in CSV/table output',
       })
       .help()
       .parseAsync();
@@ -124,9 +130,11 @@ async function runCli(): Promise<void> {
       end: args.end,
     });
     const dayDocuments = await fetchFoodLogDays(client, window);
+    const customFoodInfo = await fetchCustomFoodInfo(client, dayDocuments);
     const report = buildMacrofactorApiReport({
       sourcePath: SOURCE_PATH,
       dayDocuments,
+      customFoodInfo,
       days: args.days,
       start: args.start,
       end: args.end,
@@ -182,7 +190,7 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
   >();
 
   for (const day of options.dayDocuments) {
-    for (const entry of parseFoodLogEntries(day)) {
+    for (const entry of parseFoodLogEntries(day, options.customFoodInfo ?? {})) {
       if (entry.timestampMs < startMs || entry.timestampMs > endMs) {
         continue;
       }
@@ -212,13 +220,12 @@ export function buildMacrofactorApiReport(options: BuildApiReportOptions): Macro
         brandName: representative.brandName,
         source: representative.source,
         isCustom: representative.isCustom,
+        kind: representative.kind,
+        recipeId: representative.recipeId,
         firstConsumedAt: new Date(group.firstTimestampMs).toISOString(),
         latestConsumedAt: new Date(group.latestTimestampMs).toISOString(),
-        recipeCount: 0,
-        recipe: [],
-        servingDefault: representative.servingDefault,
-        servingUserSelection: representative.servingUserSelection,
-        servingAlternatives: representative.servingAlternatives,
+        serving: representative.serving,
+        servingGrams: representative.servingGrams,
         nutrition: representative.nutrition,
       } satisfies MacrofactorFoodRecord;
     })
@@ -286,7 +293,7 @@ export function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fa
   return Number.isFinite(fallbackMs) ? fallbackMs : null;
 }
 
-function parseFoodLogEntries(day: ApiFoodLogDay): ParsedFoodLogEntry[] {
+function parseFoodLogEntries(day: ApiFoodLogDay, customFoodInfo: Record<string, CustomFoodInfo>): ParsedFoodLogEntry[] {
   if (!day.document) {
     return [];
   }
@@ -312,6 +319,7 @@ function parseFoodLogEntries(day: ApiFoodLogDay): ParsedFoodLogEntry[] {
     const itemId = parseString(raw.id) ?? entryId;
     const title = parseString(raw.t) ?? parseString(raw.b) ?? '(untitled)';
     const source = parseString(raw.k);
+    const customInfo = customFoodInfo[itemId] ?? { kind: 'food', recipeId: null };
 
     entries.push({
       groupKey: itemId,
@@ -320,11 +328,11 @@ function parseFoodLogEntries(day: ApiFoodLogDay): ParsedFoodLogEntry[] {
       brandName: parseOptionalString(raw.b),
       source,
       isCustom: source != null && source !== 't',
-      consumedAt: new Date(timestampMs).toISOString(),
+      kind: customInfo.kind,
+      recipeId: customInfo.recipeId,
       timestampMs,
-      servingDefault: buildServing(parseNumberLike(raw.q), parseOptionalString(raw.s)),
-      servingUserSelection: buildServing(parseNumberLike(raw.y), parseOptionalString(raw.s)),
-      servingAlternatives: buildServingAlternatives(raw.m),
+      serving: buildServingString(parseNumberLike(raw.y), parseOptionalString(raw.s)),
+      servingGrams: parseNumberLike(raw.g),
       nutrition: buildNutrition(raw),
     });
   }
@@ -374,44 +382,17 @@ function buildNutrition(raw: Record<string, unknown>): MacrofactorFoodRecord['nu
   };
 }
 
-function buildServing(quantity: number | null, name: string | null): { quantity?: number; name?: string } | null {
-  if (quantity == null && name == null) {
-    return null;
-  }
-  const serving: { quantity?: number; name?: string } = {};
-  if (quantity != null) {
-    serving.quantity = quantity;
-  }
-  if (name != null) {
-    serving.name = name;
-  }
-  return serving;
+function buildServingString(quantity: number | null, unit: string | null): string {
+  const quantityPart = quantity == null ? '?' : formatServingNumber(quantity);
+  const unitPart = unit ?? 'serving';
+  return `${quantityPart} ${unitPart}`;
 }
 
-function buildServingAlternatives(value: unknown): unknown[] {
-  if (!Array.isArray(value)) {
-    return [];
+function formatServingNumber(value: number): string {
+  if (Number.isInteger(value)) {
+    return String(value);
   }
-
-  return value.flatMap(item => {
-    const record = asRecord(item);
-    if (!record) {
-      return [];
-    }
-    const name = parseOptionalString(record.m);
-    const quantity = parseNumberLike(record.q);
-    const weight = parseNumberLike(record.w);
-    if (name == null && quantity == null && weight == null) {
-      return [];
-    }
-    return [
-      {
-        ...(name != null ? { name } : {}),
-        ...(quantity != null ? { quantity } : {}),
-        ...(weight != null ? { weight } : {}),
-      },
-    ];
-  });
+  return Number(value.toFixed(3)).toString();
 }
 
 function parseNumericNutrientCodes(raw: Record<string, unknown>, multiplier: number): Record<string, number> {
@@ -499,4 +480,54 @@ function listFetchDateKeys(window: ResolvedWindow): string[] {
 
 function formatDateKey(timestampMs: number): string {
   return new Date(timestampMs).toISOString().slice(0, 10);
+}
+
+async function fetchCustomFoodInfo(
+  client: MacroFactorApiClient,
+  dayDocuments: ApiFoodLogDay[]
+): Promise<Record<string, CustomFoodInfo>> {
+  const ids = collectCustomFoodIds(dayDocuments);
+  const info: Record<string, CustomFoodInfo> = {};
+  for (const id of ids) {
+    const document = await client.getCustomFoodDocument(id);
+    if (!document) {
+      continue;
+    }
+    info[id] = parseCustomFoodInfo(id, document);
+  }
+  return info;
+}
+
+function collectCustomFoodIds(dayDocuments: ApiFoodLogDay[]): string[] {
+  const ids = new Set<string>();
+  for (const day of dayDocuments) {
+    if (!day.document) {
+      continue;
+    }
+    for (const rawValue of Object.values(day.document)) {
+      const entry = asRecord(rawValue);
+      if (!entry || entry.d === true) {
+        continue;
+      }
+      const source = parseString(entry.k);
+      const id = parseString(entry.id);
+      if (!id || !source || source === 't') {
+        continue;
+      }
+      ids.add(id);
+    }
+  }
+  return Array.from(ids);
+}
+
+function parseCustomFoodInfo(id: string, document: Record<string, unknown>): CustomFoodInfo {
+  const ingredients = document.r;
+  const brandName = parseString(document.b);
+  const isRecipe =
+    (Array.isArray(ingredients) && ingredients.length > 0) ||
+    brandName === 'Custom Recipe';
+  return {
+    kind: isRecipe ? 'recipe' : 'food',
+    recipeId: isRecipe ? id : null,
+  };
 }
