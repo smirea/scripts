@@ -12,8 +12,46 @@ export function parseOutputFormat(value: string): OutputFormat {
 
 export function renderCsvRecords(rows: Record<string, CsvValue>[], columns: readonly string[]): string {
   const header = columns.join(',');
-  const lines = rows.map(row => columns.map(column => escapeCsvValue(row[column] ?? null)).join(','));
+  const lines = rows.map(row => columns.map(column => escapeCsvValue(normalizeCsvValue(row[column] ?? null))).join(','));
   return `${[header, ...lines].join('\n')}\n`;
+}
+
+export function renderTableRecords(rows: object[]): void {
+  console.table(rows.map(row => normalizeTableRow(row as Record<string, unknown>)));
+}
+
+export function formatDisplayNumber(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  const numeric = value as number;
+  const abs = Math.abs(numeric);
+  if (abs >= 10) {
+    return Math.round(numeric);
+  }
+  if (abs >= 1) {
+    return Math.round(numeric * 10) / 10;
+  }
+  return Math.round(numeric * 100) / 100;
+}
+
+function normalizeTableRow(row: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeOutputValue(value)]));
+}
+
+function normalizeCsvValue(value: CsvValue): CsvValue {
+  const normalized = normalizeOutputValue(value);
+  return (normalized ?? null) as CsvValue;
+}
+
+function normalizeOutputValue(value: unknown): unknown {
+  if (typeof value === 'number') {
+    return formatDisplayNumber(value);
+  }
+  if (typeof value === 'string') {
+    return value.replaceAll(/\s*\n\s*/g, '; ');
+  }
+  return value;
 }
 
 function escapeCsvValue(value: CsvValue): string {

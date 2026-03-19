@@ -14,9 +14,11 @@ import {
   formatOffsetTime,
 } from './utils/date';
 import {
+  formatDisplayNumber,
   OUTPUT_FORMATS,
   parseOutputFormat,
   renderCsvRecords,
+  renderTableRecords,
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
@@ -307,7 +309,7 @@ export function buildDailyStatsRows(data: Partial<Record<DataType, unknown>>): D
       startTimestamp: parseTimestamp(cycle.start),
       endTimestamp: parseTimestamp(cycle.end),
     };
-    state.row.strain = roundDisplayNumber(cycle.score?.strain ?? null);
+    state.row.strain = formatDisplayNumber(cycle.score?.strain ?? null);
     cycleStates.set(cycle.id, state);
     cycleStateList.push(state);
   }
@@ -342,9 +344,9 @@ export function buildDailyStatsRows(data: Partial<Record<DataType, unknown>>): D
     state.row.sleep_rem = formatDurationMilliseconds(stageSummary?.total_rem_sleep_time_milli ?? null);
     state.row.sleep_deep = formatDurationMilliseconds(stageSummary?.total_slow_wave_sleep_time_milli ?? null);
     state.row.sleep_light = formatDurationMilliseconds(stageSummary?.total_light_sleep_time_milli ?? null);
-    state.row.sleep_efficiency = roundDisplayNumber(sleep.score?.sleep_efficiency_percentage ?? null);
-    state.row.sleep_performance = roundDisplayNumber(sleep.score?.sleep_performance_percentage ?? null);
-    state.row.sleep_consistency = roundDisplayNumber(sleep.score?.sleep_consistency_percentage ?? null);
+    state.row.sleep_efficiency = formatDisplayNumber(sleep.score?.sleep_efficiency_percentage ?? null);
+    state.row.sleep_performance = formatDisplayNumber(sleep.score?.sleep_performance_percentage ?? null);
+    state.row.sleep_consistency = formatDisplayNumber(sleep.score?.sleep_consistency_percentage ?? null);
   }
 
   for (const recovery of toRecoveryRecords(data.recovery)) {
@@ -358,9 +360,9 @@ export function buildDailyStatsRows(data: Partial<Record<DataType, unknown>>): D
     const state = cycleState ?? createExtraState(extraStates, date);
     state.rowDate = date;
     state.row.date = date;
-    state.row.recovery = roundDisplayNumber(recovery.score?.recovery_score ?? null);
-    state.row.RHR = roundDisplayNumber(recovery.score?.resting_heart_rate ?? null);
-    state.row.HRV = roundDisplayNumber(recovery.score?.hrv_rmssd_milli ?? null);
+    state.row.recovery = formatDisplayNumber(recovery.score?.recovery_score ?? null);
+    state.row.RHR = formatDisplayNumber(recovery.score?.resting_heart_rate ?? null);
+    state.row.HRV = formatDisplayNumber(recovery.score?.hrv_rmssd_milli ?? null);
   }
 
   for (const workout of toWorkoutRecords(data.workout)) {
@@ -405,7 +407,7 @@ export function buildDailyStatsRows(data: Partial<Record<DataType, unknown>>): D
 
 export function renderDailyStatsOutput(rows: DailyStatsRow[], format: OutputFormat): void {
   if (format === 'table') {
-    console.table(toDailyStatsTableRows(rows));
+    renderTableRecords(toDailyStatsTableRows(rows));
     return;
   }
   if (format === 'json') {
@@ -418,19 +420,19 @@ export function renderDailyStatsOutput(rows: DailyStatsRow[], format: OutputForm
 export function toDailyStatsTableRows(rows: DailyStatsRow[]): Record<DailyStatsColumn, string | number>[] {
   return rows.map(row => ({
     date: row.date,
-    strain: formatTableValue(row.strain),
-    recovery: formatTableValue(row.recovery),
-    RHR: formatTableValue(row.RHR),
-    HRV: formatTableValue(row.HRV),
+    strain: row.strain ?? '',
+    recovery: row.recovery ?? '',
+    RHR: row.RHR ?? '',
+    HRV: row.HRV ?? '',
     activities: row.activities.replaceAll('\n', ' | '),
     sleep_start: row.sleep_start,
     sleep_duration: row.sleep_duration,
     sleep_rem: row.sleep_rem,
     sleep_deep: row.sleep_deep,
     sleep_light: row.sleep_light,
-    sleep_efficiency: formatTableValue(row.sleep_efficiency),
-    sleep_performance: formatTableValue(row.sleep_performance),
-    sleep_consistency: formatTableValue(row.sleep_consistency),
+    sleep_efficiency: row.sleep_efficiency ?? '',
+    sleep_performance: row.sleep_performance ?? '',
+    sleep_consistency: row.sleep_consistency ?? '',
   }));
 }
 
@@ -841,20 +843,9 @@ function isRecord(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null;
 }
 
-function roundDisplayNumber(value: number | null | undefined): number | null {
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-  const numeric = value as number;
-  if (Math.abs(numeric) > 10) {
-    return Math.round(numeric);
-  }
-  return Math.round(numeric * 10) / 10;
-}
-
 function formatActivity(workout: WhoopWorkout): string {
   const name = normalizeOptionalString(workout.sport_name) ?? 'workout';
-  const strain = roundDisplayNumber(workout.score?.strain ?? null);
+  const strain = formatDisplayNumber(workout.score?.strain ?? null);
   const at = formatOffsetTime(workout.start, workout.timezone_offset);
   const duration = formatDurationMilliseconds(durationBetween(workout.start, workout.end));
   const details = [at ? `at ${at}` : '', duration ? `for ${duration}` : ''].filter(Boolean);
@@ -886,10 +877,6 @@ function parseTimestamp(value: string | null | undefined): number | null {
   }
   const parsed = parseISO(value);
   return isValid(parsed) ? parsed.getTime() : null;
-}
-
-function formatTableValue(value: number | null): string | number {
-  return value ?? '';
 }
 
 function shouldIncludeRow(
