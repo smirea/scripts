@@ -221,7 +221,6 @@ interface ApiFoodLogDay {
 }
 
 interface ParsedFoodLogEntry {
-  groupKey: string;
   itemId: string;
   title: string;
   brandName: string | null;
@@ -523,7 +522,7 @@ function resolveWindow(options: {
 }
 
 function toIso(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toISOString();
+  return formatLocalIso(unixSeconds * 1000);
 }
 
 async function runCli(): Promise<void> {
@@ -706,50 +705,21 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
   const entries = options.dayDocuments
     .flatMap(day => parseFoodLogEntries(day, options.customFoodDetails ?? {}))
     .filter(entry => entry.timestampMs >= startMs && entry.timestampMs <= endMs);
-  const groups = new Map<
-    string,
-    {
-      firstTimestampMs: number;
-      latestTimestampMs: number;
-      representative: ParsedFoodLogEntry;
-    }
-  >();
-
-  for (const entry of entries) {
-    const existing = groups.get(entry.groupKey);
-    if (!existing) {
-      groups.set(entry.groupKey, {
-        firstTimestampMs: entry.timestampMs,
-        latestTimestampMs: entry.timestampMs,
-        representative: entry,
-      });
-      continue;
-    }
-    existing.firstTimestampMs = Math.min(existing.firstTimestampMs, entry.timestampMs);
-    if (entry.timestampMs >= existing.latestTimestampMs) {
-      existing.latestTimestampMs = entry.timestampMs;
-      existing.representative = entry;
-    }
-  }
-
-  const rows = Array.from(groups.values())
-    .map(group => {
-      const representative = group.representative;
-      return {
-        itemId: representative.itemId,
-        title: representative.title,
-        brandName: representative.brandName,
-        source: representative.source,
-        isCustom: representative.isCustom,
-        kind: representative.kind,
-        recipeId: representative.recipeId,
-        firstConsumedAt: new Date(group.firstTimestampMs).toISOString(),
-        latestConsumedAt: new Date(group.latestTimestampMs).toISOString(),
-        serving: representative.serving,
-        servingGrams: representative.servingGrams,
-        nutrition: representative.nutrition,
-      } satisfies MacrofactorFoodRecord;
-    })
+  const rows = entries
+    .map(entry => ({
+      itemId: entry.itemId,
+      title: entry.title,
+      brandName: entry.brandName,
+      source: entry.source,
+      isCustom: entry.isCustom,
+      kind: entry.kind,
+      recipeId: entry.recipeId,
+      firstConsumedAt: formatLocalIso(entry.timestampMs),
+      latestConsumedAt: formatLocalIso(entry.timestampMs),
+      serving: entry.serving,
+      servingGrams: entry.servingGrams,
+      nutrition: entry.nutrition,
+    }) satisfies MacrofactorFoodRecord)
     .sort((a, b) => Date.parse(b.latestConsumedAt) - Date.parse(a.latestConsumedAt));
 
   const limitedRows =
@@ -758,7 +728,7 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
       : rows;
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: formatLocalIso(Date.now()),
     sourcePath: options.sourcePath,
     window: {
       start: toIso(window.startUnixSeconds),
@@ -793,6 +763,20 @@ function parseMacrofactorCredentials(value: string | undefined): { email: string
 }
 
 function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
+  if (fallbackDate) {
+    const [year, month, day] = fallbackDate.split('-').map(part => Number(part));
+    if ([year, month, day].every(Number.isFinite)) {
+      const hour = parseNumberLike(fallbackHour);
+      const minute = parseNumberLike(fallbackMinute);
+      if (hour != null && minute != null) {
+        const localTimestampMs = new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
+        if (Number.isFinite(localTimestampMs)) {
+          return localTimestampMs;
+        }
+      }
+    }
+  }
+
   const asNumber = Number(entryId);
   if (Number.isSafeInteger(asNumber) && asNumber > 0) {
     if (asNumber >= 1_000_000_000_000_000) {
@@ -812,7 +796,7 @@ function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackH
   }
   const hour = parseNumberLike(fallbackHour) ?? 0;
   const minute = parseNumberLike(fallbackMinute) ?? 0;
-  const fallbackMs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  const fallbackMs = new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
   return Number.isFinite(fallbackMs) ? fallbackMs : null;
 }
 
@@ -830,10 +814,6 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<strin
     if (!raw) {
       continue;
     }
-    if (raw.d === true) {
-      continue;
-    }
-
     const timestampMs = parseFoodLogTimestamp(entryId, day.date, raw.h, raw.mi);
     if (timestampMs == null) {
       continue;
@@ -845,7 +825,6 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<strin
     const customInfo = customFoodDetails[itemId] ?? { kind: 'food', recipeId: null, ingredients: [] };
 
     entries.push({
-      groupKey: itemId,
       itemId,
       title,
       brandName: parseOptionalString(raw.b),
@@ -855,8 +834,8 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<strin
       recipeId: customInfo.recipeId,
       timestampMs,
       consumedDate: formatDateKey(timestampMs),
-      serving: buildServingString(parseNumberLike(raw.y), parseOptionalString(raw.s)),
-      servingGrams: parseNumberLike(raw.g),
+      serving: buildServingString(parseNumberLike(raw.y), parseOptionalString(raw.u) ?? parseOptionalString(raw.s)),
+      servingGrams: computeConsumedGrams(raw),
       nutrition: buildNutrition(raw),
     });
   }
@@ -865,7 +844,7 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<strin
 }
 
 function buildNutrition(raw: Record<string, unknown>): MacrofactorFoodRecord['nutrition'] {
-  const multiplier = computeMultiplier(raw);
+  const multiplier = computeNutritionMultiplier(raw);
   const calories = scaleValue(raw.c, multiplier);
   const protein = scaleValue(raw.p, multiplier);
   const carbs = scaleValue(raw.e, multiplier);
@@ -934,7 +913,7 @@ function parseNumericNutrientCodes(raw: Record<string, unknown>, multiplier: num
   return nutrients;
 }
 
-function computeMultiplier(raw: Record<string, unknown>): number {
+function computeNutritionMultiplier(raw: Record<string, unknown>): number {
   const servingGrams = parseNumberLike(raw.g);
   const userQuantity = parseNumberLike(raw.y);
   const unitWeight = parseNumberLike(raw.w);
@@ -942,6 +921,71 @@ function computeMultiplier(raw: Record<string, unknown>): number {
     return (userQuantity * unitWeight) / servingGrams;
   }
   return 1;
+}
+
+function computeConsumedGrams(raw: Record<string, unknown>): number | null {
+  const quantity = parseNumberLike(raw.y);
+  const displayUnit = parseOptionalString(raw.u) ?? parseOptionalString(raw.s);
+  if (quantity == null) {
+    return parseNumberLike(raw.g);
+  }
+
+  const normalizedUnit = normalizeUnit(displayUnit);
+  if (normalizedUnit === 'g') {
+    return quantity;
+  }
+  if (normalizedUnit === 'kg') {
+    return quantity * 1000;
+  }
+
+  if (normalizedUnit === 'serving') {
+    const baseGrams = parseNumberLike(raw.g);
+    if (baseGrams != null) {
+      return baseGrams > 100 ? baseGrams * computeNutritionMultiplier(raw) : baseGrams * quantity;
+    }
+  }
+
+  const measuredWeight = lookupMeasurementWeight(raw, displayUnit, quantity);
+  if (measuredWeight != null) {
+    return measuredWeight;
+  }
+
+  return parseNumberLike(raw.g);
+}
+
+function lookupMeasurementWeight(
+  raw: Record<string, unknown>,
+  unit: string | null,
+  quantity: number
+): number | null {
+  if (!unit) {
+    return null;
+  }
+  const measurements = Array.isArray(raw.m) ? raw.m : [];
+  for (const rawMeasurement of measurements) {
+    const measurement = asRecord(rawMeasurement);
+    if (!measurement) {
+      continue;
+    }
+    const measurementUnit = parseOptionalString(measurement.m);
+    if (normalizeUnit(measurementUnit) !== normalizeUnit(unit)) {
+      continue;
+    }
+    const measurementQuantity = parseNumberLike(measurement.q);
+    const measurementWeight = parseNumberLike(measurement.w);
+    if (measurementQuantity == null || measurementWeight == null || measurementQuantity === 0) {
+      continue;
+    }
+    return (quantity * measurementWeight) / measurementQuantity;
+  }
+  return null;
+}
+
+function normalizeUnit(unit: string | null): string | null {
+  if (!unit) {
+    return null;
+  }
+  return unit.trim().toLowerCase();
 }
 
 function scaleValue(value: unknown, multiplier: number): number | null {
@@ -989,20 +1033,15 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function listFetchDateKeys(window: ResolvedWindow): string[] {
-  const startDate = new Date((window.startUnixSeconds - 24 * 60 * 60) * 1000);
-  const endDate = new Date((window.endUnixSeconds + 24 * 60 * 60) * 1000);
-  const current = Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth(), startDate.getUTCDate());
-  const end = Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
-  const dateKeys: string[] = [];
-
-  for (let timestamp = current; timestamp <= end; timestamp += 24 * 60 * 60 * 1000) {
-    dateKeys.push(formatDateKey(timestamp));
-  }
-  return dateKeys;
+  const startDate = new Date(window.startUnixSeconds * 1000);
+  startDate.setDate(startDate.getDate() - 1);
+  const endDate = new Date(window.endUnixSeconds * 1000);
+  endDate.setDate(endDate.getDate() + 1);
+  return listDateKeysBetween(startDate.getTime(), endDate.getTime());
 }
 
 function formatDateKey(timestampMs: number): string {
-  return new Date(timestampMs).toISOString().slice(0, 10);
+  return formatLocalDateKey(new Date(timestampMs));
 }
 
 function buildDailyOverview(
@@ -1131,7 +1170,7 @@ function collectCustomFoodIds(dayDocuments: ApiFoodLogDay[]): string[] {
     }
     for (const rawValue of Object.values(day.document)) {
       const entry = asRecord(rawValue);
-      if (!entry || entry.d === true) {
+      if (!entry) {
         continue;
       }
       const source = parseString(entry.k);
@@ -1236,8 +1275,8 @@ function listProgramYears(window: ResolvedWindow): number[] {
 }
 
 function listWindowYears(window: ResolvedWindow, startYearOffset = 0): number[] {
-  const startYear = new Date(window.startUnixSeconds * 1000).getUTCFullYear() + startYearOffset;
-  const endYear = new Date(window.endUnixSeconds * 1000).getUTCFullYear();
+  const startYear = new Date(window.startUnixSeconds * 1000).getFullYear() + startYearOffset;
+  const endYear = new Date(window.endUnixSeconds * 1000).getFullYear();
   return listYearsInRange(startYear, endYear);
 }
 
@@ -1250,21 +1289,7 @@ function listYearsInRange(startYear: number, endYear: number): number[] {
 }
 
 function listWindowDateKeys(window: ResolvedWindow): string[] {
-  const start = Date.UTC(
-    new Date(window.startUnixSeconds * 1000).getUTCFullYear(),
-    new Date(window.startUnixSeconds * 1000).getUTCMonth(),
-    new Date(window.startUnixSeconds * 1000).getUTCDate()
-  );
-  const end = Date.UTC(
-    new Date(window.endUnixSeconds * 1000).getUTCFullYear(),
-    new Date(window.endUnixSeconds * 1000).getUTCMonth(),
-    new Date(window.endUnixSeconds * 1000).getUTCDate()
-  );
-  const dates: string[] = [];
-  for (let timestamp = start; timestamp <= end; timestamp += SECONDS_PER_DAY * 1000) {
-    dates.push(formatDateKey(timestamp));
-  }
-  return dates;
+  return listDateKeysBetween(window.startUnixSeconds * 1000, window.endUnixSeconds * 1000);
 }
 
 function renderTable(report: MacrofactorReport, options: { full: boolean }): void {
@@ -1314,6 +1339,18 @@ function printTable(rows: object[]): void {
 }
 
 function parseDateArg(value: string, label: string): number {
+  const localDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (localDateMatch) {
+    const year = Number(localDateMatch[1]);
+    const month = Number(localDateMatch[2]);
+    const day = Number(localDateMatch[3]);
+    const timestamp = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+    if (!Number.isFinite(timestamp)) {
+      throw new Error(`Invalid ${label} date: ${value}`);
+    }
+    return timestamp / 1000;
+  }
+
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) {
     throw new Error(`Invalid ${label} date: ${value}`);
@@ -1326,11 +1363,9 @@ function getDateTimeParts(value: string, dateFormat: ConciseDateFormat): { date:
   if (Number.isNaN(timestamp)) {
     return { date: '', time: '' };
   }
-  const date = formatDate(timestamp, dateFormat);
-  const iso = new Date(timestamp).toISOString();
   return {
-    date,
-    time: iso.slice(11, 19),
+    date: formatDate(timestamp, dateFormat),
+    time: formatTime(timestamp),
   };
 }
 
@@ -1353,18 +1388,64 @@ const MONTHS_LONG = [
 function formatDate(timestamp: number, format: ConciseDateFormat): string {
   const d = new Date(timestamp);
   if (format === 'iso') {
-    return d.toISOString().slice(0, 10);
+    return formatLocalDateKey(d);
   }
   if (format === 'csv') {
-    const dd = String(d.getUTCDate()).padStart(2, '0');
-    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-    const yyyy = String(d.getUTCFullYear());
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const yyyy = String(d.getFullYear());
     return `${dd}.${mm}.${yyyy}`;
   }
-  const weekday = WEEKDAYS_SHORT[d.getUTCDay()] ?? '';
-  const month = MONTHS_LONG[d.getUTCMonth()] ?? '';
-  const day = formatOrdinal(d.getUTCDate());
+  const weekday = WEEKDAYS_SHORT[d.getDay()] ?? '';
+  const month = MONTHS_LONG[d.getMonth()] ?? '';
+  const day = formatOrdinal(d.getDate());
   return `${weekday} ${month} ${day}`.trim();
+}
+
+function formatTime(timestamp: number): string {
+  const d = new Date(timestamp);
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function formatLocalIso(timestamp: number): string {
+  const d = new Date(timestamp);
+  const year = String(d.getFullYear());
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  const seconds = String(d.getSeconds()).padStart(2, '0');
+  const offsetMinutes = -d.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? '+' : '-';
+  const absoluteOffsetMinutes = Math.abs(offsetMinutes);
+  const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, '0');
+  const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetRemainderMinutes}`;
+}
+
+function formatLocalDateKey(date: Date): string {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function listDateKeysBetween(startTimestampMs: number, endTimestampMs: number): string[] {
+  const current = new Date(startTimestampMs);
+  current.setHours(0, 0, 0, 0);
+  const end = new Date(endTimestampMs);
+  end.setHours(0, 0, 0, 0);
+  const dateKeys: string[] = [];
+
+  while (current.getTime() <= end.getTime()) {
+    dateKeys.push(formatLocalDateKey(current));
+    current.setDate(current.getDate() + 1);
+  }
+
+  return dateKeys;
 }
 
 function formatOrdinal(value: number): string {
