@@ -15,50 +15,52 @@ interface CliOptions {
 }
 
 interface AiIdentity {
-  authorName: string;
+  name: string;
   email: string;
 }
 
 const rawArgs = process.argv.slice(2);
 const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
 
-try {
-  const { args, who } = parseCliArgs(rawArgs);
+if (import.meta.main) {
+  try {
+    const { args, who } = parseCliArgs(rawArgs);
 
-  if (who) {
-    handleWhoAction(who);
-    process.exit(0);
-  }
+    if (who) {
+      handleWhoAction(who);
+      process.exit(0);
+    }
 
-  assertInsideGitWorkTree();
-  const aiIdentity = resolveAiIdentity();
-  if (args.length > 0) {
-    runGitCommit(aiIdentity, normalizeCommitArgs(args));
-    process.exit(0);
-  }
+    assertInsideGitWorkTree();
+    const aiIdentity = resolveAiIdentity();
+    if (args.length > 0) {
+      runGitCommit(aiIdentity, normalizeCommitArgs(args));
+      process.exit(0);
+    }
 
-  const stagedDiff = getStagedDiff();
-  if (!stagedDiff.trim()) {
-    throw new Error("No files staged for commit. Stage changes with `git add <files>` and retry.");
+    const stagedDiff = getStagedDiff();
+    if (!stagedDiff.trim()) {
+      throw new Error("No files staged for commit. Stage changes with `git add <files>` and retry.");
+    }
+    console.log("\x1b[1mGenerating AI commit message...\x1b[0m");
+    const prompt = buildPrompt(stagedDiff);
+    const rawResponse = callGemini(prompt);
+    printGreyBlock(rawResponse);
+    const commitMessage = extractCommitMessage(rawResponse);
+    if (!commitMessage) {
+      throw new Error("Failed to extract commit message from AI response. Review the output above for details.");
+    }
+    console.log();
+    console.log("\x1b[1mCommit message:\x1b[0m");
+    console.log(commitMessage);
+    console.log();
+    console.log("\x1b[1mCommitting...\x1b[0m");
+    runGitCommit(aiIdentity, ["-m", commitMessage]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`\x1b[31m${message}\x1b[0m`);
+    process.exit(1);
   }
-  console.log("\x1b[1mGenerating AI commit message...\x1b[0m");
-  const prompt = buildPrompt(stagedDiff);
-  const rawResponse = callGemini(prompt);
-  printGreyBlock(rawResponse);
-  const commitMessage = extractCommitMessage(rawResponse);
-  if (!commitMessage) {
-    throw new Error("Failed to extract commit message from AI response. Review the output above for details.");
-  }
-  console.log();
-  console.log("\x1b[1mCommit message:\x1b[0m");
-  console.log(commitMessage);
-  console.log();
-  console.log("\x1b[1mCommitting...\x1b[0m");
-  runGitCommit(aiIdentity, ["-m", commitMessage]);
-} catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(`\x1b[31m${message}\x1b[0m`);
-  process.exit(1);
 }
 
 function handleWhoAction(action: WhoAction): void {
@@ -117,12 +119,9 @@ function resolveAiCommitterEmail(): string {
 }
 
 function resolveAiIdentity(): AiIdentity {
-  const aiName = resolveAiCommitterName();
-  const aiEmail = resolveAiCommitterEmail();
-  const humanName = resolveGitConfigValue("user.name");
   return {
-    authorName: humanName ? `${aiName} (${humanName})` : aiName,
-    email: aiEmail,
+    name: resolveAiCommitterName(),
+    email: resolveAiCommitterEmail(),
   };
 }
 
@@ -194,9 +193,6 @@ function normalizeCommitArgs(args: string[]): string[] {
     }
     args = rest;
   }
-  if (args.some((arg) => arg === "--author" || arg.startsWith("--author="))) {
-    throw new Error("Do not pass --author. This script sets author and committer identity automatically.");
-  }
   if (!args[0].startsWith("-")) {
     return ["-m", args.join(" ")];
   }
@@ -204,30 +200,14 @@ function normalizeCommitArgs(args: string[]): string[] {
 }
 
 function runGitCommit(identity: AiIdentity, args: string[]): void {
-  const author = `${identity.authorName} <${identity.email}>`;
-  const result = spawnSync("git", ["commit", `--author=${author}`, ...args], {
+  const result = spawnSync("git", ["commit", `--trailer=${buildCoAuthorTrailer(identity)}`, ...args], {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: identity.authorName,
-      GIT_AUTHOR_EMAIL: identity.email,
-      GIT_COMMITTER_NAME: identity.authorName,
-      GIT_COMMITTER_EMAIL: identity.email,
-    },
   });
   handleSpawnErrors(result, "git commit");
 }
 
-function resolveGitConfigValue(key: string): string | undefined {
-  const result = spawnSync("git", ["config", "--get", key], { encoding: "utf8" });
-  if (result.error) {
-    throw new Error(`git config --get ${key} failed: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    return undefined;
-  }
-  const value = (result.stdout ?? "").trim();
-  return value || undefined;
+function buildCoAuthorTrailer(identity: AiIdentity): string {
+  return `Co-Authored-By: ${identity.name} <${identity.email}>`;
 }
 
 function assertInsideGitWorkTree(): void {
