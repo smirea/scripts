@@ -444,7 +444,7 @@ function removeWorktree(info: RepoInfo, branch?: string): void {
       throw new Error("Branch name is required when current directory is not a linked worktree.");
     }
     const cdTarget = resolvePostRemoveCdTarget(info, current);
-    runCommand("git", ["worktree", "remove", current.path], {
+    runCommand("git", ["worktree", "remove", "--force", current.path], {
       cwd: info.mainWorktree.path,
       stdio: "inherit",
     });
@@ -462,7 +462,10 @@ function removeWorktree(info: RepoInfo, branch?: string): void {
     info.currentWorktreeEntry && canonicalizePath(info.currentWorktreeEntry.path) === canonicalizePath(entry.path)
   );
   const cdTarget = isRemovingCurrent ? resolvePostRemoveCdTarget(info, entry) : undefined;
-  runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
+  runCommand("git", ["worktree", "remove", "--force", entry.path], {
+    cwd: info.mainWorktree.path,
+    stdio: "inherit",
+  });
   if (cdTarget) {
     console.log(cdTarget);
   }
@@ -502,7 +505,10 @@ function cleanupMergedWorktree(info: RepoInfo, entry: WorktreeEntry): void {
   if (entry.isMain) {
     throw new Error(`Refusing to remove main worktree at ${entry.path}.`);
   }
-  runCommand("git", ["worktree", "remove", entry.path], { cwd: info.mainWorktree.path, stdio: "inherit" });
+  runCommand("git", ["worktree", "remove", "--force", entry.path], {
+    cwd: info.mainWorktree.path,
+    stdio: "inherit",
+  });
   runCommand("git", ["branch", "-d", entry.branch], { cwd: info.mainWorktree.path, stdio: "inherit" });
 }
 

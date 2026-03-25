@@ -131,6 +131,30 @@ describe("git-worktree", () => {
     expect(listOutput).not.toContain(fixture.plainWorktreeDir);
   });
 
+  it("removes a dirty current linked worktree when rm is called without a branch", () => {
+    const fixture = createRepoFixture();
+    writeFileSync(path.join(fixture.linkedWorktreeDir, "dirty.txt"), "untracked\n");
+
+    const removeResult = runScript(["rm"], fixture.linkedWorktreeDir, fixture.homeDir);
+    expect(removeResult.status).toBe(0);
+    const lastLine = removeResult.stdout.trim().split(/\r?\n/).pop() ?? "";
+    expect(realpathSync(lastLine)).toBe(realpathSync(fixture.repoDir));
+
+    const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
+    expect(listOutput).not.toContain(fixture.linkedWorktreeDir);
+  });
+
+  it("removes a dirty worktree by branch name", () => {
+    const fixture = createRepoFixture();
+    writeFileSync(path.join(fixture.plainWorktreeDir, "README.md"), "changed\n");
+
+    const removeResult = runScript(["rm", "feature/plain"], fixture.repoDir, fixture.homeDir);
+    expect(removeResult.status).toBe(0);
+
+    const listOutput = runGit(fixture.repoDir, ["worktree", "list", "--porcelain"]);
+    expect(listOutput).not.toContain(fixture.plainWorktreeDir);
+  });
+
   it("fails merge without a branch outside interactive mode", () => {
     const fixture = createRepoFixture();
 
