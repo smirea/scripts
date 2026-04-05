@@ -2,6 +2,7 @@ export const OUTPUT_FORMATS = ['json', 'table', 'csv', 'csv:full'] as const;
 
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 export type CsvValue = string | number | null;
+type ValueFormatter = (value: unknown) => unknown;
 
 export function parseOutputFormat(value: string): OutputFormat {
   if ((OUTPUT_FORMATS as readonly string[]).includes(value)) {
@@ -10,14 +11,23 @@ export function parseOutputFormat(value: string): OutputFormat {
   throw new Error(`Invalid format: ${value}`);
 }
 
-export function renderCsvRecords(rows: Record<string, CsvValue>[], columns: readonly string[]): string {
+export function renderCsvRecords(
+  rows: Record<string, CsvValue>[],
+  columns: readonly string[],
+  options?: { valueFormatters?: Record<string, ValueFormatter> }
+): string {
   const header = columns.join(',');
-  const lines = rows.map(row => columns.map(column => escapeCsvValue(normalizeCsvValue(row[column] ?? null))).join(','));
+  const lines = rows.map(row =>
+    columns.map(column => escapeCsvValue(normalizeCsvValue(row[column] ?? null, column, options?.valueFormatters))).join(',')
+  );
   return `${[header, ...lines].join('\n')}\n`;
 }
 
-export function renderTableRecords(rows: object[]): void {
-  console.table(rows.map(row => normalizeTableRow(row as Record<string, unknown>)));
+export function renderTableRecords(
+  rows: object[],
+  options?: { valueFormatters?: Record<string, ValueFormatter> }
+): void {
+  console.table(rows.map(row => normalizeTableRow(row as Record<string, unknown>, options?.valueFormatters)));
 }
 
 export function formatDisplayNumber(value: number | null | undefined): number | null {
@@ -35,16 +45,31 @@ export function formatDisplayNumber(value: number | null | undefined): number | 
   return Math.round(numeric * 100) / 100;
 }
 
-function normalizeTableRow(row: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeOutputValue(value)]));
+function normalizeTableRow(
+  row: Record<string, unknown>,
+  valueFormatters?: Record<string, ValueFormatter>
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, normalizeOutputValue(value, key, valueFormatters)]));
 }
 
-function normalizeCsvValue(value: CsvValue): CsvValue {
-  const normalized = normalizeOutputValue(value);
+function normalizeCsvValue(
+  value: CsvValue,
+  key?: string,
+  valueFormatters?: Record<string, ValueFormatter>
+): CsvValue {
+  const normalized = normalizeOutputValue(value, key, valueFormatters);
   return (normalized ?? null) as CsvValue;
 }
 
-function normalizeOutputValue(value: unknown): unknown {
+function normalizeOutputValue(
+  value: unknown,
+  key?: string,
+  valueFormatters?: Record<string, ValueFormatter>
+): unknown {
+  const formatter = key ? valueFormatters?.[key] : undefined;
+  if (formatter) {
+    return formatter(value);
+  }
   if (typeof value === 'number') {
     return formatDisplayNumber(value);
   }

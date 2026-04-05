@@ -39,6 +39,7 @@ const CSV_COLUMNS = [
 const DAILY_OVERVIEW_COLUMNS = [
   'date',
   'weightKg',
+  'bodyFatPct',
   'calories',
   'carbs',
   'protein',
@@ -207,7 +208,7 @@ interface BuildApiReportOptions {
   dayDocuments: ApiFoodLogDay[];
   customFoodDetails?: Record<string, CustomFoodDetails>;
   programTargets?: ProgramTarget[];
-  scaleWeights?: Record<string, number>;
+  scaleMetrics?: Record<string, ScaleMetrics>;
   days: number;
   start?: string;
   end?: string;
@@ -247,6 +248,11 @@ interface ProgramTarget {
   protein: Array<number | null>;
   carbs: Array<number | null>;
   fat: Array<number | null>;
+}
+
+interface ScaleMetrics {
+  weightKg: number | null;
+  bodyFatPct: number | null;
 }
 
 interface MacrofactorReport {
@@ -292,6 +298,7 @@ interface MacrofactorFoodRecord {
 interface MacrofactorDailyOverviewRecord {
   date: string;
   weightKg: number | null;
+  bodyFatPct: number | null;
   calories: number;
   carbs: number;
   protein: number;
@@ -331,6 +338,10 @@ interface ResolvedWindow {
 }
 
 type ConciseDateFormat = 'iso' | 'table' | 'csv';
+const DAILY_OVERVIEW_VALUE_FORMATTERS = {
+  weightKg: (value: unknown) => value,
+  bodyFatPct: (value: unknown) => value,
+} as const;
 
 if (import.meta.main) {
   void runCli();
@@ -444,7 +455,9 @@ function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }):
   const sections = [
     {
       name: 'daily_overview',
-      csv: renderCsvRecords(toDailyOverviewCsvRows(report), DAILY_OVERVIEW_COLUMNS),
+      csv: renderCsvRecords(toDailyOverviewCsvRows(report), DAILY_OVERVIEW_COLUMNS, {
+        valueFormatters: DAILY_OVERVIEW_VALUE_FORMATTERS,
+      }),
     },
     {
       name: 'detailed_foods_day',
@@ -586,17 +599,17 @@ async function runCli(): Promise<void> {
       end: args.end,
     });
     const dayDocuments = await fetchFoodLogDays(client, window);
-    const [customFoodDetails, programTargets, scaleWeights] = await Promise.all([
+    const [customFoodDetails, programTargets, scaleMetrics] = await Promise.all([
       fetchCustomFoodDetails(client, dayDocuments),
       fetchProgramTargets(client, window),
-      fetchScaleWeights(client, window),
+      fetchScaleMetrics(client, window),
     ]);
     const report = buildMacrofactorApiReport({
       sourcePath: SOURCE_PATH,
       dayDocuments,
       customFoodDetails,
       programTargets,
-      scaleWeights,
+      scaleMetrics,
       days: args.days,
       start: args.start,
       end: args.end,
@@ -666,7 +679,10 @@ async function fetchProgramTargets(client: MacroFactorApiClient, window: Resolve
   return targets;
 }
 
-async function fetchScaleWeights(client: MacroFactorApiClient, window: ResolvedWindow): Promise<Record<string, number>> {
+async function fetchScaleMetrics(
+  client: MacroFactorApiClient,
+  window: ResolvedWindow
+): Promise<Record<string, ScaleMetrics>> {
   const years = listWindowYears(window);
   const documents = await Promise.all(
     years.map(async year => ({
@@ -674,7 +690,7 @@ async function fetchScaleWeights(client: MacroFactorApiClient, window: ResolvedW
       document: await client.getScaleDocument(year),
     }))
   );
-  const weights: Record<string, number> = {};
+  const metrics: Record<string, ScaleMetrics> = {};
 
   for (const { year, document } of documents) {
     if (!document) {
@@ -682,15 +698,19 @@ async function fetchScaleWeights(client: MacroFactorApiClient, window: ResolvedW
     }
     for (const [monthDay, rawValue] of Object.entries(document)) {
       const raw = asRecord(rawValue);
-      const weight = raw ? parseNumberLike(raw.w) : null;
-      if (!raw || !/^\d{4}$/.test(monthDay) || weight == null) {
+      const weightKg = raw ? parseNumberLike(raw.w) : null;
+      const bodyFatPct = raw ? parseNumberLike(raw.f) : null;
+      if (!raw || !/^\d{4}$/.test(monthDay) || (weightKg == null && bodyFatPct == null)) {
         continue;
       }
-      weights[`${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`] = weight;
+      metrics[`${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`] = {
+        weightKg,
+        bodyFatPct,
+      };
     }
   }
 
-  return weights;
+  return metrics;
 }
 
 function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
@@ -736,7 +756,7 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
     },
     matchedFoods: rows.length,
     returnedFoods: limitedRows.length,
-    dailyOverview: buildDailyOverview(window, entries, options.programTargets ?? [], options.scaleWeights ?? {}),
+    dailyOverview: buildDailyOverview(window, entries, options.programTargets ?? [], options.scaleMetrics ?? {}),
     foods: limitedRows,
     recipeBreakdown: buildRecipeBreakdown(entries, options.customFoodDetails ?? {}),
   };
@@ -1048,7 +1068,7 @@ function buildDailyOverview(
   window: ResolvedWindow,
   entries: ParsedFoodLogEntry[],
   programTargets: ProgramTarget[],
-  scaleWeights: Record<string, number>
+  scaleMetrics: Record<string, ScaleMetrics>
 ): MacrofactorDailyOverviewRecord[] {
   const totals = new Map(
     listWindowDateKeys(window).map(date => [
@@ -1080,9 +1100,11 @@ function buildDailyOverview(
   return Array.from(totals.entries())
     .map(([date, totalsForDate]) => {
       const goals = findProgramGoalsForDate(date, programTargets);
+      const scale = scaleMetrics[date];
       return {
         date,
-        weightKg: scaleWeights[date] ?? null,
+        weightKg: roundToSingleDecimal(scale?.weightKg),
+        bodyFatPct: roundToSingleDecimal(scale?.bodyFatPct),
         calories: totalsForDate.calories,
         carbs: totalsForDate.carbs,
         protein: totalsForDate.protein,
@@ -1294,7 +1316,7 @@ function listWindowDateKeys(window: ResolvedWindow): string[] {
 
 function renderTable(report: MacrofactorReport, options: { full: boolean }): void {
   process.stdout.write('Daily Overview\n');
-  printTable(report.dailyOverview);
+  printTable(report.dailyOverview, { valueFormatters: DAILY_OVERVIEW_VALUE_FORMATTERS });
   process.stdout.write('\nDetailed Foods / Day\n');
   printTable(options.full ? toFullRows(report, { dateFormat: 'table' }).rows : toConciseRows(report, { dateFormat: 'table' }));
   process.stdout.write('\nRecipe / Meal Breakdown\n');
@@ -1312,6 +1334,7 @@ function toDailyOverviewCsvRows(report: MacrofactorReport): Record<string, CsvVa
   return report.dailyOverview.map(row => ({
     date: row.date,
     weightKg: row.weightKg,
+    bodyFatPct: row.bodyFatPct,
     calories: row.calories,
     carbs: row.carbs,
     protein: row.protein,
@@ -1334,10 +1357,12 @@ function toRecipeBreakdownCsvRows(report: MacrofactorReport): Record<string, Csv
   }));
 }
 
-function printTable(rows: object[]): void {
-  renderTableRecords(rows);
+function printTable(
+  rows: object[],
+  options?: Parameters<typeof renderTableRecords>[1]
+): void {
+  renderTableRecords(rows, options);
 }
-
 function parseDateArg(value: string, label: string): number {
   const localDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (localDateMatch) {
@@ -1431,6 +1456,13 @@ function formatLocalDateKey(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   const day = String(date.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+function roundToSingleDecimal(value: number | null | undefined): number | null {
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Math.round((value as number) * 10) / 10;
 }
 
 function listDateKeysBetween(startTimestampMs: number, endTimestampMs: number): string[] {
