@@ -25,13 +25,18 @@ const links = [
     target: path.join(home, 'bin', 'git-worktree'),
   },
   {
+    name: 'git-invite-ai-to-repos',
+    source: path.join(repoRoot, 'src', 'git-invite-ai-to-repos.ts'),
+    target: path.join(home, 'bin', 'git-invite-ai-to-repos'),
+  },
+  {
     name: 'wt',
     source: path.join(repoRoot, 'src', 'git-worktree.ts'),
     target: path.join(home, 'bin', 'wt'),
   },
   {
     name: 'whoop-pull',
-    source: path.join(repoRoot, 'src', 'whoop-pull.ts'),
+    source: path.join(repoRoot, 'src', 'whoop.ts'),
     target: path.join(home, 'bin', 'whoop-pull'),
   },
   {
@@ -70,8 +75,8 @@ function ensureLink(link: { name: string; source: string; target: string }): boo
   if (!existsSync(targetDir)) {
     mkdirSync(targetDir, { recursive: true });
   }
-  if (existsSync(link.target)) {
-    const stat = lstatSync(link.target);
+  const stat = lstatOrNull(link.target);
+  if (stat) {
     if (stat.isDirectory()) {
       throw new Error(`Refusing to replace directory at ${link.target}`);
     }
@@ -86,4 +91,15 @@ function ensureLink(link: { name: string; source: string; target: string }): boo
   }
   symlinkSync(link.source, link.target);
   return true;
+}
+
+function lstatOrNull(target: string) {
+  try {
+    return lstatSync(target);
+  } catch (error) {
+    if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
 }
