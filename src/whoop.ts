@@ -224,7 +224,7 @@ async function runCli(): Promise<void> {
       .help()
       .parseAsync();
 
-    const providedToken = normalizeOptionalString(args.token);
+    const providedRefreshToken = normalizeOptionalString(args.token);
     const types = resolveTypes(args.include, args.exclude);
     const { start, end } = resolveRange(args.start, args.end, args.days);
     const limit = resolveLimit(args.limit);
@@ -232,23 +232,17 @@ async function runCli(): Promise<void> {
 
     const clientId = env.WHOOP_CLIENT_ID;
     const clientSecret = env.WHOOP_CLIENT_SECRET;
-    const redirectUri = normalizeOptionalString(args['redirect-uri']) ?? env.WHOOP_REDIRECT_URI;
+    const envRedirectUri = normalizeOptionalString(env.WHOOP_REDIRECT_URI);
+    const redirectUri = normalizeOptionalString(args['redirect-uri']) ?? envRedirectUri;
     const authCode = normalizeOptionalString(args['auth-code']);
-    let bearerToken = providedToken ?? env.WHOOP_REFRESH_TOKEN;
+    let refreshToken = providedRefreshToken ?? normalizeOptionalString(env.WHOOP_REFRESH_TOKEN);
+    let accessToken: string;
 
-    if (providedToken) {
-      saveRefreshToken(providedToken);
-    }
-
-    if (!bearerToken) {
+    if (authCode) {
       if (!redirectUri) {
         throw new Error(
-          'WHOOP_REFRESH_TOKEN is not set. Configure WHOOP_REDIRECT_URI in env-manager or pass --redirect-uri so the script can open the WHOOP authorization URL.',
+          'WHOOP_REDIRECT_URI is not set. Configure it in env-manager or pass --redirect-uri with the URI registered in WHOOP Developer Dashboard.',
         );
-      }
-      if (!authCode) {
-        openAuthorizationUrl(clientId, redirectUri);
-        throw new Error(buildManualAuthorizationMessage(clientId, redirectUri));
       }
       const tokenResponse = await exchangeAuthCodeForTokens({
         clientId,
@@ -259,14 +253,54 @@ async function runCli(): Promise<void> {
       if (!tokenResponse.refresh_token) {
         throw new Error('WHOOP auth-code exchange did not return a refresh token.');
       }
-      bearerToken = tokenResponse.refresh_token;
-      saveRefreshToken(bearerToken);
+      accessToken = tokenResponse.access_token;
+      refreshToken = tokenResponse.refresh_token;
+      saveRefreshToken(refreshToken);
+    } else if (!refreshToken) {
+      if (!redirectUri) {
+        throw new Error(
+          'WHOOP_REFRESH_TOKEN is not set. Configure WHOOP_REDIRECT_URI in env-manager or pass --redirect-uri so the script can open the WHOOP authorization URL.',
+        );
+      }
+      openAuthorizationUrl(clientId, redirectUri);
+      throw new Error(buildManualAuthorizationMessage(clientId, redirectUri));
+    } else {
+      try {
+        const tokenResponse = await refreshAccessToken({
+          clientId,
+          clientSecret,
+          refreshToken,
+        });
+        accessToken = tokenResponse.access_token;
+        saveRefreshToken(tokenResponse.refresh_token);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!redirectUri) {
+          throw new Error(
+            [
+              message,
+              'The stored WHOOP_REFRESH_TOKEN may be expired, already rotated, or may actually be an access token.',
+              'Configure WHOOP_REDIRECT_URI in env-manager or pass --redirect-uri, then reauthorize with `whoop-pull --auth-code <code>`.',
+            ].join('\n'),
+          );
+        }
+        openAuthorizationUrl(clientId, redirectUri);
+        throw new Error(
+          [
+            message,
+            'The stored WHOOP_REFRESH_TOKEN may be expired, already rotated, or may actually be an access token.',
+            'The WHOOP authorization URL has been opened in your default browser.',
+            'Approve access, then copy the `code` query parameter from the redirect URL and rerun:',
+            '  whoop-pull --auth-code <code>',
+          ].join('\n'),
+        );
+      }
     }
 
     const data: Partial<Record<DataType, unknown>> = {};
     for (const type of types) {
       data[type] = await fetchType(type, {
-        accessToken: bearerToken,
+        accessToken,
         start,
         end,
         limit,
@@ -708,6 +742,53 @@ async function exchangeAuthCodeForTokens(params: {
     throw new Error(
       'WHOOP auth-code token response missing refresh_token. Make sure the app requests offline scope.',
     );
+  }
+
+  return data as Required<typeof data> & { access_token: string; refresh_token: string };
+}
+
+async function refreshAccessToken(params: {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}): Promise<{
+  access_token: string;
+  refresh_token: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
+}> {
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: params.refreshToken,
+    client_id: params.clientId,
+    client_secret: params.clientSecret,
+    scope: 'offline',
+  });
+
+  const response = await fetch(TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+
+  if (!response.ok) {
+    throw new Error(`WHOOP refresh-token request failed: ${await formatError(response)}`);
+  }
+
+  const data = (await response.json()) as {
+    access_token?: string;
+    refresh_token?: string;
+    expires_in?: number;
+    scope?: string;
+    token_type?: string;
+  };
+
+  if (!data.access_token) {
+    throw new Error('WHOOP refresh-token response missing access_token.');
+  }
+  if (!data.refresh_token) {
+    throw new Error('WHOOP refresh-token response missing refresh_token.');
   }
 
   return data as Required<typeof data> & { access_token: string; refresh_token: string };
