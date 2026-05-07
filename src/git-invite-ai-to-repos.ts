@@ -18,6 +18,7 @@ interface CliArgs {
   owner: string;
   ai: string;
   days: number;
+  repos: string[];
   includeArchived: boolean;
   includeForks: boolean;
   dryRun: boolean;
@@ -75,7 +76,7 @@ async function runCli(): Promise<void> {
     }
 
     const cutoff = daysAgo(args.days);
-    const repos = listOwnerRepos(ownerToken, args.owner, cutoff, args);
+    const repos = listRepos(ownerToken, args.owner, cutoff, args);
     printRepoList(args, cutoff, repos);
 
     const checks = await inviteMissingAiCollaborator(ownerToken, repos, args);
@@ -131,6 +132,12 @@ async function parseCliArgs(): Promise<CliArgs> {
       default: DEFAULT_DAYS,
       describe: "Only include repositories created in the last N days",
     })
+    .option("repos", {
+      type: "string",
+      array: true,
+      default: [] as string[],
+      describe: "Specific repositories to update, as repo names or owner/repo names",
+    })
     .option("include-archived", {
       type: "boolean",
       default: false,
@@ -163,6 +170,7 @@ async function parseCliArgs(): Promise<CliArgs> {
     owner: parsed.owner,
     ai: parsed.ai,
     days: parsed.days,
+    repos: normalizeRepoArgs(parsed.repos),
     includeArchived: parsed.includeArchived,
     includeForks: parsed.includeForks,
     dryRun: parsed.dryRun,
@@ -236,6 +244,13 @@ function skipAcceptPreview(args: CliArgs): GithubInvitation[] {
   return [];
 }
 
+function listRepos(ownerToken: string, owner: string, cutoff: Date, args: CliArgs): GithubRepo[] {
+  if (args.repos.length > 0) {
+    return args.repos.map(repo => getOwnerRepo(ownerToken, owner, repo));
+  }
+  return listOwnerRepos(ownerToken, owner, cutoff, args);
+}
+
 function listOwnerRepos(ownerToken: string, owner: string, cutoff: Date, args: CliArgs): GithubRepo[] {
   const repos = ghApiPaginated<GithubRepo>(
     ownerToken,
@@ -255,9 +270,11 @@ function printRepoList(args: CliArgs, cutoff: Date, repos: GithubRepo[]): void {
     args.includeArchived ? "including archived" : "excluding archived",
     args.dryRun ? "dry run" : "live",
   ];
-  console.log(
-    `Found ${repos.length} ${args.owner} repos created since ${formatDate(cutoff)} (${flags.join(", ")}).`
-  );
+  const scope =
+    args.repos.length > 0
+      ? `matching --repos ${args.repos.join(", ")}`
+      : `created since ${formatDate(cutoff)}`;
+  console.log(`Found ${repos.length} ${args.owner} repos ${scope} (${flags.join(", ")}).`);
   for (const repo of repos) {
     console.log(`repo    ${repo.full_name} created ${formatDate(new Date(repo.created_at))}`);
   }
@@ -314,6 +331,33 @@ function listUserInvitations(aiToken: string): GithubInvitation[] {
 
 function acceptInvitation(aiToken: string, invitationId: number): void {
   ghApi(aiToken, "PATCH", `/user/repository_invitations/${invitationId}`);
+}
+
+function getOwnerRepo(ownerToken: string, owner: string, repoArg: string): GithubRepo {
+  const [repoOwner, repoName] = parseRepoArg(owner, repoArg);
+  if (repoOwner !== owner) {
+    throw new Error(`--repos entry ${repoArg} belongs to ${repoOwner}, but --owner is ${owner}.`);
+  }
+  return ghApiJson<GithubRepo>(ownerToken, `/repos/${encodePath(repoOwner)}/${encodePath(repoName)}`);
+}
+
+function parseRepoArg(owner: string, repoArg: string): [string, string] {
+  const parts = repoArg.split("/");
+  if (parts.length === 1) {
+    return [owner, parts[0]!];
+  }
+  if (parts.length === 2 && parts[0] && parts[1]) {
+    return [parts[0], parts[1]];
+  }
+  throw new Error(`Invalid --repos entry: ${repoArg}`);
+}
+
+function normalizeRepoArgs(values: readonly string[]): string[] {
+  const repos = values
+    .flatMap(value => value.split(","))
+    .map(value => value.trim())
+    .filter(Boolean);
+  return Array.from(new Set(repos));
 }
 
 function ensureGhToken(user: string, loginWhenMissing: boolean): string {
