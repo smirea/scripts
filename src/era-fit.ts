@@ -1469,7 +1469,7 @@ function parseFoodNameFromDescription(value: string | null): string | null {
     return null;
   }
   return value
-    .replace(/^\s*(?:\d+(?:\.\d+)?|\d+\/\d+)\s*(?:g|oz|cup|cups|tbsp|tsp|serving|servings|slice|slices|piece|pieces)?\s+/i, '')
+    .replace(/^\s*(?:\d+(?:\.\d+)?|\d+\/\d+)\s*(?:(?:large|medium|small)\s+)?(?:g|oz|cup|cups|tbsp|tsp|serving|servings|slice|slices|piece|pieces|scoop|scoops|spear|spears|packet|packets)?\s+/i, '')
     .replace(/\s*\([^)]*\)\s*$/, '')
     .trim() || null;
 }
@@ -1517,7 +1517,7 @@ function buildShoppingList(days: EraFitMealPlanDay[]): EraFitShoppingListItem[] 
     .map(uses => {
       const servings = uniqueStrings(uses.map(use => use.food.serving).filter((value): value is string => value != null));
       return {
-        name: uses[0].food.name,
+        name: chooseShoppingDisplayName(uses),
         quantity: formatShoppingQuantity(uses),
         meals: new Set(uses.map(use => use.mealId)).size,
         occurrences: uses.length,
@@ -1528,7 +1528,68 @@ function buildShoppingList(days: EraFitMealPlanDay[]): EraFitShoppingListItem[] 
 }
 
 function normalizeShoppingName(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  let normalized = value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/sautéed/g, 'sauteed')
+    .replace(/[^a-z0-9%]+/g, ' ')
+    .trim();
+
+  normalized = normalized
+    .replace(/\b(?:large|medium|small)\b/g, ' ')
+    .replace(/\b(?:sliced|diced|cubed|cubes|toasted)\b/g, ' ')
+    .replace(/\b(?:fillet|patty|stand in)\b/g, ' ')
+    .replace(/\b(?:dry cooked|cooked dry)\b/g, 'dry')
+    .replace(/\b(?:grilled|scrambled|sauteed|steamed|roasted|cooked|raw)\b/g, ' ')
+    .replace(/\beggs\b/g, 'egg')
+    .replace(/\bwhites\b/g, 'white')
+    .replace(/\bscoops\b/g, 'scoop')
+    .replace(/\bspears\b/g, 'spear')
+    .replace(/\bpackets\b/g, 'packet')
+    .replace(/\bcups\b/g, 'cup')
+    .replace(/\bslices\b/g, 'slice')
+    .replace(/\bbananas\b/g, 'banana')
+    .replace(/\bstrawberries\b/g, 'strawberry')
+    .replace(/\bblackberries\b/g, 'blackberry')
+    .replace(/\bblueberries\b/g, 'blueberry')
+    .replace(/\bavocados\b/g, 'avocado')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized;
+}
+
+function chooseShoppingDisplayName(uses: ShoppingFoodUse[]): string {
+  const name = uses
+    .map(use => use.food.name)
+    .sort((a, b) => shoppingDisplayNameScore(b) - shoppingDisplayNameScore(a) || a.localeCompare(b))[0];
+  return cleanShoppingDisplayName(name);
+}
+
+function shoppingDisplayNameScore(value: string): number {
+  const normalized = value.toLowerCase();
+  let score = value.length;
+  if (/\b(?:sliced|toasted|cubed|cubes|stand-in|stand in)\b/i.test(value)) {
+    score -= 30;
+  }
+  if (/^\b(?:cooked|steamed|roasted|large|medium|small|scoop|scoops|spears)\b/i.test(value)) {
+    score -= 20;
+  }
+  if (/\b(?:93%|2%)\b/.test(normalized)) {
+    score += 20;
+  }
+  if (/\b(?:plain|lean|grilled|cooked|raw)\b/.test(normalized)) {
+    score += 5;
+  }
+  return score;
+}
+
+function cleanShoppingDisplayName(value: string): string {
+  return value
+    .replace(/^\s*(?:large|medium|small|scoop|scoops|spear|spears)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function formatShoppingQuantity(uses: ShoppingFoodUse[]): string {
