@@ -55,6 +55,7 @@ const MEAL_PLAN_MEAL_LABELS: Record<(typeof MEAL_PLAN_MEAL_KEYS)[number], string
   dinner: 'Dinner',
   evening_snack: 'Evening Snack',
 };
+const MEAL_PLAN_OUTPUT_FORMATS = ['json', 'table'] as const;
 const DAILY_COLUMNS = [
   'date',
   'template',
@@ -393,10 +394,13 @@ interface ResolvedDateWindow {
   end: Date;
 }
 
-interface SharedCliArgs {
+interface OutputCliArgs {
   format: string;
   output?: string;
   pretty: boolean;
+}
+
+interface SharedCliArgs {
   checkAuth: boolean;
   dashboardPath: string;
   saveSession: boolean;
@@ -404,14 +408,15 @@ interface SharedCliArgs {
   prompt: boolean;
 }
 
-interface LogCliArgs extends SharedCliArgs {
+interface LogCliArgs extends SharedCliArgs, OutputCliArgs {
   date?: string;
   days: number;
   start?: string;
   end?: string;
   limit?: number;
-  mealplan?: boolean;
 }
+
+interface MealPlanCliArgs extends SharedCliArgs, OutputCliArgs {}
 
 class CookieJar {
   private readonly cookies = new Map<string, string>();
@@ -476,30 +481,13 @@ async function runCli(): Promise<void> {
     .strict()
     .command('$0', 'Print daily macro log', addLogOptions, runLogCommand)
     .command('log', 'Print daily macro log', addLogOptions, runLogCommand)
-    .command('mealplan', 'Print the weekly suggested meal plan and aggregate shopping list', y => y, runMealPlanCommand)
+    .command('mealplan', 'Print the weekly suggested meal plan and aggregate shopping list', addMealPlanOptions, runMealPlanCommand)
     .help()
     .parseAsync();
 }
 
 function addSharedOptions<T>(parser: Argv<T>): Argv<T & SharedCliArgs> {
   return parser
-    .option('format', {
-      alias: ['f'],
-      type: 'string',
-      choices: OUTPUT_FORMATS,
-      default: 'table',
-      describe: 'Output format',
-    })
-    .option('output', {
-      alias: ['o'],
-      type: 'string',
-      describe: 'Write output to this file path',
-    })
-    .option('pretty', {
-      type: 'boolean',
-      default: true,
-      describe: 'Pretty-print JSON output',
-    })
     .option('check-auth', {
       type: 'boolean',
       default: false,
@@ -527,8 +515,29 @@ function addSharedOptions<T>(parser: Argv<T>): Argv<T & SharedCliArgs> {
     }) as unknown as Argv<T & SharedCliArgs>;
 }
 
-function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
+function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
   return parser
+    .option('format', {
+      alias: ['f'],
+      type: 'string',
+      choices,
+      default: 'table',
+      describe: 'Output format',
+    })
+    .option('output', {
+      alias: ['o'],
+      type: 'string',
+      describe: 'Write output to this file path',
+    })
+    .option('pretty', {
+      type: 'boolean',
+      default: true,
+      describe: 'Pretty-print JSON output',
+    }) as unknown as Argv<T & OutputCliArgs>;
+}
+
+function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
+  return addOutputOptions(parser, OUTPUT_FORMATS)
     .option('date', {
       type: 'string',
       describe: 'Local date to report, in YYYY-MM-DD format. Defaults to today when --start is not set',
@@ -551,13 +560,11 @@ function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
       alias: ['l'],
       type: 'number',
       describe: 'Maximum number of logged foods to return',
-    })
-    .option('mealplan', {
-      type: 'boolean',
-      default: false,
-      hidden: true,
-      describe: 'Deprecated. Use the mealplan command instead',
     }) as Argv<T & LogCliArgs>;
+}
+
+function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
+  return addOutputOptions(parser, MEAL_PLAN_OUTPUT_FORMATS) as Argv<T & MealPlanCliArgs>;
 }
 
 async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
@@ -565,12 +572,8 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
     throw new Error('--limit must be a positive number.');
   }
 
-  if (args.mealplan) {
-    await runMealPlanCommand(args);
-    return;
-  }
-
-  const { format, session } = await resolveCliSession(args);
+  const format = parseOutputFormat(args.format);
+  const session = await resolveCliSession(args);
   if (args.checkAuth) {
     renderAuthResult({
       session,
@@ -600,8 +603,9 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
   });
 }
 
-async function runMealPlanCommand(args: ArgumentsCamelCase<SharedCliArgs>): Promise<void> {
-  const { format, session } = await resolveCliSession(args);
+async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
+  const format = parseOutputFormat(args.format);
+  const session = await resolveCliSession(args);
   if (args.checkAuth) {
     renderAuthResult({
       session,
@@ -621,19 +625,13 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<SharedCliArgs>): Prom
   });
 }
 
-async function resolveCliSession(args: ArgumentsCamelCase<SharedCliArgs>): Promise<{
-  format: OutputFormat;
-  session: EraFitSession;
-}> {
-  const session = await resolveSession({
+async function resolveCliSession(args: ArgumentsCamelCase<SharedCliArgs>): Promise<EraFitSession> {
+  return resolveSession({
     dashboardPath: normalizePath(args.dashboardPath),
     login: args.login,
     prompt: args.prompt,
     saveSession: args.saveSession,
   });
-
-  const format = parseOutputFormat(args.format);
-  return { format, session };
 }
 
 async function resolveSession(options: {
@@ -1676,7 +1674,7 @@ function renderMealPlanOutput(options: {
     ? `${JSON.stringify(options.report, null, options.pretty ? 2 : 0)}\n`
     : renderMealPlanText(options.report);
   if (options.format !== 'table' && options.format !== 'json') {
-    throw new Error('--mealplan supports --format=table or --format=json.');
+    throw new Error('The mealplan command supports --format=table or --format=json.');
   }
   if (options.outputPath) {
     writeFileSync(path.resolve(options.outputPath), text, 'utf8');
