@@ -667,6 +667,7 @@ async function addCategorizedItem(
       categoryId: category.identifier,
     }],
     quantityPb: input.serving ? { amount: input.serving } : undefined,
+    deprecatedQuantity: input.serving,
     photoIds: [],
     storeIds: [],
     prices: [],

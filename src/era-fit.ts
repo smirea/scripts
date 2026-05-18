@@ -1428,12 +1428,16 @@ function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
     return null;
   }
   const description = parseString(raw.description);
-  const name =
+  const descriptionName = parseFoodNameFromDescription(description);
+  const rawName =
     parseString(raw.name) ??
     parseString(raw.tag) ??
     parseString(raw.title) ??
-    parseString(raw.food_name) ??
-    parseFoodNameFromDescription(description);
+    parseString(raw.food_name);
+  const name =
+    descriptionName && (!rawName || descriptionName.toLowerCase().includes(rawName.toLowerCase()))
+      ? descriptionName
+      : rawName ?? descriptionName;
   if (!name) {
     return null;
   }
