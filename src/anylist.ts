@@ -16,8 +16,11 @@ const CREDENTIAL_KEY = 'ANYLIST_CREDENTIALS';
 const require = createRequire(import.meta.url);
 const FormData = require('form-data') as typeof import('form-data');
 const uuid = require('anylist/lib/uuid') as () => string;
+const OUTPUT_FORMATS = ['pretty', 'json'] as const;
 
 console.info = (...args: unknown[]) => console.error(...args);
+
+type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 
 interface InputItem {
   name: string;
@@ -29,16 +32,25 @@ async function runCli(): Promise<void> {
   const cli = yargs(hideBin(process.argv))
     .scriptName('anylist')
     .strict()
-    .command('list', 'Print every shopping list and item', builder =>
-      builder.option('pretty', {
-        type: 'boolean',
-        default: true,
-        describe: 'Pretty-print JSON output',
+    .option('format', {
+      alias: 'f',
+      type: 'string',
+      choices: OUTPUT_FORMATS,
+      default: 'pretty',
+      describe: 'Output format',
+    })
+    .command('list [list]', 'Print every shopping list and item, or one list by id/name', builder =>
+      builder.positional('list', {
+        type: 'string',
+        describe: 'AnyList shopping list id or name',
       }), async args => {
       const any = await login();
       try {
         const lists = await any.getLists();
-        printJson(lists.map(formatList), Boolean(args.pretty));
+        const output = args.list
+          ? formatList(getListFromCache(any, args.list))
+          : lists.map(formatList);
+        printOutput(output, parseOutputFormat(args.format));
       } finally {
         any.teardown();
       }
@@ -51,7 +63,7 @@ async function runCli(): Promise<void> {
       if (!args.list) {
         throw new Error('The anylist package only creates items inside a list. Pass `create <list>` or use `add <list>`.');
       }
-      await addFromStdin(args.list);
+      await addFromStdin(args.list, parseOutputFormat(args.format));
     })
     .command('add <list>', 'Add stdin items to a shopping list', builder =>
       builder.positional('list', {
@@ -59,7 +71,7 @@ async function runCli(): Promise<void> {
         demandOption: true,
         describe: 'AnyList shopping list name',
       }), async args => {
-      await addFromStdin(args.list);
+      await addFromStdin(args.list, parseOutputFormat(args.format));
     })
     .command('set <list>', 'Replace a shopping list with stdin items', builder =>
       builder.positional('list', {
@@ -76,7 +88,7 @@ async function runCli(): Promise<void> {
           await list.removeItem(item);
         }
         const added = await addItems(any, list, items);
-        printJson({ list: list.name, removed: existingItems.length, added });
+        printOutput({ list: list.name, removed: existingItems.length, added }, parseOutputFormat(args.format));
       } finally {
         any.teardown();
       }
@@ -91,7 +103,7 @@ async function runCli(): Promise<void> {
       try {
         const list = await getList(any, args.list);
         const deleted = await deleteList(any, list);
-        printJson(deleted);
+        printOutput(deleted, parseOutputFormat(args.format));
       } finally {
         any.teardown();
       }
@@ -102,13 +114,13 @@ async function runCli(): Promise<void> {
   await cli.parse();
 }
 
-async function addFromStdin(listName: string): Promise<void> {
+async function addFromStdin(listName: string, format: OutputFormat): Promise<void> {
   const items = await readInputItems();
   const any = await login();
   try {
     const list = await getList(any, listName);
     const added = await addItems(any, list, items);
-    printJson({ list: list.name, added });
+    printOutput({ list: list.name, added }, format);
   } finally {
     any.teardown();
   }
@@ -275,10 +287,14 @@ function normalizeInputItem(item: InputItem): InputItem {
 
 async function getList(any: AnyList, name: string): Promise<AnyListShoppingList> {
   await any.getLists();
-  const list = any.getListByName(name);
+  return getListFromCache(any, name);
+}
+
+function getListFromCache(any: AnyList, nameOrId: string): AnyListShoppingList {
+  const list = any.lists.find(candidate => candidate.identifier === nameOrId) ?? any.getListByName(nameOrId);
   if (!list) {
     const available = any.lists.map(candidate => candidate.name).sort().join(', ');
-    throw new Error(`AnyList list not found: ${name}. Available lists: ${available}`);
+    throw new Error(`AnyList list not found: ${nameOrId}. Available lists: ${available}`);
   }
   return list;
 }
@@ -353,8 +369,15 @@ function formatList(list: AnyListShoppingList): object {
   };
 }
 
-function printJson(value: unknown, pretty = true): void {
-  console.log(JSON.stringify(value, null, pretty ? 2 : 0));
+function parseOutputFormat(value: unknown): OutputFormat {
+  if (typeof value === 'string' && (OUTPUT_FORMATS as readonly string[]).includes(value)) {
+    return value as OutputFormat;
+  }
+  throw new Error(`Invalid output format: ${value}`);
+}
+
+function printOutput(value: unknown, format: OutputFormat): void {
+  console.log(JSON.stringify(value, null, format === 'pretty' ? 2 : 0));
 }
 
 if (import.meta.main) {
