@@ -35,6 +35,7 @@ interface PrintableItem {
   quantity?: string;
   details?: string | null;
   checked?: boolean | null;
+  categoryMatchId?: string | null;
 }
 
 interface PrintableList {
@@ -757,9 +758,19 @@ function formatPrettyList(list: PrintableList): string {
   const unchecked = items.filter(item => item.checked !== true);
   const checkedCount = items.length - unchecked.length;
   const lines = [chalk.bold(list.name ?? list.list ?? 'Unnamed List')];
+  const categories = groupItemsByCategory(unchecked);
 
-  for (const item of unchecked) {
-    lines.push(`  ${formatPrettyItem(item)}`);
+  if (categories.size > 1) {
+    for (const [category, categoryItems] of categories) {
+      lines.push(`  ${chalk.bold(formatCategoryName(category))}`);
+      for (const item of categoryItems) {
+        lines.push(`    ${formatPrettyItem(item)}`);
+      }
+    }
+  } else {
+    for (const item of unchecked) {
+      lines.push(`  ${formatPrettyItem(item)}`);
+    }
   }
 
   if (checkedCount > 0) {
@@ -767,6 +778,28 @@ function formatPrettyList(list: PrintableList): string {
   }
 
   return lines.join('\n');
+}
+
+function groupItemsByCategory(items: PrintableItem[]): Map<string, PrintableItem[]> {
+  const categories = new Map<string, PrintableItem[]>();
+  for (const item of items) {
+    const category = item.categoryMatchId?.trim() || 'uncategorized';
+    const categoryItems = categories.get(category) ?? [];
+    categoryItems.push(item);
+    categories.set(category, categoryItems);
+  }
+  return categories;
+}
+
+function formatCategoryName(category: string): string {
+  if (category === 'uncategorized') {
+    return 'Uncategorized';
+  }
+  return category
+    .split('-')
+    .filter(Boolean)
+    .map(word => word[0].toUpperCase() + word.slice(1))
+    .join(' ');
 }
 
 function formatPrettyItem(item: PrintableItem): string {

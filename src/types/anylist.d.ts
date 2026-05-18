@@ -27,6 +27,7 @@ declare module 'anylist' {
       quantity?: string;
       details?: string;
       checked?: boolean;
+      categoryMatchId?: string;
     };
   }
 
