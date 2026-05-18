@@ -10,6 +10,7 @@ import yargs from 'yargs';
 import type { Argv, ArgumentsCamelCase } from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
+import { createShoppingList } from './anylist';
 import env from './env';
 import { createScript } from './utils/createScript';
 import {
@@ -407,7 +408,9 @@ interface LogCliArgs extends OutputCliArgs {
   limit?: number;
 }
 
-interface MealPlanCliArgs extends OutputCliArgs {}
+interface MealPlanCliArgs extends OutputCliArgs {
+  anylist: boolean;
+}
 
 class CookieJar {
   private readonly cookies = new Map<string, string>();
@@ -522,7 +525,12 @@ function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
 }
 
 function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
-  return addOutputOptions(parser, MEAL_PLAN_OUTPUT_FORMATS) as Argv<T & MealPlanCliArgs>;
+  return addOutputOptions(parser, MEAL_PLAN_OUTPUT_FORMATS)
+    .option('anylist', {
+      type: 'boolean',
+      default: false,
+      describe: 'Create an AnyList shopping list from the suggested mealplan ingredients',
+    }) as Argv<T & MealPlanCliArgs>;
 }
 
 async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
@@ -556,11 +564,27 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
   const session = await resolveSession();
 
   const mealPlan = await fetchEraFitMealPlan(session);
+  const anyListResult = args.anylist ? await createAnyListMealPlan(mealPlan) : null;
   renderMealPlanOutput({
     report: mealPlan,
     format,
     outputPath: args.output,
+    anyListResult,
   });
+}
+
+async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id: string; name: string; added: number }> {
+  const name = `Mealplan ${formatLongDate(new Date())}`;
+  const list = await createShoppingList(name, report.shoppingList.map(item => ({
+    name: item.name,
+    serving: item.quantity,
+    description: item.meals === 1 ? 'Used in 1 meal' : `Used in ${item.meals} meals`,
+  })), { replaceExisting: true });
+  return {
+    id: list.id,
+    name: list.name,
+    added: list.added.length,
+  };
 }
 
 async function resolveSession(): Promise<EraFitSession> {
@@ -1595,13 +1619,14 @@ function renderMealPlanOutput(options: {
   report: EraFitMealPlanReport;
   format: OutputFormat;
   outputPath?: string;
+  anyListResult: { id: string; name: string; added: number } | null;
 }): void {
   if (options.format !== 'table' && options.format !== 'json') {
     throw new Error('The mealplan command supports --format=table or --format=json.');
   }
   const text = options.format === 'json'
-    ? `${JSON.stringify(options.report, null, 2)}\n`
-    : renderMealPlanText(options.report);
+    ? `${JSON.stringify({ ...options.report, anyList: options.anyListResult }, null, 2)}\n`
+    : renderMealPlanText(options.report, options.anyListResult);
   if (options.outputPath) {
     writeFileSync(path.resolve(options.outputPath), text, 'utf8');
     return;
@@ -1609,7 +1634,10 @@ function renderMealPlanOutput(options: {
   process.stdout.write(text);
 }
 
-function renderMealPlanText(report: EraFitMealPlanReport): string {
+function renderMealPlanText(
+  report: EraFitMealPlanReport,
+  anyListResult: { id: string; name: string; added: number } | null = null
+): string {
   const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
   for (const day of report.days) {
     const planned = formatMacros(day.planned);
@@ -1642,6 +1670,11 @@ function renderMealPlanText(report: EraFitMealPlanReport): string {
       const servings = item.servings.length > 0 ? ` (${item.servings.join(', ')})` : '';
       lines.push(`  ${padEnd(item.name, 32)} ${chalk.cyan(padEnd(item.quantity, 14))} ${padEnd(String(item.meals), 5)}${chalk.gray(servings)}`);
     }
+  }
+  if (anyListResult) {
+    lines.push('');
+    lines.push(chalk.bold('AnyList'));
+    lines.push(`  Created ${chalk.cyan(anyListResult.name)} with ${formatNumber(anyListResult.added)} ingredients.`);
   }
   return `${lines.join('\n')}\n`;
 }
@@ -2179,6 +2212,14 @@ function formatDateKey(value: Date): string {
 function formatLocalIso(value: Date): string {
   const offsetMs = value.getTimezoneOffset() * 60 * 1000;
   return new Date(value.getTime() - offsetMs).toISOString().replace('Z', '');
+}
+
+function formatLongDate(value: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(value);
 }
 
 function formatEraFitDateId(date: Date): string {

@@ -28,6 +28,16 @@ interface InputItem {
   description?: string;
 }
 
+interface CreatedShoppingList {
+  id: string;
+  name: string;
+  added: object[];
+}
+
+interface CreateShoppingListOptions {
+  replaceExisting?: boolean;
+}
+
 async function runCli(): Promise<void> {
   const cli = yargs(hideBin(process.argv))
     .scriptName('anylist')
@@ -63,7 +73,7 @@ async function runCli(): Promise<void> {
       if (!args.list) {
         throw new Error('The anylist package only creates items inside a list. Pass `create <list>` or use `add <list>`.');
       }
-      await addFromStdin(args.list, parseOutputFormat(args.format));
+      await addFromStdin(args.list, parseOutputFormat(args.format), true);
     })
     .command('add <list>', 'Add stdin items to a shopping list', builder =>
       builder.positional('list', {
@@ -181,11 +191,37 @@ async function runCli(): Promise<void> {
   await cli.parse();
 }
 
-async function addFromStdin(listName: string, format: OutputFormat): Promise<void> {
+export async function createShoppingList(
+  listName: string,
+  items: InputItem[],
+  options: CreateShoppingListOptions = {}
+): Promise<CreatedShoppingList> {
+  const any = await login();
+  try {
+    await any.getLists();
+    const existing = any.getListByName(listName);
+    if (existing && options.replaceExisting) {
+      await deleteList(any, existing);
+    } else if (existing) {
+      throw new Error(`AnyList list already exists: ${listName}`);
+    }
+    const list = await createList(any, listName);
+    const added = await addItems(any, list, items.map(normalizeInputItem));
+    return {
+      id: list.identifier,
+      name: list.name,
+      added,
+    };
+  } finally {
+    any.teardown();
+  }
+}
+
+async function addFromStdin(listName: string, format: OutputFormat, createMissing = false): Promise<void> {
   const items = await readInputItems();
   const any = await login();
   try {
-    const list = await getList(any, listName);
+    const list = createMissing ? await getOrCreateList(any, listName) : await getList(any, listName);
     const added = await addItems(any, list, items);
     printOutput({ list: list.name, added }, format);
   } finally {
@@ -357,6 +393,11 @@ async function getList(any: AnyList, name: string): Promise<AnyListShoppingList>
   return getListFromCache(any, name);
 }
 
+async function getOrCreateList(any: AnyList, name: string): Promise<AnyListShoppingList> {
+  await any.getLists();
+  return any.getListByName(name) ?? await createList(any, name);
+}
+
 function getListFromCache(any: AnyList, nameOrId: string): AnyListShoppingList {
   const list = any.lists.find(candidate => candidate.identifier === nameOrId) ?? any.getListByName(nameOrId);
   if (!list) {
@@ -364,6 +405,68 @@ function getListFromCache(any: AnyList, nameOrId: string): AnyListShoppingList {
     throw new Error(`AnyList list not found: ${nameOrId}. Available lists: ${available}`);
   }
   return list;
+}
+
+async function createList(any: AnyList, name: string): Promise<AnyListShoppingList> {
+  const id = uuid();
+  const userId = getAnyListUserId(any);
+  const op = new any.protobuf.PBListOperation();
+  op.setMetadata({
+    operationId: uuid(),
+    handlerId: 'new-shopping-list',
+    userId,
+    operationClass: 0,
+  });
+  op.setListId(id);
+  op.setList({
+    identifier: id,
+    timestamp: Date.now() / 1000,
+    name,
+    items: [],
+    creator: userId,
+    UNUSEDATTRIBUTE: [],
+    sharedUsers: [],
+    notificationLocations: [],
+    logicalClockTime: 1,
+    allowsMultipleListCategoryGroups: true,
+    listItemSortOrder: 0,
+    newListItemPosition: 0,
+  });
+
+  const ops = new any.protobuf.PBListOperationList();
+  ops.setOperations([op]);
+  const form = new FormData();
+  form.append('operations', ops.toBuffer());
+  await any.client.post('data/shopping-lists/update', { body: form });
+
+  const orderOp = new any.protobuf.PBOrderedShoppingListIDsOperation();
+  orderOp.setMetadata({
+    operationId: uuid(),
+    handlerId: 'set-ordered-shopping-list-ids',
+  });
+  orderOp.setOrderedListIds([id, ...any.lists.map(list => list.identifier)]);
+
+  const orderOps = new any.protobuf.PBOrderedShoppingListIDsOperationList();
+  orderOps.setOperations([orderOp]);
+  const orderForm = new FormData();
+  orderForm.append('operations', orderOps.toBuffer());
+  await any.client.post('data/shopping-lists/update-ordered-ids', { body: orderForm });
+
+  await any.getLists(true);
+  return getListFromCache(any, id);
+}
+
+function getAnyListUserId(any: AnyList): string {
+  const token = (any as AnyList & { accessToken?: string }).accessToken;
+  const payload = token?.split('.')[1];
+  if (!payload) {
+    throw new Error('AnyList access token did not include a user id.');
+  }
+  const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as { sub?: string };
+  if (!parsed.sub) {
+    throw new Error('AnyList access token did not include a user id.');
+  }
+  return parsed.sub;
 }
 
 async function addItems(any: AnyList, list: AnyListShoppingList, items: InputItem[], isFavorite = false): Promise<object[]> {
@@ -381,40 +484,54 @@ async function addItems(any: AnyList, list: AnyListShoppingList, items: InputIte
 }
 
 async function deleteList(any: AnyList, list: AnyListShoppingList): Promise<object> {
-  const listOp = new any.protobuf.PBListOperation();
-  listOp.setMetadata({
-    operationId: uuid(),
-    handlerId: 'delete-list',
-  });
-  listOp.setListId(list.identifier);
-  listOp.setList({
+  const userData = await (any as AnyList & { _getUserData: (refresh?: boolean) => Promise<{
+    listFoldersResponse?: { listDataId?: string };
+    listSettingsResponse?: { settings?: Array<{ identifier?: string; listId?: string | null }> };
+  }> })._getUserData(true);
+  const userId = getAnyListUserId(any);
+  const listDataId = userData.listFoldersResponse?.listDataId;
+  const settingsId = userData.listSettingsResponse?.settings?.find(setting => setting.listId === list.identifier)?.identifier;
+  if (!listDataId || !settingsId) {
+    throw new Error(`AnyList did not return folder/settings metadata for list: ${list.name}`);
+  }
+
+  const folderItem = new any.protobuf.PBListFolderItem({
     identifier: list.identifier,
-    name: list.name,
-    items: list.items.map(item => item.toJSON()),
+    itemType: 0,
   });
-
-  const listOps = new any.protobuf.PBListOperationList();
-  listOps.setOperations([listOp]);
-
-  const listForm = new FormData();
-  listForm.append('operations', listOps.toBuffer());
-  await any.client.post('data/shopping-lists/update', { body: listForm });
-
-  const orderOp = new any.protobuf.PBOrderedShoppingListIDsOperation();
-  orderOp.setMetadata({
+  const folderOp = new any.protobuf.PBListFolderOperation();
+  folderOp.setMetadata({
     operationId: uuid(),
-    handlerId: 'set-ordered-shopping-list-ids',
+    handlerId: 'delete-folder-items',
+    userId,
+    operationClass: 0,
   });
-  orderOp.setOrderedListIds(any.lists
-    .filter(candidate => candidate.identifier !== list.identifier)
-    .map(candidate => candidate.identifier));
+  folderOp.setListDataId(listDataId);
+  folderOp.setFolderItems([folderItem]);
+  const folderOps = new any.protobuf.PBListFolderOperationList();
+  folderOps.setOperations([folderOp]);
+  const folderForm = new FormData();
+  folderForm.append('operations', folderOps.toBuffer());
+  await any.client.post('data/list-folders/update', { body: folderForm });
 
-  const orderOps = new any.protobuf.PBOrderedShoppingListIDsOperationList();
-  orderOps.setOperations([orderOp]);
-
-  const orderForm = new FormData();
-  orderForm.append('operations', orderOps.toBuffer());
-  await any.client.post('data/shopping-lists/update-ordered-ids', { body: orderForm });
+  const settings = new any.protobuf.PBListSettings({
+    identifier: settingsId,
+    userId,
+    listId: list.identifier,
+  });
+  const settingsOp = new any.protobuf.PBListSettingsOperation();
+  settingsOp.setMetadata({
+    operationId: uuid(),
+    handlerId: 'remove-list-settings',
+    userId,
+    operationClass: 0,
+  });
+  settingsOp.setUpdatedSettings(settings);
+  const settingsOps = new any.protobuf.PBListSettingsOperationList();
+  settingsOps.setOperations([settingsOp]);
+  const settingsForm = new FormData();
+  settingsForm.append('operations', settingsOps.toBuffer());
+  await any.client.post('data/list-settings/update', { body: settingsForm });
 
   await any.getLists(true);
   if (any.getListByName(list.name)) {

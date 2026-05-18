@@ -48,19 +48,38 @@ declare module 'anylist' {
     };
     protobuf: {
       PBListOperation: new () => {
-        setMetadata(metadata: { operationId: string; handlerId: string }): void;
+        setMetadata(metadata: Record<string, unknown>): void;
         setListId(listId: string): void;
-        setList(list: { identifier: string; name: string; items: unknown[] }): void;
+        setList(list: Record<string, unknown>): void;
       };
       PBListOperationList: new () => {
         setOperations(operations: unknown[]): void;
         toBuffer(): Buffer;
       };
       PBOrderedShoppingListIDsOperation: new () => {
-        setMetadata(metadata: { operationId: string; handlerId: string }): void;
+        setMetadata(metadata: Record<string, unknown>): void;
         setOrderedListIds(ids: string[]): void;
       };
       PBOrderedShoppingListIDsOperationList: new () => {
+        setOperations(operations: unknown[]): void;
+        toBuffer(): Buffer;
+      };
+      PBListFolderItem: new (item: Record<string, unknown>) => unknown;
+      PBListFolderOperation: new () => {
+        setMetadata(metadata: Record<string, unknown>): void;
+        setListDataId(listDataId: string): void;
+        setFolderItems(items: unknown[]): void;
+      };
+      PBListFolderOperationList: new () => {
+        setOperations(operations: unknown[]): void;
+        toBuffer(): Buffer;
+      };
+      PBListSettings: new (settings: Record<string, unknown>) => unknown;
+      PBListSettingsOperation: new () => {
+        setMetadata(metadata: Record<string, unknown>): void;
+        setUpdatedSettings(settings: unknown): void;
+      };
+      PBListSettingsOperationList: new () => {
         setOperations(operations: unknown[]): void;
         toBuffer(): Buffer;
       };
