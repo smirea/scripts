@@ -18,6 +18,8 @@ const require = createRequire(import.meta.url);
 const FormData = require('form-data') as typeof import('form-data');
 const uuid = require('anylist/lib/uuid') as () => string;
 const OUTPUT_FORMATS = ['pretty', 'json'] as const;
+const GROCERY_CATEGORY_GROUPING_ID = '576530859a13420390193a1c0a1e1a97';
+const DEFAULT_CATEGORY_ORDERING_ID = '446990dd03bc431685a00c4d83eb8b46';
 
 console.info = (...args: unknown[]) => console.error(...args);
 
@@ -67,10 +69,22 @@ interface CreateShoppingListOptions {
 interface AnyListCategory {
   identifier: string;
   name: string;
-  categoryMatchId: string;
+  categoryMatchId?: string;
+  systemCategory?: string;
 }
 
 interface AnyListUserData {
+  shoppingListsResponse?: {
+    listResponses?: Array<{
+      listId?: string;
+      categoryGroupResponses?: Array<{
+        categoryGroup?: {
+          identifier?: string;
+          categories?: AnyListCategory[];
+        };
+      }>;
+    }>;
+  };
   userCategoriesResponse?: {
     categories?: AnyListCategory[];
   };
@@ -545,6 +559,7 @@ async function getCategoryContext(any: AnyList, listId: string): Promise<{
   listCategoryGroupId: string;
   categories: Map<string, AnyListCategory>;
 }> {
+  await ensureGroceryCategorySettings(any, listId);
   const userData = await (any as AnyList & {
     _getUserData: (refresh?: boolean) => Promise<AnyListUserData>;
   })._getUserData(true);
@@ -554,13 +569,68 @@ async function getCategoryContext(any: AnyList, listId: string): Promise<{
   if (!listCategoryGroupId) {
     throw new Error(`AnyList did not return a category group for list: ${listId}`);
   }
+  const listCategoryGroup = userData.shoppingListsResponse?.listResponses
+    ?.find(response => response.listId === listId)
+    ?.categoryGroupResponses
+    ?.map(response => response.categoryGroup)
+    .find(group => group?.identifier === listCategoryGroupId);
+  const categories = listCategoryGroup?.categories ?? [];
+  if (categories.length <= 1) {
+    throw new Error(`AnyList did not return grocery categories for list: ${listId}`);
+  }
 
   return {
     userId: getAnyListUserId(any),
     listCategoryGroupId,
-    categories: new Map((userData.userCategoriesResponse?.categories ?? [])
-      .map(category => [category.categoryMatchId, category])),
+    categories: new Map(categories
+      .filter(category => category.systemCategory)
+      .map(category => [category.systemCategory as string, category])),
   };
+}
+
+async function ensureGroceryCategorySettings(any: AnyList, listId: string): Promise<void> {
+  await setListSetting(any, listId, 'set-category-grouping-id', {
+    categoryGroupingId: GROCERY_CATEGORY_GROUPING_ID,
+  });
+  await setListSetting(any, listId, 'set-selected-category-ordering', {
+    selectedCategoryOrdering: DEFAULT_CATEGORY_ORDERING_ID,
+  });
+  await setListSetting(any, listId, 'set-should-hide-categories', {
+    shouldHideCategories: false,
+  });
+  await setListSetting(any, listId, 'set-should-remember-item-categories', {
+    shouldRememberItemCategories: true,
+  });
+  await setListSetting(any, listId, 'set-list-item-sort-order', {
+    listItemSortOrder: 'ALListItemSortOrderManual',
+  });
+}
+
+async function setListSetting(any: AnyList, listId: string, handlerId: string, patch: Record<string, unknown>): Promise<void> {
+  const userData = await (any as AnyList & {
+    _getUserData: (refresh?: boolean) => Promise<AnyListUserData>;
+  })._getUserData(true);
+  const settings = userData.listSettingsResponse?.settings?.find(setting => setting.listId === listId);
+  if (!settings?.identifier) {
+    throw new Error(`AnyList did not return settings for list: ${listId}`);
+  }
+
+  const op = new any.protobuf.PBListSettingsOperation();
+  op.setMetadata({
+    operationId: uuid(),
+    handlerId,
+    userId: getAnyListUserId(any),
+    operationClass: 0,
+  });
+  op.setUpdatedSettings(new any.protobuf.PBListSettings({
+    ...settings,
+    ...patch,
+  }));
+  const ops = new any.protobuf.PBListSettingsOperationList();
+  ops.setOperations([op]);
+  const form = new FormData();
+  form.append('operations', ops.toBuffer());
+  await any.client.post('data/list-settings/update', { body: form });
 }
 
 async function addCategorizedItem(
@@ -588,9 +658,9 @@ async function addCategorizedItem(
     name: input.name,
     details: input.description,
     checked: false,
-    category: category.categoryMatchId,
+    category: input.categoryMatchId,
     userId: context.userId,
-    categoryMatchId: category.categoryMatchId,
+    categoryMatchId: input.categoryMatchId,
     categoryAssignments: [{
       identifier: assignmentId,
       categoryGroupId: context.listCategoryGroupId,
@@ -626,7 +696,7 @@ async function addCategorizedItem(
     details: input.description,
     quantity: input.serving,
     checked: false,
-    categoryMatchId: category.categoryMatchId,
+    categoryMatchId: input.categoryMatchId,
   };
 }
 
