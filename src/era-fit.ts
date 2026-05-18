@@ -23,6 +23,7 @@ const BASE_URL = 'https://app.erafit.com';
 const SOURCE_PATH = 'api://era-fit/nutrition';
 const DEFAULT_DASHBOARD_PATH = '/clients/dashboard';
 const DEFAULT_DAYS = 1;
+const API_RETRY_ATTEMPTS = 3;
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
@@ -67,6 +68,20 @@ const FOOD_COLUMNS = [
   'protein',
   'net_carbs',
   'fat',
+] as const;
+const TEMPLATE_COLUMNS = [
+  'id',
+  'title',
+  'type',
+  'unit',
+  'body_composition_goal',
+  'calories',
+  'protein',
+  'net_carbs',
+  'fat',
+  'protein_setting',
+  'net_carbs_setting',
+  'fat_setting',
 ] as const;
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
 const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
@@ -241,6 +256,9 @@ interface EraFitTemplateSummary {
   protein: number | null;
   net_carbs: number | null;
   fat: number | null;
+  protein_setting: string | null;
+  net_carbs_setting: string | null;
+  fat_setting: string | null;
 }
 
 interface ResolvedDateWindow {
@@ -474,13 +492,14 @@ async function fetchEraFitReport(
 ): Promise<EraFitReport> {
   const globals = await fetchMealTrackingGlobals(session);
   const dates = listDateKeysBetween(options.window.start, options.window.end);
-  const dayPayloads = await Promise.all(
-    dates.map(async date => ({
+  const dayPayloads: Array<{ date: string; dateId: string; payload: EraFitDayPayload }> = [];
+  for (const date of dates) {
+    dayPayloads.push({
       date,
       dateId: formatEraFitDateId(parseLocalDate(date, 'date')),
       payload: await fetchMealTrackingDay(session, date),
-    }))
-  );
+    });
+  }
   const dailyOverview = dayPayloads
     .map(day => buildDailyOverviewRecord(day.date, day.dateId, day.payload, globals))
     .sort((a, b) => b.date.localeCompare(a.date));
@@ -542,27 +561,42 @@ async function postApi<T>(
   apiPath: string,
   data: Record<string, string | number>
 ): Promise<T> {
-  const response = await fetchUrl(apiPath, {
-    method: 'POST',
-    redirect: 'manual',
-    headers: {
-      Cookie: session.cookieHeader,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'X-Requested-With': 'XMLHttpRequest',
-      Origin: BASE_URL,
-      Referer: `${BASE_URL}/clients/nutrition/food-pictures`,
-    },
-    body: new URLSearchParams(Object.fromEntries(Object.entries(data).map(([key, value]) => [key, String(value)]))),
-  });
-  const responseText = await response.text();
-  if (!response.ok) {
-    throw new Error(`Era Fit API request failed: ${response.status} ${response.statusText} (${apiPath})`);
+  for (let attempt = 1; attempt <= API_RETRY_ATTEMPTS; attempt += 1) {
+    const response = await fetchUrl(apiPath, {
+      method: 'POST',
+      redirect: 'manual',
+      headers: {
+        Cookie: session.cookieHeader,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest',
+        Origin: BASE_URL,
+        Referer: `${BASE_URL}/clients/nutrition/food-pictures`,
+      },
+      body: new URLSearchParams(Object.fromEntries(Object.entries(data).map(([key, value]) => [key, String(value)]))),
+    });
+    const responseText = await response.text();
+    if (!response.ok) {
+      if (isRetryableStatus(response.status) && attempt < API_RETRY_ATTEMPTS) {
+        await delay(attempt * 750);
+        continue;
+      }
+      throw new Error(`Era Fit API request failed: ${response.status} ${response.statusText} (${apiPath})`);
+    }
+    const json = parseApiResponse<T>(responseText, apiPath);
+    if (json.ret_code !== 200 || json.ret_data == null) {
+      throw new Error(`Era Fit API request failed: ${json.ret_msg ?? responseText.slice(0, 500)} (${apiPath})`);
+    }
+    return json.ret_data;
   }
-  const json = parseApiResponse<T>(responseText, apiPath);
-  if (json.ret_code !== 200 || json.ret_data == null) {
-    throw new Error(`Era Fit API request failed: ${json.ret_msg ?? responseText.slice(0, 500)} (${apiPath})`);
-  }
-  return json.ret_data;
+  throw new Error(`Era Fit API request failed after ${API_RETRY_ATTEMPTS} attempts (${apiPath})`);
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function parseApiResponse<T>(text: string, apiPath: string): EraFitApiResponse<T> {
@@ -814,7 +848,17 @@ function summarizeTemplate(template: EraFitTemplate, baseTdee: number | null): E
     protein: targets.protein,
     net_carbs: targets.netCarbs,
     fat: targets.fat,
+    protein_setting: formatTemplateMacroSetting(template.unit, template.protein_grams, template.protein_percent),
+    net_carbs_setting: formatTemplateMacroSetting(template.unit, template.net_carbs_grams, template.net_carbs_percent),
+    fat_setting: formatTemplateMacroSetting(template.unit, template.fat_grams, template.fat_percent),
   };
+}
+
+function formatTemplateMacroSetting(unit: string, grams: number | null, percent: number | null): string | null {
+  if (unit === '%') {
+    return percent == null ? null : `${formatNumber(percent)}%`;
+  }
+  return grams == null ? null : `${formatNumber(grams)}g`;
 }
 
 function renderOutput(options: {
@@ -885,6 +929,10 @@ function renderTable(report: EraFitReport): void {
     process.stdout.write('\nLogged Foods\n');
     renderTableRecords(toFoodCsvRows(report));
   }
+  if (report.templates.length > 0) {
+    process.stdout.write('\nMacro Templates\n');
+    renderTableRecords(toTemplateCsvRows(report));
+  }
 }
 
 function renderFullCsv(report: EraFitReport): string {
@@ -896,6 +944,10 @@ function renderFullCsv(report: EraFitReport): string {
     {
       name: 'logged_foods',
       csv: renderCsvRecords(toFoodCsvRows(report), FOOD_COLUMNS),
+    },
+    {
+      name: 'macro_templates',
+      csv: renderCsvRecords(toTemplateCsvRows(report), TEMPLATE_COLUMNS),
     },
   ].map(section => `\n==== ${section.name} ===\n${section.csv}`).join('');
 }
@@ -935,6 +987,23 @@ function toFoodCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
     protein: food.protein,
     net_carbs: food.net_carbs,
     fat: food.fat,
+  }));
+}
+
+function toTemplateCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
+  return report.templates.map(template => ({
+    id: template.id,
+    title: template.title,
+    type: template.type,
+    unit: template.unit,
+    body_composition_goal: template.body_composition_goal,
+    calories: template.calories,
+    protein: template.protein,
+    net_carbs: template.net_carbs,
+    fat: template.fat,
+    protein_setting: template.protein_setting,
+    net_carbs_setting: template.net_carbs_setting,
+    fat_setting: template.fat_setting,
   }));
 }
 
