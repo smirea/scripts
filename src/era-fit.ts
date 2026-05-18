@@ -397,18 +397,9 @@ interface ResolvedDateWindow {
 interface OutputCliArgs {
   format: string;
   output?: string;
-  pretty: boolean;
 }
 
-interface SharedCliArgs {
-  checkAuth: boolean;
-  dashboardPath: string;
-  saveSession: boolean;
-  login: boolean;
-  prompt: boolean;
-}
-
-interface LogCliArgs extends SharedCliArgs, OutputCliArgs {
+interface LogCliArgs extends OutputCliArgs {
   date?: string;
   days: number;
   start?: string;
@@ -416,7 +407,7 @@ interface LogCliArgs extends SharedCliArgs, OutputCliArgs {
   limit?: number;
 }
 
-interface MealPlanCliArgs extends SharedCliArgs, OutputCliArgs {}
+interface MealPlanCliArgs extends OutputCliArgs {}
 
 class CookieJar {
   private readonly cookies = new Map<string, string>();
@@ -476,43 +467,15 @@ async function runCliWithErrorFormatting(): Promise<void> {
 }
 
 async function runCli(): Promise<void> {
-  await addSharedOptions(yargs(hideBin(process.argv)))
+  await yargs(hideBin(process.argv))
     .scriptName('era-fit')
+    .version(false)
     .strict()
     .command('$0', 'Print daily macro log', addLogOptions, runLogCommand)
     .command('log', 'Print daily macro log', addLogOptions, runLogCommand)
     .command('mealplan', 'Print the weekly suggested meal plan and aggregate shopping list', addMealPlanOptions, runMealPlanCommand)
     .help()
     .parseAsync();
-}
-
-function addSharedOptions<T>(parser: Argv<T>): Argv<T & SharedCliArgs> {
-  return parser
-    .option('check-auth', {
-      type: 'boolean',
-      default: false,
-      describe: 'Only check whether the stored session or credentials can authenticate',
-    })
-    .option('dashboard-path', {
-      type: 'string',
-      default: DEFAULT_DASHBOARD_PATH,
-      describe: 'Era Fit path to use when checking whether the session is authenticated',
-    })
-    .option('save-session', {
-      type: 'boolean',
-      default: true,
-      describe: `Persist successful ${SESSION_ENV_KEY} to .env.local`,
-    })
-    .option('login', {
-      type: 'boolean',
-      default: true,
-      describe: `Use ${CREDENTIALS_ENV_KEY} when the stored session is missing or invalid`,
-    })
-    .option('prompt', {
-      type: 'boolean',
-      default: true,
-      describe: 'Prompt for Era Fit credentials when env credentials are not set',
-    }) as unknown as Argv<T & SharedCliArgs>;
 }
 
 function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
@@ -528,11 +491,6 @@ function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<
       alias: ['o'],
       type: 'string',
       describe: 'Write output to this file path',
-    })
-    .option('pretty', {
-      type: 'boolean',
-      default: true,
-      describe: 'Pretty-print JSON output',
     }) as unknown as Argv<T & OutputCliArgs>;
 }
 
@@ -573,16 +531,7 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
   }
 
   const format = parseOutputFormat(args.format);
-  const session = await resolveCliSession(args);
-  if (args.checkAuth) {
-    renderAuthResult({
-      session,
-      format,
-      outputPath: args.output,
-      pretty: args.pretty,
-    });
-    return;
-  }
+  const session = await resolveSession();
 
   const window = resolveDateWindow({
     days: args.days,
@@ -599,50 +548,25 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
     report,
     format,
     outputPath: args.output,
-    pretty: args.pretty,
   });
 }
 
 async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
   const format = parseOutputFormat(args.format);
-  const session = await resolveCliSession(args);
-  if (args.checkAuth) {
-    renderAuthResult({
-      session,
-      format,
-      outputPath: args.output,
-      pretty: args.pretty,
-    });
-    return;
-  }
+  const session = await resolveSession();
 
   const mealPlan = await fetchEraFitMealPlan(session);
   renderMealPlanOutput({
     report: mealPlan,
     format,
     outputPath: args.output,
-    pretty: args.pretty,
   });
 }
 
-async function resolveCliSession(args: ArgumentsCamelCase<SharedCliArgs>): Promise<EraFitSession> {
-  return resolveSession({
-    dashboardPath: normalizePath(args.dashboardPath),
-    login: args.login,
-    prompt: args.prompt,
-    saveSession: args.saveSession,
-  });
-}
-
-async function resolveSession(options: {
-  dashboardPath: string;
-  login: boolean;
-  prompt: boolean;
-  saveSession: boolean;
-}): Promise<EraFitSession> {
+async function resolveSession(): Promise<EraFitSession> {
   const existingSession = normalizeOptionalString(env.ERA_FIT_SESSION_COOKIE);
   if (existingSession) {
-    const sessionCheck = await checkDashboard(existingSession, options.dashboardPath);
+    const sessionCheck = await checkDashboard(existingSession, DEFAULT_DASHBOARD_PATH);
     const app = parseAppCookie(existingSession);
     if (sessionCheck.ok && app) {
       return {
@@ -651,28 +575,31 @@ async function resolveSession(options: {
         dashboard: sessionCheck,
       };
     }
-    if (!options.login) {
-      const reason = !sessionCheck.ok
-        ? `${SESSION_ENV_KEY} did not load ${options.dashboardPath}: ${sessionCheck.reason}`
-        : `${SESSION_ENV_KEY} is missing _ef_app_ck_data, which is needed for the nutrition API.`;
-      throw new Error(reason);
+    const reason = !sessionCheck.ok
+      ? sessionCheck.reason
+      : 'missing _ef_app_ck_data, which is needed for the nutrition API';
+    console.warn(`${SESSION_ENV_KEY} is present but not usable: ${reason}`);
+  }
+
+  const envCredentials = parseCredentialsForLogin(env.ERA_FIT_CREDENTIALS);
+  if (envCredentials) {
+    try {
+      return await loginAndSaveSession(envCredentials);
+    } catch (error) {
+      console.warn(`${CREDENTIALS_ENV_KEY} did not work: ${error instanceof Error ? error.message : String(error)}`);
     }
-    console.warn(`${SESSION_ENV_KEY} is present but not usable: ${sessionCheck.reason}`);
   }
 
-  if (!options.login) {
-    throw new Error(`${SESSION_ENV_KEY} is not set, so there is no stored session to test.`);
-  }
+  return loginAndSaveSession(await promptCredentials());
+}
 
-  const credentials = parseOptionalCredentials(env.ERA_FIT_CREDENTIALS) ?? await promptCredentials(options.prompt);
-  const loginResult = await login(credentials, options.dashboardPath);
+async function loginAndSaveSession(credentials: Credentials): Promise<EraFitSession> {
+  const loginResult = await login(credentials, DEFAULT_DASHBOARD_PATH);
   const app = parseAppCookie(loginResult.cookieHeader);
   if (!app) {
     throw new Error('Era Fit login succeeded, but the app cookie needed for nutrition API calls was not set.');
   }
-  if (options.saveSession) {
-    saveEnvLocalValue(SESSION_ENV_KEY, loginResult.cookieHeader);
-  }
+  saveEnvLocalValue(SESSION_ENV_KEY, loginResult.cookieHeader);
 
   return {
     cookieHeader: loginResult.cookieHeader,
@@ -1668,14 +1595,13 @@ function renderMealPlanOutput(options: {
   report: EraFitMealPlanReport;
   format: OutputFormat;
   outputPath?: string;
-  pretty: boolean;
 }): void {
-  const text = options.format === 'json'
-    ? `${JSON.stringify(options.report, null, options.pretty ? 2 : 0)}\n`
-    : renderMealPlanText(options.report);
   if (options.format !== 'table' && options.format !== 'json') {
     throw new Error('The mealplan command supports --format=table or --format=json.');
   }
+  const text = options.format === 'json'
+    ? `${JSON.stringify(options.report, null, 2)}\n`
+    : renderMealPlanText(options.report);
   if (options.outputPath) {
     writeFileSync(path.resolve(options.outputPath), text, 'utf8');
     return;
@@ -1841,7 +1767,6 @@ function renderOutput(options: {
   report: EraFitReport;
   format: OutputFormat;
   outputPath?: string;
-  pretty: boolean;
 }): void {
   if (options.format === 'table') {
     if (options.outputPath) {
@@ -1853,7 +1778,7 @@ function renderOutput(options: {
 
   const text = (() => {
     if (options.format === 'json') {
-      return `${JSON.stringify(options.report, null, options.pretty ? 2 : 0)}\n`;
+      return `${JSON.stringify(options.report, null, 2)}\n`;
     }
     if (options.format === 'csv:full') {
       return renderFullCsv(options.report);
@@ -1868,34 +1793,6 @@ function renderOutput(options: {
     return;
   }
   process.stdout.write(text);
-}
-
-function renderAuthResult(options: {
-  session: EraFitSession;
-  format: OutputFormat;
-  outputPath?: string;
-  pretty: boolean;
-}): void {
-  const result = {
-    status: 'session-valid',
-    message: `${SESSION_ENV_KEY} can load ${options.session.dashboard.title ?? DEFAULT_DASHBOARD_PATH} and exposes Era Fit API client metadata.`,
-    clientId: options.session.app.id_app,
-    dashboard: options.session.dashboard,
-  };
-
-  if (options.format === 'json') {
-    const text = `${JSON.stringify(result, null, options.pretty ? 2 : 0)}\n`;
-    if (options.outputPath) {
-      writeFileSync(path.resolve(options.outputPath), text, 'utf8');
-      return;
-    }
-    process.stdout.write(text);
-    return;
-  }
-  if (options.outputPath) {
-    throw new Error('--output is only supported with --check-auth when --format=json is used.');
-  }
-  console.log(result.message);
 }
 
 function renderTable(report: EraFitReport): void {
@@ -2143,12 +2040,9 @@ function evpBytesToKey(password: string, salt: Buffer, keyLength: number, ivLeng
   };
 }
 
-async function promptCredentials(allowPrompt: boolean): Promise<Credentials> {
-  if (!allowPrompt) {
-    throw new Error(`${CREDENTIALS_ENV_KEY} is not set. Expected <email>:<password>.`);
-  }
+async function promptCredentials(): Promise<Credentials> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error(`${CREDENTIALS_ENV_KEY} is not set and this shell is not interactive enough to prompt.`);
+    throw new Error(`Era Fit needs credentials, but this shell is not interactive enough to prompt.`);
   }
 
   const email = await text({
@@ -2176,6 +2070,15 @@ async function promptCredentials(allowPrompt: boolean): Promise<Credentials> {
     email: emailValue,
     password: passwordValue,
   };
+}
+
+function parseCredentialsForLogin(value: string | undefined): Credentials | null {
+  try {
+    return parseOptionalCredentials(value);
+  } catch (error) {
+    console.warn(`${CREDENTIALS_ENV_KEY} is not usable: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
 }
 
 function parseOptionalCredentials(value: string | undefined): Credentials | null {
