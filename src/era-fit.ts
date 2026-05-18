@@ -5,6 +5,7 @@ import path from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 
 import { isCancel, password, text } from '@clack/prompts';
+import chalk from 'chalk';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
@@ -348,10 +349,21 @@ interface EraFitMealPlanFoodItem {
 
 interface EraFitShoppingListItem {
   name: string;
-  quantity: number | null;
-  unit: string | null;
-  count: number;
+  quantity: string;
+  meals: number;
+  occurrences: number;
   servings: string[];
+}
+
+interface ShoppingFoodUse {
+  food: EraFitMealPlanFoodItem;
+  mealId: string;
+}
+
+interface ShoppingMeasure {
+  quantity: number;
+  unit: string;
+  priority: number;
 }
 
 interface EraFitMacroTotals {
@@ -1345,31 +1357,233 @@ function sumMacroTotals(values: EraFitMacroTotals[]): EraFitMacroTotals {
 }
 
 function buildShoppingList(days: EraFitMealPlanDay[]): EraFitShoppingListItem[] {
-  const items = new Map<string, EraFitShoppingListItem>();
-  for (const food of days.flatMap(day => day.meals.flatMap(meal => meal.items))) {
-    const key = `${normalizeShoppingName(food.name)}:${food.unit ?? ''}`;
-    const existing = items.get(key);
-    if (existing) {
-      existing.count += 1;
-      existing.quantity = existing.quantity != null && food.amount != null ? roundNumber(existing.quantity + food.amount) : null;
-      if (food.serving && !existing.servings.includes(food.serving)) {
-        existing.servings.push(food.serving);
+  const grouped = new Map<string, ShoppingFoodUse[]>();
+  for (const day of days) {
+    for (const meal of day.meals) {
+      const mealId = `${day.day_tag}:${meal.meal_key}`;
+      for (const food of meal.items) {
+        const key = normalizeShoppingName(food.name);
+        grouped.set(key, [...(grouped.get(key) ?? []), { food, mealId }]);
       }
-      continue;
     }
-    items.set(key, {
-      name: food.name,
-      quantity: food.amount,
-      unit: food.unit,
-      count: 1,
-      servings: food.serving ? [food.serving] : [],
-    });
   }
-  return Array.from(items.values()).sort((a, b) => a.name.localeCompare(b.name));
+
+  return Array.from(grouped.values())
+    .map(uses => {
+      const servings = uniqueStrings(uses.map(use => use.food.serving).filter((value): value is string => value != null));
+      return {
+        name: uses[0].food.name,
+        quantity: formatShoppingQuantity(uses),
+        meals: new Set(uses.map(use => use.mealId)).size,
+        occurrences: uses.length,
+        servings,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function normalizeShoppingName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function formatShoppingQuantity(uses: ShoppingFoodUse[]): string {
+  const inferred = inferShoppingMeasures(uses);
+  const best = chooseBestShoppingMeasure(inferred);
+  if (best) {
+    return formatShoppingMeasure(best);
+  }
+  const grams = sumNumbers(uses.map(use => use.food.unit === 'g' ? use.food.amount : null));
+  return grams > 0 ? `${formatNumber(grams)} g` : `${uses.length}x`;
+}
+
+function inferShoppingMeasures(uses: ShoppingFoodUse[]): ShoppingMeasure[] {
+  const parsedMeasures = uses.map(use => ({
+    use,
+    measure: parseShoppingMeasure(use.food),
+  }));
+  const ratioByGram = new Map<string, ShoppingMeasure>();
+  for (const { use, measure } of parsedMeasures) {
+    if (!measure || use.food.amount == null || use.food.unit !== 'g' || use.food.amount <= 0) {
+      continue;
+    }
+    const key = `${use.food.amount}:${use.food.unit}`;
+    if (!ratioByGram.has(key) || measure.priority < ratioByGram.get(key)!.priority) {
+      ratioByGram.set(key, measure);
+    }
+  }
+  return parsedMeasures.map(({ use, measure }) => {
+    if (use.food.amount != null && use.food.unit === 'g') {
+      const inferred = ratioByGram.get(`${use.food.amount}:${use.food.unit}`);
+      if (inferred && (!measure || inferred.priority < measure.priority)) {
+        return inferred;
+      }
+    }
+    if (measure) {
+      return measure;
+    }
+    if (use.food.amount != null && use.food.unit === 'g') {
+      return {
+        quantity: use.food.amount,
+        unit: 'g',
+        priority: 50,
+      };
+    }
+    return null;
+  }).filter((measure): measure is ShoppingMeasure => measure != null);
+}
+
+function parseShoppingMeasure(food: EraFitMealPlanFoodItem): ShoppingMeasure | null {
+  const candidates = [food.serving, food.description, food.description?.split(':').at(-1) ?? null]
+    .filter((value): value is string => value != null);
+  for (const value of candidates) {
+    const measure = parseShoppingMeasureText(value, food.name);
+    if (measure) {
+      return measure;
+    }
+  }
+  return null;
+}
+
+function parseShoppingMeasureText(value: string, foodName: string): ShoppingMeasure | null {
+  const match = value.trim().match(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*([A-Za-z%]+)?/);
+  if (!match) {
+    return null;
+  }
+  const quantity = parseQuantity(match[1]);
+  if (quantity == null) {
+    return null;
+  }
+  const rest = value.trim().slice(match[0].length).trim();
+  const unit = canonicalShoppingUnit(match[2], rest, foodName);
+  if (!unit) {
+    return null;
+  }
+  return {
+    quantity,
+    unit,
+    priority: shoppingUnitPriority(unit),
+  };
+}
+
+function canonicalShoppingUnit(rawUnit: string | undefined, rest: string, foodName: string): string | null {
+  const unit = rawUnit?.toLowerCase();
+  if (unit && ['g', 'gram', 'grams'].includes(unit)) {
+    return 'g';
+  }
+  if (unit && ['oz', 'ounce', 'ounces'].includes(unit)) {
+    return 'oz';
+  }
+  if (unit && ['cup', 'cups'].includes(unit)) {
+    return 'cups';
+  }
+  if (unit && ['tbsp', 'tablespoon', 'tablespoons'].includes(unit)) {
+    return 'tbsp';
+  }
+  if (unit && ['tsp', 'teaspoon', 'teaspoons'].includes(unit)) {
+    return 'tsp';
+  }
+  if (unit && ['slice', 'slices'].includes(unit)) {
+    return 'slices';
+  }
+  if (unit && ['scoop', 'scoops'].includes(unit)) {
+    return 'scoops';
+  }
+  if (unit && ['packet', 'packets'].includes(unit)) {
+    return 'packets';
+  }
+  if (unit && ['spear', 'spears'].includes(unit)) {
+    return 'spears';
+  }
+  const restLower = `${unit ?? ''} ${rest}`.trim().toLowerCase();
+  const nameLower = foodName.toLowerCase();
+  if (/^(large|medium|small)\s+/.test(restLower)) {
+    if (nameLower.includes('egg white')) {
+      return 'egg whites';
+    }
+    if (nameLower.includes('egg')) {
+      return 'eggs';
+    }
+    if (nameLower.includes('banana')) {
+      return 'bananas';
+    }
+    if (nameLower.includes('avocado')) {
+      return 'avocados';
+    }
+  }
+  return null;
+}
+
+function shoppingUnitPriority(unit: string): number {
+  if (['eggs', 'egg whites', 'bananas', 'avocados', 'slices', 'spears', 'scoops', 'packets'].includes(unit)) {
+    return 10;
+  }
+  if (['cups', 'tbsp', 'tsp', 'oz'].includes(unit)) {
+    return 20;
+  }
+  return 50;
+}
+
+function chooseBestShoppingMeasure(measures: ShoppingMeasure[]): ShoppingMeasure | null {
+  if (measures.length === 0) {
+    return null;
+  }
+  const normalized = measures.map(normalizeShoppingMeasureUnit);
+  const bestUnit = normalized.reduce((best, measure) => measure.priority < best.priority ? measure : best).unit;
+  const matching = normalized.filter(measure => measure.unit === bestUnit);
+  return {
+    quantity: roundNumber(sumNumbers(matching.map(measure => measure.quantity))),
+    unit: bestUnit,
+    priority: matching[0].priority,
+  };
+}
+
+function normalizeShoppingMeasureUnit(measure: ShoppingMeasure): ShoppingMeasure {
+  if (measure.unit === 'tsp') {
+    return {
+      quantity: measure.quantity / 3,
+      unit: 'tbsp',
+      priority: shoppingUnitPriority('tbsp'),
+    };
+  }
+  return measure;
+}
+
+function formatShoppingMeasure(measure: ShoppingMeasure): string {
+  const unit = measure.unit === 'g' || measure.unit === 'oz' || measure.quantity !== 1
+    ? measure.unit
+    : singularShoppingUnit(measure.unit);
+  return `${formatNumber(roundNumber(measure.quantity))} ${unit}`;
+}
+
+function singularShoppingUnit(unit: string): string {
+  const singulars: Record<string, string> = {
+    eggs: 'egg',
+    'egg whites': 'egg white',
+    bananas: 'banana',
+    avocados: 'avocado',
+    slices: 'slice',
+    spears: 'spear',
+    scoops: 'scoop',
+    packets: 'packet',
+    cups: 'cup',
+  };
+  return singulars[unit] ?? unit;
+}
+
+function parseQuantity(value: string): number | null {
+  const normalized = value.replace(/\s+/g, '');
+  if (normalized.includes('/')) {
+    const [numerator, denominator] = normalized.split('/').map(Number);
+    return Number.isFinite(numerator) && Number.isFinite(denominator) && denominator !== 0
+      ? numerator / denominator
+      : null;
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
 }
 
 function parseDataArrayAttribute(value: string): unknown | null {
@@ -1404,41 +1618,39 @@ function renderMealPlanOutput(options: {
 }
 
 function renderMealPlanText(report: EraFitMealPlanReport): string {
-  const lines: string[] = ['Weekly Meal Plan', ''];
+  const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
   for (const day of report.days) {
     const planned = formatMacros(day.planned);
     const target = formatMacros(day.targets);
-    lines.push(`${day.day} (${day.template})`);
-    lines.push(`  Planned: ${planned} | Target: ${target}`);
+    lines.push(`${chalk.bold(day.day)} ${chalk.gray(`(${day.template})`)}`);
+    lines.push(`  ${chalk.bold('Planned:')} ${planned} ${chalk.gray('|')} ${chalk.bold('Target:')} ${target}`);
     if (day.meals.length === 0) {
-      lines.push('  No suggested meals.');
+      lines.push(chalk.gray('  No suggested meals.'));
       lines.push('');
       continue;
     }
     for (const meal of day.meals) {
-      lines.push(`  ${meal.time ? `${formatMealPlanTime(meal.time)} ` : ''}${meal.meal}: ${formatMacros(meal.macros)}`);
+      lines.push(`  ${chalk.gray(meal.time ? `${formatMealPlanTime(meal.time)} ` : '')}${chalk.bold(meal.meal)}: ${formatMacros(meal.macros)}`);
       if (meal.recipe) {
-        lines.push(`    Recipe: ${meal.recipe}`);
+        lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
       }
       for (const item of meal.items) {
-        lines.push(`    ${padEnd(item.name, 28)} ${padEnd(item.serving ?? '', 18)} ${formatMacros(item)}`);
+        lines.push(`    ${padEnd(item.name, 28)} ${chalk.cyan(padEnd(item.serving ?? '', 18))} ${formatMacros(item)}`);
         if (item.description && item.description !== item.name && item.description !== item.serving) {
-          lines.push(`      ${item.description}`);
+          lines.push(chalk.gray(`      ${item.description}`));
         }
       }
     }
     lines.push('');
   }
-  lines.push('Shopping List');
+  lines.push(chalk.bold('Shopping List'));
   if (report.shoppingList.length === 0) {
-    lines.push('  No ingredients found.');
+    lines.push(chalk.gray('  No ingredients found.'));
   } else {
+    lines.push(`  ${chalk.gray(`${padEnd('item', 32)} ${padEnd('qty', 14)} ${padEnd('meals', 5)} servings`)}`);
     for (const item of report.shoppingList) {
-      const quantity = item.quantity == null || !item.unit
-        ? `${item.count}x`
-        : `${formatNumber(item.quantity)} ${item.unit}`;
       const servings = item.servings.length > 0 ? ` (${item.servings.join(', ')})` : '';
-      lines.push(`  ${padEnd(item.name, 32)} ${quantity}${servings}`);
+      lines.push(`  ${padEnd(item.name, 32)} ${chalk.cyan(padEnd(item.quantity, 14))} ${padEnd(String(item.meals), 5)}${chalk.gray(servings)}`);
     }
   }
   return `${lines.join('\n')}\n`;
@@ -1446,10 +1658,10 @@ function renderMealPlanText(report: EraFitMealPlanReport): string {
 
 function formatMacros(value: EraFitMacroTotals): string {
   return [
-    `${formatNullableNumber(value.calories)} kcal`,
-    `P ${formatNullableNumber(value.protein)}g`,
-    `C ${formatNullableNumber(value.net_carbs)}g`,
-    `F ${formatNullableNumber(value.fat)}g`,
+    chalk.blue(`${formatNullableNumber(value.calories)} kcal`),
+    chalk.red(`P ${formatNullableNumber(value.protein)}g`),
+    chalk.yellow(`C ${formatNullableNumber(value.net_carbs)}g`),
+    chalk.magenta(`F ${formatNullableNumber(value.fat)}g`),
   ].join(' | ');
 }
 
