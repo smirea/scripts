@@ -42,6 +42,7 @@ declare module 'anylist' {
 
   export default class AnyList {
     lists: AnyListShoppingList[];
+    favoriteItems: AnyListShoppingList[];
     client: {
       post(path: string, options: { body: unknown }): Promise<{ statusCode: number }>;
     };
@@ -69,6 +70,7 @@ declare module 'anylist' {
     teardown(): void;
     getLists(refreshCache?: boolean): Promise<AnyListShoppingList[]>;
     getListByName(name: string): AnyListShoppingList | undefined;
+    getFavoriteItemsByListId(identifier: string): AnyListShoppingList | undefined;
     createItem(item: AnyListItemInput): AnyListItem;
   }
 }

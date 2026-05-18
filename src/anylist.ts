@@ -108,6 +108,73 @@ async function runCli(): Promise<void> {
         any.teardown();
       }
     })
+    .command('favorite <command>', 'Manage favorite items', builder =>
+      builder
+        .command('list [list]', 'Print favorite items', favoriteBuilder =>
+          favoriteBuilder.positional('list', {
+            type: 'string',
+            describe: 'AnyList shopping list id or name',
+          }), async args => {
+          const any = await login();
+          try {
+            await any.getLists();
+            const output = args.list
+              ? formatFavoriteList(any, getFavoriteList(any, getListFromCache(any, args.list)))
+              : any.lists.map(list => formatFavoriteList(any, getFavoriteList(any, list)));
+            printOutput(output, parseOutputFormat(args.format));
+          } finally {
+            any.teardown();
+          }
+        })
+        .command('set <list>', 'Replace favorite items from stdin', favoriteBuilder =>
+          favoriteBuilder.positional('list', {
+            type: 'string',
+            demandOption: true,
+            describe: 'AnyList shopping list id or name',
+          }), async args => {
+          const items = await readInputItems();
+          const any = await login();
+          try {
+            await any.getLists();
+            const list = getListFromCache(any, args.list);
+            const favorites = getFavoriteList(any, list);
+            const existingItems = favorites.items.slice();
+            for (const item of existingItems) {
+              await favorites.removeItem(item, true);
+            }
+            const added = await addItems(any, favorites, items, true);
+            printOutput({ list: list.name, removed: existingItems.length, added }, parseOutputFormat(args.format));
+          } finally {
+            any.teardown();
+          }
+        })
+        .command('remove <list>', 'Remove favorite items by stdin name', favoriteBuilder =>
+          favoriteBuilder.positional('list', {
+            type: 'string',
+            demandOption: true,
+            describe: 'AnyList shopping list id or name',
+          }), async args => {
+          const items = await readInputItems();
+          const names = new Set(items.map(item => item.name));
+          const any = await login();
+          try {
+            await any.getLists();
+            const list = getListFromCache(any, args.list);
+            const favorites = getFavoriteList(any, list);
+            const removed = [];
+            for (const item of favorites.items.slice()) {
+              if (names.has(item.name)) {
+                await favorites.removeItem(item, true);
+                removed.push(item.toJSON());
+              }
+            }
+            printOutput({ list: list.name, removed }, parseOutputFormat(args.format));
+          } finally {
+            any.teardown();
+          }
+        })
+        .demandCommand(1),
+      async () => undefined)
     .demandCommand(1)
     .help();
 
@@ -299,7 +366,7 @@ function getListFromCache(any: AnyList, nameOrId: string): AnyListShoppingList {
   return list;
 }
 
-async function addItems(any: AnyList, list: AnyListShoppingList, items: InputItem[]): Promise<object[]> {
+async function addItems(any: AnyList, list: AnyListShoppingList, items: InputItem[], isFavorite = false): Promise<object[]> {
   const added = [];
   for (const input of items) {
     let item = any.createItem({
@@ -307,7 +374,7 @@ async function addItems(any: AnyList, list: AnyListShoppingList, items: InputIte
       quantity: input.serving,
       details: input.description,
     });
-    item = await list.addItem(item);
+    item = await list.addItem(item, isFavorite);
     added.push(item.toJSON());
   }
   return added;
@@ -366,6 +433,23 @@ function formatList(list: AnyListShoppingList): object {
     id: list.identifier,
     name: list.name,
     items: list.items.map(item => item.toJSON()),
+  };
+}
+
+function getFavoriteList(any: AnyList, list: AnyListShoppingList): AnyListShoppingList {
+  const favorites = any.getFavoriteItemsByListId(list.identifier);
+  if (!favorites) {
+    throw new Error(`AnyList favorites not found for list: ${list.name}`);
+  }
+  return favorites;
+}
+
+function formatFavoriteList(any: AnyList, favorites: AnyListShoppingList): object {
+  const parent = any.lists.find(list => list.identifier === favorites.parentId);
+  return {
+    listId: favorites.parentId,
+    list: parent?.name ?? favorites.parentId,
+    items: favorites.items.map(item => item.toJSON()),
   };
 }
 
