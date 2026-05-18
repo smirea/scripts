@@ -45,6 +45,11 @@ const links = [
     target: path.join(home, 'bin', 'macrofactor'),
   },
   {
+    name: 'era-fit',
+    source: path.join(repoRoot, 'src', 'era-fit.ts'),
+    target: path.join(home, 'bin', 'era-fit'),
+  },
+  {
     name: 'workouts',
     source: path.join(repoRoot, 'src', 'workouts.ts'),
     target: path.join(home, 'bin', 'workouts'),
