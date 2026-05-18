@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import { isCancel, password, text } from '@clack/prompts';
@@ -12,6 +13,9 @@ import env from './env';
 
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const CREDENTIAL_KEY = 'ANYLIST_CREDENTIALS';
+const require = createRequire(import.meta.url);
+const FormData = require('form-data') as typeof import('form-data');
+const uuid = require('anylist/lib/uuid') as () => string;
 
 console.info = (...args: unknown[]) => console.error(...args);
 
@@ -73,6 +77,21 @@ async function runCli(): Promise<void> {
         }
         const added = await addItems(any, list, items);
         printJson({ list: list.name, removed: existingItems.length, added });
+      } finally {
+        any.teardown();
+      }
+    })
+    .command('delete <list>', 'Delete a shopping list', builder =>
+      builder.positional('list', {
+        type: 'string',
+        demandOption: true,
+        describe: 'AnyList shopping list name',
+      }), async args => {
+      const any = await login();
+      try {
+        const list = await getList(any, args.list);
+        const deleted = await deleteList(any, list);
+        printJson(deleted);
       } finally {
         any.teardown();
       }
@@ -276,6 +295,54 @@ async function addItems(any: AnyList, list: AnyListShoppingList, items: InputIte
     added.push(item.toJSON());
   }
   return added;
+}
+
+async function deleteList(any: AnyList, list: AnyListShoppingList): Promise<object> {
+  const listOp = new any.protobuf.PBListOperation();
+  listOp.setMetadata({
+    operationId: uuid(),
+    handlerId: 'delete-list',
+  });
+  listOp.setListId(list.identifier);
+  listOp.setList({
+    identifier: list.identifier,
+    name: list.name,
+    items: list.items.map(item => item.toJSON()),
+  });
+
+  const listOps = new any.protobuf.PBListOperationList();
+  listOps.setOperations([listOp]);
+
+  const listForm = new FormData();
+  listForm.append('operations', listOps.toBuffer());
+  await any.client.post('data/shopping-lists/update', { body: listForm });
+
+  const orderOp = new any.protobuf.PBOrderedShoppingListIDsOperation();
+  orderOp.setMetadata({
+    operationId: uuid(),
+    handlerId: 'set-ordered-shopping-list-ids',
+  });
+  orderOp.setOrderedListIds(any.lists
+    .filter(candidate => candidate.identifier !== list.identifier)
+    .map(candidate => candidate.identifier));
+
+  const orderOps = new any.protobuf.PBOrderedShoppingListIDsOperationList();
+  orderOps.setOperations([orderOp]);
+
+  const orderForm = new FormData();
+  orderForm.append('operations', orderOps.toBuffer());
+  await any.client.post('data/shopping-lists/update-ordered-ids', { body: orderForm });
+
+  await any.getLists(true);
+  if (any.getListByName(list.name)) {
+    throw new Error(`AnyList still returned list after deletion: ${list.name}`);
+  }
+
+  return {
+    deleted: list.name,
+    id: list.identifier,
+    items: list.items.length,
+  };
 }
 
 function formatList(list: AnyListShoppingList): object {

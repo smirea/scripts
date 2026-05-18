@@ -42,6 +42,28 @@ declare module 'anylist' {
 
   export default class AnyList {
     lists: AnyListShoppingList[];
+    client: {
+      post(path: string, options: { body: unknown }): Promise<{ statusCode: number }>;
+    };
+    protobuf: {
+      PBListOperation: new () => {
+        setMetadata(metadata: { operationId: string; handlerId: string }): void;
+        setListId(listId: string): void;
+        setList(list: { identifier: string; name: string; items: unknown[] }): void;
+      };
+      PBListOperationList: new () => {
+        setOperations(operations: unknown[]): void;
+        toBuffer(): Buffer;
+      };
+      PBOrderedShoppingListIDsOperation: new () => {
+        setMetadata(metadata: { operationId: string; handlerId: string }): void;
+        setOrderedListIds(ids: string[]): void;
+      };
+      PBOrderedShoppingListIDsOperationList: new () => {
+        setOperations(operations: unknown[]): void;
+        toBuffer(): Buffer;
+      };
+    };
     constructor(options: AnyListOptions);
     login(connectWebSocket?: boolean): Promise<void>;
     teardown(): void;
