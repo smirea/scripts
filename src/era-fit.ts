@@ -43,17 +43,12 @@ const DAILY_COLUMNS = [
   'status',
   'calories',
   'goal_calories',
-  'remaining_calories',
-  'macro_calories',
   'protein',
   'goal_protein',
-  'remaining_protein',
   'net_carbs',
   'goal_net_carbs',
-  'remaining_net_carbs',
   'fat',
   'goal_fat',
-  'remaining_fat',
   'foods_logged',
 ] as const;
 const FOOD_COLUMNS = [
@@ -211,17 +206,12 @@ interface EraFitDailyOverviewRecord {
   status: string;
   calories: number;
   goal_calories: number | null;
-  remaining_calories: number | null;
-  macro_calories: number | null;
   protein: number;
   goal_protein: number | null;
-  remaining_protein: number | null;
   net_carbs: number;
   goal_net_carbs: number | null;
-  remaining_net_carbs: number | null;
   fat: number;
   goal_fat: number | null;
-  remaining_fat: number | null;
   foods_logged: number;
 }
 
@@ -637,19 +627,14 @@ function buildDailyOverviewRecord(
     template: template.title,
     template_id: template.id,
     status: parseString(total?.status_day) ?? parseString(payload.status_day) ?? 'non_completed',
-    calories: consumed.calories,
+    calories: targets.macroCalories ?? targets.goalCalories ?? consumed.calories,
     goal_calories: targets.goalCalories,
-    remaining_calories: subtractNullable(targets.goalCalories, consumed.calories),
-    macro_calories: targets.macroCalories,
     protein: consumed.protein,
     goal_protein: targets.protein,
-    remaining_protein: subtractNullable(targets.protein, consumed.protein),
     net_carbs: consumed.netCarbs,
     goal_net_carbs: targets.netCarbs,
-    remaining_net_carbs: subtractNullable(targets.netCarbs, consumed.netCarbs),
     fat: consumed.fat,
     goal_fat: targets.fat,
-    remaining_fat: subtractNullable(targets.fat, consumed.fat),
     foods_logged: foods.length,
   };
 }
@@ -959,17 +944,12 @@ function toDailyCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
     status: row.status,
     calories: row.calories,
     goal_calories: row.goal_calories,
-    remaining_calories: row.remaining_calories,
-    macro_calories: row.macro_calories,
     protein: row.protein,
     goal_protein: row.goal_protein,
-    remaining_protein: row.remaining_protein,
     net_carbs: row.net_carbs,
     goal_net_carbs: row.goal_net_carbs,
-    remaining_net_carbs: row.remaining_net_carbs,
     fat: row.fat,
     goal_fat: row.goal_fat,
-    remaining_fat: row.remaining_fat,
     foods_logged: row.foods_logged,
   }));
 }
@@ -1335,10 +1315,6 @@ function buildServingString(raw: Record<string, unknown>): string {
     return `${formatNumber(quantity)} serving`;
   }
   return '';
-}
-
-function subtractNullable(target: number | null, value: number): number | null {
-  return target == null ? null : roundNumber(target - value);
 }
 
 function scaleNullable(value: number | null, multiplier: number): number | null {
