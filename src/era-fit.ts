@@ -7,6 +7,7 @@ import { deflateRawSync } from 'node:zlib';
 import { isCancel, password, text } from '@clack/prompts';
 import chalk from 'chalk';
 import yargs from 'yargs';
+import type { Argv, ArgumentsCamelCase } from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import env from './env';
@@ -382,6 +383,26 @@ interface ResolvedDateWindow {
   end: Date;
 }
 
+interface SharedCliArgs {
+  format: string;
+  output?: string;
+  pretty: boolean;
+  checkAuth: boolean;
+  dashboardPath: string;
+  saveSession: boolean;
+  login: boolean;
+  prompt: boolean;
+}
+
+interface LogCliArgs extends SharedCliArgs {
+  date?: string;
+  days: number;
+  start?: string;
+  end?: string;
+  limit?: number;
+  mealplan?: boolean;
+}
+
 class CookieJar {
   private readonly cookies = new Map<string, string>();
 
@@ -440,9 +461,64 @@ async function runCliWithErrorFormatting(): Promise<void> {
 }
 
 async function runCli(): Promise<void> {
-  const args = await yargs(hideBin(process.argv))
+  await addSharedOptions(yargs(hideBin(process.argv)))
     .scriptName('era-fit')
     .strict()
+    .command('$0', 'Print daily macro log', addLogOptions, runLogCommand)
+    .command('log', 'Print daily macro log', addLogOptions, runLogCommand)
+    .command('mealplan', 'Print the weekly suggested meal plan and aggregate shopping list', y => y, runMealPlanCommand)
+    .help()
+    .parseAsync();
+}
+
+function addSharedOptions<T>(parser: Argv<T>): Argv<T & SharedCliArgs> {
+  return parser
+    .option('format', {
+      alias: ['f'],
+      type: 'string',
+      choices: OUTPUT_FORMATS,
+      default: 'table',
+      describe: 'Output format',
+    })
+    .option('output', {
+      alias: ['o'],
+      type: 'string',
+      describe: 'Write output to this file path',
+    })
+    .option('pretty', {
+      type: 'boolean',
+      default: true,
+      describe: 'Pretty-print JSON output',
+    })
+    .option('check-auth', {
+      type: 'boolean',
+      default: false,
+      describe: 'Only check whether the stored session or credentials can authenticate',
+    })
+    .option('dashboard-path', {
+      type: 'string',
+      default: DEFAULT_DASHBOARD_PATH,
+      describe: 'Era Fit path to use when checking whether the session is authenticated',
+    })
+    .option('save-session', {
+      type: 'boolean',
+      default: true,
+      describe: `Persist successful ${SESSION_ENV_KEY} to .env.local`,
+    })
+    .option('login', {
+      type: 'boolean',
+      default: true,
+      describe: `Use ${CREDENTIALS_ENV_KEY} when the stored session is missing or invalid`,
+    })
+    .option('prompt', {
+      type: 'boolean',
+      default: true,
+      describe: 'Prompt for Era Fit credentials when env credentials are not set',
+    }) as unknown as Argv<T & SharedCliArgs>;
+}
+
+function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
+  return parser
     .option('date', {
       type: 'string',
       describe: 'Local date to report, in YYYY-MM-DD format. Defaults to today when --start is not set',
@@ -466,82 +542,28 @@ async function runCli(): Promise<void> {
       type: 'number',
       describe: 'Maximum number of logged foods to return',
     })
-    .option('format', {
-      alias: ['f'],
-      type: 'string',
-      choices: OUTPUT_FORMATS,
-      default: 'table',
-      describe: 'Output format',
-    })
-    .option('output', {
-      alias: ['o'],
-      type: 'string',
-      describe: 'Write output to this file path',
-    })
-    .option('pretty', {
-      type: 'boolean',
-      default: true,
-      describe: 'Pretty-print JSON output',
-    })
-    .option('check-auth', {
-      type: 'boolean',
-      default: false,
-      describe: 'Only check whether the stored session or credentials can authenticate',
-    })
     .option('mealplan', {
       type: 'boolean',
       default: false,
-      describe: 'Print the weekly suggested meal plan and aggregate shopping list',
-    })
-    .option('dashboard-path', {
-      type: 'string',
-      default: DEFAULT_DASHBOARD_PATH,
-      describe: 'Era Fit path to use when checking whether the session is authenticated',
-    })
-    .option('save-session', {
-      type: 'boolean',
-      default: true,
-      describe: `Persist successful ${SESSION_ENV_KEY} to .env.local`,
-    })
-    .option('login', {
-      type: 'boolean',
-      default: true,
-      describe: `Use ${CREDENTIALS_ENV_KEY} when the stored session is missing or invalid`,
-    })
-    .option('prompt', {
-      type: 'boolean',
-      default: true,
-      describe: 'Prompt for Era Fit credentials when env credentials are not set',
-    })
-    .help()
-    .parseAsync();
+      hidden: true,
+      describe: 'Deprecated. Use the mealplan command instead',
+    }) as Argv<T & LogCliArgs>;
+}
 
+async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
   if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
     throw new Error('--limit must be a positive number.');
   }
 
-  const session = await resolveSession({
-    dashboardPath: normalizePath(args.dashboardPath),
-    login: args.login,
-    prompt: args.prompt,
-    saveSession: args['save-session'],
-  });
-
-  const format = parseOutputFormat(args.format);
-  if (args.checkAuth) {
-    renderAuthResult({
-      session,
-      format,
-      outputPath: args.output,
-      pretty: args.pretty,
-    });
+  if (args.mealplan) {
+    await runMealPlanCommand(args);
     return;
   }
 
-  if (args.mealplan) {
-    const mealPlan = await fetchEraFitMealPlan(session);
-    renderMealPlanOutput({
-      report: mealPlan,
+  const { format, session } = await resolveCliSession(args);
+  if (args.checkAuth) {
+    renderAuthResult({
+      session,
       format,
       outputPath: args.output,
       pretty: args.pretty,
@@ -566,6 +588,42 @@ async function runCli(): Promise<void> {
     outputPath: args.output,
     pretty: args.pretty,
   });
+}
+
+async function runMealPlanCommand(args: ArgumentsCamelCase<SharedCliArgs>): Promise<void> {
+  const { format, session } = await resolveCliSession(args);
+  if (args.checkAuth) {
+    renderAuthResult({
+      session,
+      format,
+      outputPath: args.output,
+      pretty: args.pretty,
+    });
+    return;
+  }
+
+  const mealPlan = await fetchEraFitMealPlan(session);
+  renderMealPlanOutput({
+    report: mealPlan,
+    format,
+    outputPath: args.output,
+    pretty: args.pretty,
+  });
+}
+
+async function resolveCliSession(args: ArgumentsCamelCase<SharedCliArgs>): Promise<{
+  format: OutputFormat;
+  session: EraFitSession;
+}> {
+  const session = await resolveSession({
+    dashboardPath: normalizePath(args.dashboardPath),
+    login: args.login,
+    prompt: args.prompt,
+    saveSession: args.saveSession,
+  });
+
+  const format = parseOutputFormat(args.format);
+  return { format, session };
 }
 
 async function resolveSession(options: {
