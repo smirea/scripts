@@ -578,7 +578,7 @@ async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id
   const list = await createShoppingList(name, report.shoppingList.map(item => ({
     name: item.name,
     serving: item.quantity,
-    description: item.meals === 1 ? 'Used in 1 meal' : `Used in ${item.meals} meals`,
+    description: item.meals > 1 ? `${item.meals} meals` : undefined,
   })), { replaceExisting: true });
   return {
     id: list.id,
