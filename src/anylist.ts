@@ -757,7 +757,7 @@ function formatPrettyList(list: PrintableList): string {
   const items = list.items ?? [];
   const unchecked = items.filter(item => item.checked !== true);
   const checkedCount = items.length - unchecked.length;
-  const lines = [chalk.bold(list.name ?? list.list ?? 'Unnamed List')];
+  const lines = [formatPrettyListHeader(list)];
   const categories = groupItemsByCategory(unchecked);
 
   if (categories.size > 1) {
@@ -778,6 +778,12 @@ function formatPrettyList(list: PrintableList): string {
   }
 
   return lines.join('\n');
+}
+
+function formatPrettyListHeader(list: PrintableList): string {
+  const name = chalk.bold(list.name ?? list.list ?? 'Unnamed List');
+  const id = list.id ?? list.listId;
+  return id ? `${name} ${chalk.gray(id)}` : name;
 }
 
 function groupItemsByCategory(items: PrintableItem[]): Map<string, PrintableItem[]> {
