@@ -376,6 +376,7 @@ interface EraFitShoppingListItem {
   meals: number;
   occurrences: number;
   servings: string[];
+  variations: string[];
 }
 
 interface GeminiGenerateContentResponse {
@@ -609,7 +610,7 @@ async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id
   const list = await createShoppingList(name, report.shoppingList.map(item => ({
     name: item.name,
     serving: item.quantity,
-    description: item.meals > 1 ? `${item.meals} meals` : undefined,
+    description: formatAnyListMealPlanDescription(item),
     categoryMatchId: categories.get(item.name) ?? 'other',
   })), { replaceExisting: true });
   return {
@@ -617,6 +618,14 @@ async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id
     name: list.name,
     added: list.added.length,
   };
+}
+
+function formatAnyListMealPlanDescription(item: EraFitShoppingListItem): string | undefined {
+  const parts = [
+    item.meals > 1 ? `${item.meals} meals` : null,
+    ...item.variations,
+  ].filter((part): part is string => !!part);
+  return parts.length > 0 ? parts.join('; ') : undefined;
 }
 
 async function categorizeMealPlanShoppingList(items: EraFitShoppingListItem[]): Promise<Map<string, MealPlanAnyListCategory>> {
@@ -1428,16 +1437,12 @@ function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
     return null;
   }
   const description = parseString(raw.description);
-  const descriptionName = parseFoodNameFromDescription(description);
   const rawName =
     parseString(raw.name) ??
     parseString(raw.tag) ??
     parseString(raw.title) ??
     parseString(raw.food_name);
-  const name =
-    descriptionName && (!rawName || descriptionName.toLowerCase().includes(rawName.toLowerCase()))
-      ? descriptionName
-      : rawName ?? descriptionName;
+  const name = rawName ?? parseFoodNameFromDescription(description);
   if (!name) {
     return null;
   }
@@ -1516,12 +1521,14 @@ function buildShoppingList(days: EraFitMealPlanDay[]): EraFitShoppingListItem[] 
   return Array.from(grouped.values())
     .map(uses => {
       const servings = uniqueStrings(uses.map(use => use.food.serving).filter((value): value is string => value != null));
+      const displayName = chooseShoppingDisplayName(uses);
       return {
-        name: chooseShoppingDisplayName(uses),
+        name: displayName,
         quantity: formatShoppingQuantity(uses),
         meals: new Set(uses.map(use => use.mealId)).size,
         occurrences: uses.length,
         servings,
+        variations: shoppingVariationNames(uses, displayName),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1561,33 +1568,43 @@ function normalizeShoppingName(value: string): string {
 }
 
 function chooseShoppingDisplayName(uses: ShoppingFoodUse[]): string {
-  const name = uses
-    .map(use => use.food.name)
-    .sort((a, b) => shoppingDisplayNameScore(b) - shoppingDisplayNameScore(a) || a.localeCompare(b))[0];
-  return cleanShoppingDisplayName(name);
+  return uses
+    .map(use => cleanSimpleShoppingName(use.food.name))
+    .sort((a, b) => a.length - b.length || a.localeCompare(b))[0];
 }
 
-function shoppingDisplayNameScore(value: string): number {
-  const normalized = value.toLowerCase();
-  let score = value.length;
-  if (/\b(?:sliced|toasted|cubed|cubes|stand-in|stand in)\b/i.test(value)) {
-    score -= 30;
-  }
-  if (/^\b(?:cooked|steamed|roasted|large|medium|small|scoop|scoops|spears)\b/i.test(value)) {
-    score -= 20;
-  }
-  if (/\b(?:93%|2%)\b/.test(normalized)) {
-    score += 20;
-  }
-  if (/\b(?:plain|lean|grilled|cooked|raw)\b/.test(normalized)) {
-    score += 5;
-  }
-  return score;
-}
-
-function cleanShoppingDisplayName(value: string): string {
+function cleanSimpleShoppingName(value: string): string {
   return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/^\s*(?:large|medium|small|scoop|scoops|spear|spears)\s+/i, '')
+    .replace(/\b(?:sliced|diced|cubed|cubes|toasted|fillet|patty|grilled|scrambled|sauteed|steamed|roasted|cooked|raw)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shoppingVariationNames(uses: ShoppingFoodUse[], displayName: string): string[] {
+  const seen = new Set<string>();
+  const displayKey = normalizeVariationName(displayName);
+  const variations: string[] = [];
+  for (const use of uses) {
+    const variation = parseFoodNameFromDescription(use.food.description) ?? use.food.name;
+    const key = normalizeVariationName(variation);
+    if (!key || key === displayKey || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    variations.push(variation);
+  }
+  return variations.sort((a, b) => a.localeCompare(b));
+}
+
+function normalizeVariationName(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9%]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
