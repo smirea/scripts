@@ -29,6 +29,14 @@ const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MEAL_KEYS = ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'] as const;
+const MEAL_PLAN_MEAL_KEYS = [
+  'breakfast',
+  'morning_snack',
+  'lunch',
+  'afternoon_snack',
+  'dinner',
+  'evening_snack',
+] as const;
 const MEAL_LABELS: Record<(typeof MEAL_KEYS)[number], string> = {
   breakfast: 'Breakfast',
   snack_am: 'AM Snack',
@@ -36,6 +44,14 @@ const MEAL_LABELS: Record<(typeof MEAL_KEYS)[number], string> = {
   snack_pm: 'PM Snack',
   dinner: 'Dinner',
   snack_evening: 'Evening Snack',
+};
+const MEAL_PLAN_MEAL_LABELS: Record<(typeof MEAL_PLAN_MEAL_KEYS)[number], string> = {
+  breakfast: 'Breakfast',
+  morning_snack: 'Morning Snack',
+  lunch: 'Lunch',
+  afternoon_snack: 'Afternoon Snack',
+  dinner: 'Dinner',
+  evening_snack: 'Evening Snack',
 };
 const DAILY_COLUMNS = [
   'date',
@@ -93,6 +109,7 @@ const TEMPLATE_COLUMNS = [
   'fat_setting',
 ] as const;
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
+const WEEKDAY_TAGS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'] as const;
 const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
   neg_1000: -1000,
   neg_750: -750,
@@ -282,6 +299,72 @@ interface EraFitTemplateSummary {
   fat_setting: string | null;
 }
 
+interface EraFitMealPlanSlot {
+  day_tag: string;
+  hour: string | null;
+  meal_type: string;
+  plan_type: string;
+  id: string | null;
+}
+
+interface EraFitMealPlanReport {
+  generatedAt: string;
+  sourcePath: string;
+  clientId: string;
+  days: EraFitMealPlanDay[];
+  shoppingList: EraFitShoppingListItem[];
+}
+
+interface EraFitMealPlanDay {
+  day: string;
+  day_tag: string;
+  template: string;
+  template_id: string;
+  targets: EraFitMacroTargets;
+  planned: EraFitMacroTotals;
+  meals: EraFitMealPlanMeal[];
+}
+
+interface EraFitMealPlanMeal {
+  meal: string;
+  meal_key: string;
+  time: string | null;
+  recipe: string | null;
+  macros: EraFitMacroTotals;
+  items: EraFitMealPlanFoodItem[];
+}
+
+interface EraFitMealPlanFoodItem {
+  name: string;
+  description: string | null;
+  amount: number | null;
+  unit: string | null;
+  serving: string | null;
+  calories: number | null;
+  protein: number | null;
+  net_carbs: number | null;
+  fat: number | null;
+}
+
+interface EraFitShoppingListItem {
+  name: string;
+  quantity: number | null;
+  unit: string | null;
+  count: number;
+  servings: string[];
+}
+
+interface EraFitMacroTotals {
+  calories: number | null;
+  protein: number | null;
+  net_carbs: number | null;
+  fat: number | null;
+}
+
+interface EraFitMacroTargets extends EraFitMacroTotals {
+  goal_calories: number | null;
+}
+
 interface ResolvedDateWindow {
   start: Date;
   end: Date;
@@ -393,6 +476,11 @@ async function runCli(): Promise<void> {
       default: false,
       describe: 'Only check whether the stored session or credentials can authenticate',
     })
+    .option('mealplan', {
+      type: 'boolean',
+      default: false,
+      describe: 'Print the weekly suggested meal plan and aggregate shopping list',
+    })
     .option('dashboard-path', {
       type: 'string',
       default: DEFAULT_DASHBOARD_PATH,
@@ -431,6 +519,17 @@ async function runCli(): Promise<void> {
   if (args.checkAuth) {
     renderAuthResult({
       session,
+      format,
+      outputPath: args.output,
+      pretty: args.pretty,
+    });
+    return;
+  }
+
+  if (args.mealplan) {
+    const mealPlan = await fetchEraFitMealPlan(session);
+    renderMealPlanOutput({
+      report: mealPlan,
       format,
       outputPath: args.output,
       pretty: args.pretty,
@@ -581,6 +680,196 @@ async function fetchMealTrackingDay(session: EraFitSession, date: string): Promi
     throw new Error(`Era Fit did not return nutrition data for ${date}.`);
   }
   return parseBase64Json(data.data_array_meals, `nutrition data for ${date}`) as EraFitDayPayload;
+}
+
+async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPlanReport> {
+  const [globals, slots, aiPlan, baseTdee] = await Promise.all([
+    fetchMealTrackingGlobals(session),
+    fetchMealPlanSlots(session),
+    fetchMealPlanAiData(session),
+    fetchCurrentBaseTdee(session),
+  ]);
+  const slotsByDayMeal = new Map<string, EraFitMealPlanSlot>();
+  for (const slot of slots) {
+    if (slot.plan_type === 'nutrition') {
+      slotsByDayMeal.set(`${slot.day_tag}:${slot.meal_type}`, slot);
+    }
+  }
+  const days = WEEKDAY_NAMES.map((day, index) => {
+    const dayTag = WEEKDAY_TAGS[index];
+    const templateId = globals.targetSchedule[`macro_target_schedule_week_day_${index + 1}`] ?? 'default';
+    const template = globals.templates[templateId] ?? globals.templates.default ?? fallbackTemplate();
+    const targets = toMacroTargets(computeTemplateTargets(template, baseTdee));
+    const rawDay = asRecord(aiPlan[dayTag]);
+    const rawMeals = asRecord(rawDay?.meal_plan);
+    const meals = MEAL_PLAN_MEAL_KEYS
+      .map(mealKey => {
+        const meal = parseMealPlanMeal(
+          mealKey,
+          rawMeals?.[mealKey],
+          slotsByDayMeal.get(`${dayTag}:${mealKey}`) ?? null
+        );
+        return meal;
+      })
+      .filter((meal): meal is EraFitMealPlanMeal => meal != null);
+    return {
+      day,
+      day_tag: dayTag,
+      template: template.title,
+      template_id: template.id,
+      targets,
+      planned: sumMacroTotals(meals.map(meal => meal.macros)),
+      meals,
+    };
+  });
+
+  return {
+    generatedAt: formatLocalIso(new Date()),
+    sourcePath: 'api://era-fit/meal-plan',
+    clientId: session.app.id_app,
+    days,
+    shoppingList: buildShoppingList(days),
+  };
+}
+
+async function fetchMealPlanSlots(session: EraFitSession): Promise<EraFitMealPlanSlot[]> {
+  const response = await fetchUrl('/clients/nutrition/meal-plan', {
+    redirect: 'manual',
+    headers: {
+      Cookie: session.cookieHeader,
+      Referer: `${BASE_URL}/clients/dashboard`,
+    },
+  });
+  const html = await response.text();
+  if (!response.ok || html.includes('id="login_form"') || html.includes('data-action="/login/access"')) {
+    throw new Error(`Era Fit meal-plan page failed to load: ${response.status} ${response.statusText}`);
+  }
+  return Array.from(html.matchAll(/data-array="([^"]+)"/g))
+    .map(match => parseDataArrayAttribute(match[1]))
+    .map(value => asRecord(value))
+    .filter((value): value is Record<string, unknown> => value != null)
+    .map(value => ({
+      day_tag: parseString(value.day_week) ?? '',
+      hour: parseString(value.hour),
+      meal_type: parseString(value.meal_type) ?? '',
+      plan_type: parseString(value.plan_type) ?? '',
+      id: parseString(value.id),
+    }))
+    .filter(slot => slot.day_tag && slot.meal_type && slot.plan_type);
+}
+
+async function fetchMealPlanAiData(session: EraFitSession): Promise<Record<string, unknown>> {
+  const token = await resolveFirebaseIdToken(session);
+  const url = new URL(`https://erafit-${session.app.biz_id}.firebaseio.com/db_ai/sys_clients/${session.app.id_app}/meal_plan.json`);
+  if (token) {
+    url.searchParams.set('auth', token);
+  }
+  const response = await fetch(url);
+  const text = await response.text();
+  if (!response.ok) {
+    const authHint = token
+      ? `${SESSION_ENV_KEY} loaded, but the Firebase token could not read the AI meal plan.`
+      : `Era Fit stores suggested meal details in Firebase RTDB, and the web session did not return a readable Firebase auth token.`;
+    throw new Error(`Era Fit meal-plan API request failed: ${response.status} ${response.statusText}. ${authHint}`);
+  }
+  const json = JSON.parse(text) as unknown;
+  const data = asRecord(json);
+  if (!data) {
+    return {};
+  }
+  return data;
+}
+
+async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | null> {
+  const token = normalizeOptionalString(env.ERA_FIT_FIREBASE_ID_TOKEN);
+  if (token) {
+    return token;
+  }
+  const customToken = await fetchFirebaseCustomToken(session);
+  if (customToken) {
+    return exchangeFirebaseCustomToken(customToken);
+  }
+  const credentials = parseOptionalCredentials(env.ERA_FIT_CREDENTIALS);
+  if (!credentials) {
+    return null;
+  }
+  const response = await fetch(
+    'https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyDti7cwo7I_xjyAlr4VVt8x2wxXljYhu5A',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        email: credentials.email,
+        password: credentials.password,
+        returnSecureToken: true,
+      }),
+    }
+  );
+  const json = await response.json() as { idToken?: string; error?: { message?: string } };
+  if (!response.ok || !json.idToken) {
+    throw new Error(`Era Fit Firebase login failed: ${json.error?.message ?? response.statusText}`);
+  }
+  return json.idToken;
+}
+
+async function fetchFirebaseCustomToken(session: EraFitSession): Promise<string | null> {
+  const response = await fetchUrl('/clients/api/get_token', {
+    method: 'POST',
+    redirect: 'manual',
+    headers: {
+      Cookie: session.cookieHeader,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'X-Requested-With': 'XMLHttpRequest',
+      Origin: BASE_URL,
+      Referer: `${BASE_URL}/clients/nutrition/meal-plan`,
+    },
+    body: new URLSearchParams({
+      biz_id: session.app.biz_id,
+    }),
+  });
+  if (!response.ok) {
+    return null;
+  }
+  const json = await response.json() as { status?: string; token?: string };
+  return json.status === '200' ? parseString(json.token) : null;
+}
+
+async function exchangeFirebaseCustomToken(token: string): Promise<string> {
+  const response = await fetch(
+    'https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=AIzaSyDti7cwo7I_xjyAlr4VVt8x2wxXljYhu5A',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        token,
+        returnSecureToken: true,
+      }),
+    }
+  );
+  const json = await response.json() as { idToken?: string; error?: { message?: string } };
+  if (!response.ok || !json.idToken) {
+    throw new Error(`Era Fit Firebase token exchange failed: ${json.error?.message ?? response.statusText}`);
+  }
+  return json.idToken;
+}
+
+async function fetchCurrentBaseTdee(session: EraFitSession): Promise<number | null> {
+  try {
+    const today = formatDateKey(startOfLocalDay(new Date()));
+    const payload = await fetchMealTrackingDay(session, today);
+    const total = asRecord(payload.total);
+    return (
+      parseNumberLike(total?.tdee) ??
+      parseNumberLike(payload.macro_tdee) ??
+      parseNumberLike(asRecord(payload.profile)?.energy_tdee)
+    );
+  } catch {
+    return null;
+  }
 }
 
 async function postApi<T>(
@@ -942,6 +1231,242 @@ function formatTemplateMacroSetting(unit: string, grams: number | null, percent:
     return percent == null ? null : `${formatNumber(percent)}%`;
   }
   return grams == null ? null : `${formatNumber(grams)}g`;
+}
+
+function parseMealPlanMeal(
+  mealKey: (typeof MEAL_PLAN_MEAL_KEYS)[number],
+  value: unknown,
+  slot: EraFitMealPlanSlot | null
+): EraFitMealPlanMeal | null {
+  const raw = asRecord(value);
+  if (!raw && !slot) {
+    return null;
+  }
+  const total = asRecord(raw?.total_meal_macros) ?? asRecord(raw?.meal_macros_sum);
+  const foodItems = Array.isArray(raw?.foods)
+    ? raw.foods
+    : Array.isArray(raw)
+      ? raw
+      : Object.entries(asRecord(raw?.foods) ?? raw ?? {})
+        .filter(([key]) => key !== 'meal_macros_sum' && key !== 'total_meal_macros' && key !== 'meal_recipe')
+        .map(([, item]) => item);
+  const items = foodItems
+    .map(item => parseMealPlanFoodItem(item))
+    .filter((item): item is EraFitMealPlanFoodItem => item != null);
+  const macros = {
+    calories: parseNumberLike(total?.calories) ?? sumNumbers(items.map(item => item.calories)),
+    protein: parseNumberLike(total?.protein_g) ?? parseNumberLike(total?.protein) ?? sumNumbers(items.map(item => item.protein)),
+    net_carbs: parseNumberLike(total?.carbs_g) ?? parseNumberLike(total?.carbs) ?? sumNumbers(items.map(item => item.net_carbs)),
+    fat: parseNumberLike(total?.fat_g) ?? parseNumberLike(total?.fat) ?? sumNumbers(items.map(item => item.fat)),
+  };
+  return {
+    meal: MEAL_PLAN_MEAL_LABELS[mealKey],
+    meal_key: mealKey,
+    time: slot?.hour ?? null,
+    recipe: parseString(raw?.meal_recipe),
+    macros,
+    items,
+  };
+}
+
+function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
+  const raw = asRecord(value);
+  if (!raw) {
+    return null;
+  }
+  const description = parseString(raw.description);
+  const name =
+    parseString(raw.name) ??
+    parseString(raw.tag) ??
+    parseString(raw.title) ??
+    parseString(raw.food_name) ??
+    parseFoodNameFromDescription(description);
+  if (!name) {
+    return null;
+  }
+  const serving = parseServingFromDescription(description) ?? buildServingString(raw);
+  const amount =
+    parseNumberLike(raw.amount_g) ??
+    parseNumberLike(raw.amount) ??
+    parseNumberLike(raw.quantity) ??
+    parseNumberLike(raw.serving_qtd);
+  const unit =
+    parseNumberLike(raw.amount_g) != null
+      ? 'g'
+      : parseString(raw.unit) ?? parseString(raw.serving_unit) ?? parseString(raw.metric_serving_unit);
+  return {
+    name,
+    description,
+    amount,
+    unit,
+    serving: serving || null,
+    calories: parseNumberLike(raw.calories),
+    protein: parseNumberLike(raw.protein_g) ?? parseNumberLike(raw.protein),
+    net_carbs: parseNumberLike(raw.carbs_g) ?? parseNumberLike(raw.carbs) ?? parseNumberLike(raw.net_carbs),
+    fat: parseNumberLike(raw.fat_g) ?? parseNumberLike(raw.fat),
+  };
+}
+
+function parseFoodNameFromDescription(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  return value
+    .replace(/^\s*(?:\d+(?:\.\d+)?|\d+\/\d+)\s*(?:g|oz|cup|cups|tbsp|tsp|serving|servings|slice|slices|piece|pieces)?\s+/i, '')
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .trim() || null;
+}
+
+function parseServingFromDescription(value: string | null): string | null {
+  if (!value) {
+    return null;
+  }
+  const match = value.match(/^\s*((?:\d+(?:\.\d+)?|\d+\/\d+)\s*(?:g|oz|cup|cups|tbsp|tsp|serving|servings|slice|slices|piece|pieces)\b)/i);
+  return match?.[1] ?? null;
+}
+
+function toMacroTargets(targets: ReturnType<typeof computeTemplateTargets>): EraFitMacroTargets {
+  return {
+    calories: targets.macroCalories ?? targets.goalCalories,
+    goal_calories: targets.goalCalories,
+    protein: targets.protein,
+    net_carbs: targets.netCarbs,
+    fat: targets.fat,
+  };
+}
+
+function sumMacroTotals(values: EraFitMacroTotals[]): EraFitMacroTotals {
+  return {
+    calories: sumNumbers(values.map(value => value.calories)),
+    protein: sumNumbers(values.map(value => value.protein)),
+    net_carbs: sumNumbers(values.map(value => value.net_carbs)),
+    fat: sumNumbers(values.map(value => value.fat)),
+  };
+}
+
+function buildShoppingList(days: EraFitMealPlanDay[]): EraFitShoppingListItem[] {
+  const items = new Map<string, EraFitShoppingListItem>();
+  for (const food of days.flatMap(day => day.meals.flatMap(meal => meal.items))) {
+    const key = `${normalizeShoppingName(food.name)}:${food.unit ?? ''}`;
+    const existing = items.get(key);
+    if (existing) {
+      existing.count += 1;
+      existing.quantity = existing.quantity != null && food.amount != null ? roundNumber(existing.quantity + food.amount) : null;
+      if (food.serving && !existing.servings.includes(food.serving)) {
+        existing.servings.push(food.serving);
+      }
+      continue;
+    }
+    items.set(key, {
+      name: food.name,
+      quantity: food.amount,
+      unit: food.unit,
+      count: 1,
+      servings: food.serving ? [food.serving] : [],
+    });
+  }
+  return Array.from(items.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function normalizeShoppingName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function parseDataArrayAttribute(value: string): unknown | null {
+  for (const raw of [value, decodeURIComponent(value)]) {
+    try {
+      return JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
+    } catch {}
+    try {
+      return JSON.parse(decodeURIComponent(Buffer.from(raw, 'base64').toString('utf8')));
+    } catch {}
+  }
+  return null;
+}
+
+function renderMealPlanOutput(options: {
+  report: EraFitMealPlanReport;
+  format: OutputFormat;
+  outputPath?: string;
+  pretty: boolean;
+}): void {
+  const text = options.format === 'json'
+    ? `${JSON.stringify(options.report, null, options.pretty ? 2 : 0)}\n`
+    : renderMealPlanText(options.report);
+  if (options.format !== 'table' && options.format !== 'json') {
+    throw new Error('--mealplan supports --format=table or --format=json.');
+  }
+  if (options.outputPath) {
+    writeFileSync(path.resolve(options.outputPath), text, 'utf8');
+    return;
+  }
+  process.stdout.write(text);
+}
+
+function renderMealPlanText(report: EraFitMealPlanReport): string {
+  const lines: string[] = ['Weekly Meal Plan', ''];
+  for (const day of report.days) {
+    const planned = formatMacros(day.planned);
+    const target = formatMacros(day.targets);
+    lines.push(`${day.day} (${day.template})`);
+    lines.push(`  Planned: ${planned} | Target: ${target}`);
+    if (day.meals.length === 0) {
+      lines.push('  No suggested meals.');
+      lines.push('');
+      continue;
+    }
+    for (const meal of day.meals) {
+      lines.push(`  ${meal.time ? `${formatMealPlanTime(meal.time)} ` : ''}${meal.meal}: ${formatMacros(meal.macros)}`);
+      if (meal.recipe) {
+        lines.push(`    Recipe: ${meal.recipe}`);
+      }
+      for (const item of meal.items) {
+        lines.push(`    ${padEnd(item.name, 28)} ${padEnd(item.serving ?? '', 18)} ${formatMacros(item)}`);
+        if (item.description && item.description !== item.name && item.description !== item.serving) {
+          lines.push(`      ${item.description}`);
+        }
+      }
+    }
+    lines.push('');
+  }
+  lines.push('Shopping List');
+  if (report.shoppingList.length === 0) {
+    lines.push('  No ingredients found.');
+  } else {
+    for (const item of report.shoppingList) {
+      const quantity = item.quantity == null || !item.unit
+        ? `${item.count}x`
+        : `${formatNumber(item.quantity)} ${item.unit}`;
+      const servings = item.servings.length > 0 ? ` (${item.servings.join(', ')})` : '';
+      lines.push(`  ${padEnd(item.name, 32)} ${quantity}${servings}`);
+    }
+  }
+  return `${lines.join('\n')}\n`;
+}
+
+function formatMacros(value: EraFitMacroTotals): string {
+  return [
+    `${formatNullableNumber(value.calories)} kcal`,
+    `P ${formatNullableNumber(value.protein)}g`,
+    `C ${formatNullableNumber(value.net_carbs)}g`,
+    `F ${formatNullableNumber(value.fat)}g`,
+  ].join(' | ');
+}
+
+function formatNullableNumber(value: number | null): string {
+  return value == null ? '-' : formatNumber(roundNumber(value));
+}
+
+function formatMealPlanTime(value: string): string {
+  const match = value.match(/^(\d{1,2})(am|pm)$/i);
+  if (!match) {
+    return value;
+  }
+  return `${match[1]} ${match[2].toUpperCase()}`;
+}
+
+function padEnd(value: string, length: number): string {
+  return value.length >= length ? value : value.padEnd(length);
 }
 
 function renderOutput(options: {
