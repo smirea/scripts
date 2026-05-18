@@ -64,6 +64,20 @@ const FOOD_COLUMNS = [
   'net_carbs',
   'fat',
 ] as const;
+const RECIPE_COLUMNS = [
+  'date',
+  'time',
+  'meal',
+  'recipe',
+  'recipe_serving',
+  'ingredient',
+  'brand',
+  'serving',
+  'calories',
+  'protein',
+  'net_carbs',
+  'fat',
+] as const;
 const TEMPLATE_COLUMNS = [
   'id',
   'title',
@@ -194,6 +208,7 @@ interface EraFitReport {
   returnedDays: number;
   dailyOverview: EraFitDailyOverviewRecord[];
   foods: EraFitFoodRecord[];
+  recipes: EraFitRecipeIngredientRecord[];
   targetSchedule: EraFitScheduleRecord[];
   templates: EraFitTemplateSummary[];
 }
@@ -222,6 +237,22 @@ interface EraFitFoodRecord {
   meal_key: string;
   kind: string;
   name: string;
+  brand: string | null;
+  serving: string;
+  calories: number | null;
+  protein: number | null;
+  net_carbs: number | null;
+  fat: number | null;
+}
+
+interface EraFitRecipeIngredientRecord {
+  date: string;
+  time: string | null;
+  meal: string;
+  meal_key: string;
+  recipe: string;
+  recipe_serving: string;
+  ingredient: string;
   brand: string | null;
   serving: string;
   calories: number | null;
@@ -496,6 +527,11 @@ async function fetchEraFitReport(
   const foods = dayPayloads
     .flatMap(day => parseDayFoods(day.date, day.payload))
     .sort((a, b) => `${b.date} ${b.time ?? ''}`.localeCompare(`${a.date} ${a.time ?? ''}`));
+  const recipes = dayPayloads
+    .flatMap(day => parseDayRecipeIngredients(day.date, day.payload))
+    .sort((a, b) =>
+      `${b.date} ${b.time ?? ''} ${b.recipe}`.localeCompare(`${a.date} ${a.time ?? ''} ${a.recipe}`)
+    );
   const limitedFoods =
     options.limit && Number.isFinite(options.limit) && options.limit > 0
       ? foods.slice(0, Math.floor(options.limit))
@@ -512,6 +548,7 @@ async function fetchEraFitReport(
     returnedDays: dailyOverview.length,
     dailyOverview,
     foods: limitedFoods,
+    recipes,
     targetSchedule: buildScheduleRecords(globals),
     templates: Object.values(globals.templates)
       .map(template => summarizeTemplate(template, null))
@@ -663,6 +700,41 @@ function parseDayFoods(date: string, payload: EraFitDayPayload): EraFitFoodRecor
   return foods;
 }
 
+function parseDayRecipeIngredients(date: string, payload: EraFitDayPayload): EraFitRecipeIngredientRecord[] {
+  const meals = asRecord(payload.meals);
+  if (!meals) {
+    return [];
+  }
+
+  const ingredients: EraFitRecipeIngredientRecord[] = [];
+  for (const mealKey of MEAL_KEYS) {
+    const meal = asRecord(meals[mealKey]);
+    const mealFoods = asRecord(meal?.foods);
+    if (!mealFoods) {
+      continue;
+    }
+    for (const rawFood of Object.values(mealFoods)) {
+      const recipe = asRecord(rawFood);
+      if (!recipe || parseString(recipe.type_item) !== 'my_meals') {
+        continue;
+      }
+      const recipeFoods = asRecord(recipe.foods);
+      if (!recipeFoods) {
+        continue;
+      }
+      const multiplier = parseNumberLike(recipe.serving_qtd) ?? 1;
+      for (const rawIngredient of Object.values(recipeFoods)) {
+        const ingredient = asRecord(rawIngredient);
+        if (!ingredient) {
+          continue;
+        }
+        ingredients.push(parseRecipeIngredientRecord(date, mealKey, recipe, ingredient, multiplier));
+      }
+    }
+  }
+  return ingredients;
+}
+
 function parseFoodRecord(
   date: string,
   mealKey: (typeof MEAL_KEYS)[number],
@@ -689,6 +761,32 @@ function parseFoodRecord(
       parseNumberLike(raw.net_carbs) ??
       parseNumberLike(raw.carbohydrate),
     fat: scaleNullable(parseNumberLike(total?.fat), totalMultiplier) ?? parseNumberLike(raw.fat),
+  };
+}
+
+function parseRecipeIngredientRecord(
+  date: string,
+  mealKey: (typeof MEAL_KEYS)[number],
+  recipe: Record<string, unknown>,
+  ingredient: Record<string, unknown>,
+  multiplier: number
+): EraFitRecipeIngredientRecord {
+  return {
+    date,
+    time: parseString(recipe.time),
+    meal: MEAL_LABELS[mealKey],
+    meal_key: mealKey,
+    recipe: parseString(recipe.title) ?? '(untitled)',
+    recipe_serving: buildServingString(recipe),
+    ingredient: parseString(ingredient.title) ?? parseString(ingredient.food_name) ?? '(untitled)',
+    brand: parseString(ingredient.brand_name),
+    serving: buildServingString(ingredient),
+    calories: scaleNullable(parseNumberLike(ingredient.calories), multiplier),
+    protein: scaleNullable(parseNumberLike(ingredient.protein), multiplier),
+    net_carbs:
+      scaleNullable(parseNumberLike(ingredient.net_carbs), multiplier) ??
+      scaleNullable(parseNumberLike(ingredient.carbohydrate), multiplier),
+    fat: scaleNullable(parseNumberLike(ingredient.fat), multiplier),
   };
 }
 
@@ -914,6 +1012,10 @@ function renderTable(report: EraFitReport): void {
     process.stdout.write('\nLogged Foods\n');
     renderTableRecords(toFoodCsvRows(report));
   }
+  if (report.recipes.length > 0) {
+    process.stdout.write('\nRecipes\n');
+    renderTableRecords(toRecipeCsvRows(report));
+  }
   if (report.templates.length > 0) {
     process.stdout.write('\nMacro Templates\n');
     renderTableRecords(toTemplateCsvRows(report));
@@ -929,6 +1031,10 @@ function renderFullCsv(report: EraFitReport): string {
     {
       name: 'logged_foods',
       csv: renderCsvRecords(toFoodCsvRows(report), FOOD_COLUMNS),
+    },
+    {
+      name: 'recipes',
+      csv: renderCsvRecords(toRecipeCsvRows(report), RECIPE_COLUMNS),
     },
     {
       name: 'macro_templates',
@@ -967,6 +1073,23 @@ function toFoodCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
     protein: food.protein,
     net_carbs: food.net_carbs,
     fat: food.fat,
+  }));
+}
+
+function toRecipeCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
+  return report.recipes.map(recipe => ({
+    date: recipe.date,
+    time: recipe.time,
+    meal: recipe.meal,
+    recipe: recipe.recipe,
+    recipe_serving: recipe.recipe_serving,
+    ingredient: recipe.ingredient,
+    brand: recipe.brand,
+    serving: recipe.serving,
+    calories: recipe.calories,
+    protein: recipe.protein,
+    net_carbs: recipe.net_carbs,
+    fat: recipe.fat,
   }));
 }
 
