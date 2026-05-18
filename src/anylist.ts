@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import { isCancel, password, text } from '@clack/prompts';
 import AnyList, { type AnyListShoppingList } from 'anylist';
+import chalk from 'chalk';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
@@ -26,6 +27,29 @@ interface InputItem {
   name: string;
   serving?: string;
   description?: string;
+}
+
+interface PrintableItem {
+  name?: string;
+  quantity?: string;
+  details?: string | null;
+  checked?: boolean | null;
+}
+
+interface PrintableList {
+  id?: string;
+  listId?: string;
+  name?: string;
+  list?: string;
+  items?: PrintableItem[];
+}
+
+interface MutationResult {
+  list?: string;
+  added?: PrintableItem[];
+  removed?: PrintableItem[] | number;
+  deleted?: string;
+  items?: number;
 }
 
 interface CreatedShoppingList {
@@ -578,7 +602,82 @@ function parseOutputFormat(value: unknown): OutputFormat {
 }
 
 function printOutput(value: unknown, format: OutputFormat): void {
-  console.log(JSON.stringify(value, null, format === 'pretty' ? 2 : 0));
+  if (format === 'json') {
+    console.log(JSON.stringify(value));
+    return;
+  }
+
+  console.log(formatPretty(value));
+}
+
+function formatPretty(value: unknown): string {
+  if (Array.isArray(value) && value.every(isPrintableList)) {
+    return value.map(formatPrettyList).join('\n\n');
+  }
+  if (isPrintableList(value)) {
+    return formatPrettyList(value);
+  }
+  if (isMutationResult(value)) {
+    return formatMutationResult(value);
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function isPrintableList(value: unknown): value is PrintableList {
+  return !!value
+    && typeof value === 'object'
+    && Array.isArray((value as PrintableList).items)
+    && (typeof (value as PrintableList).name === 'string' || typeof (value as PrintableList).list === 'string');
+}
+
+function formatPrettyList(list: PrintableList): string {
+  const items = list.items ?? [];
+  const unchecked = items.filter(item => item.checked !== true);
+  const checkedCount = items.length - unchecked.length;
+  const lines = [chalk.bold(list.name ?? list.list ?? 'Unnamed List')];
+
+  for (const item of unchecked) {
+    lines.push(`  ${formatPrettyItem(item)}`);
+  }
+
+  if (checkedCount > 0) {
+    lines.push(chalk.gray(`  + ${checkedCount} checked items`));
+  }
+
+  return lines.join('\n');
+}
+
+function formatPrettyItem(item: PrintableItem): string {
+  const parts = [item.name ?? 'Unnamed Item'];
+  if (item.quantity) {
+    parts.push(`(${item.quantity})`);
+  }
+  if (item.details) {
+    parts.push(`- ${item.details}`);
+  }
+  return parts.join(' ');
+}
+
+function isMutationResult(value: unknown): value is MutationResult {
+  return !!value && typeof value === 'object';
+}
+
+function formatMutationResult(value: MutationResult): string {
+  if (value.deleted) {
+    return `Deleted ${chalk.bold(value.deleted)}${typeof value.items === 'number' ? ` (${value.items} items)` : ''}`;
+  }
+
+  const lines = value.list ? [chalk.bold(value.list)] : [];
+  if (Array.isArray(value.added) && value.added.length > 0) {
+    lines.push(...value.added.map(item => `  ${formatPrettyItem(item)}`));
+  }
+  if (Array.isArray(value.removed) && value.removed.length > 0) {
+    lines.push(chalk.gray(`  - ${value.removed.length} removed ${value.removed.length === 1 ? 'item' : 'items'}`));
+  } else if (typeof value.removed === 'number' && value.removed > 0) {
+    lines.push(chalk.gray(`  - ${value.removed} removed ${value.removed === 1 ? 'item' : 'items'}`));
+  }
+
+  return lines.length > 0 ? lines.join('\n') : JSON.stringify(value, null, 2);
 }
 
 if (import.meta.main) {
