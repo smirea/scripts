@@ -367,6 +367,16 @@ interface ShoppingMeasure {
   priority: number;
 }
 
+interface MealItemLabel {
+  plain: string;
+  styled: string;
+}
+
+interface MealItemServing {
+  text: string;
+  measure: ShoppingMeasure;
+}
+
 interface EraFitMacroTotals {
   calories: number | null;
   protein: number | null;
@@ -1693,10 +1703,8 @@ function renderMealPlanText(report: EraFitMealPlanReport): string {
         lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
       }
       for (const item of meal.items) {
-        lines.push(`    ${padEnd(item.name, 28)} ${chalk.cyan(padEnd(item.serving ?? '', 18))} ${formatMacros(item)}`);
-        if (item.description && item.description !== item.name && item.description !== item.serving) {
-          lines.push(chalk.gray(`      ${item.description}`));
-        }
+        const label = formatMealPlanItemLabel(item);
+        lines.push(`    ${padVisibleEnd(label.styled, label.plain.length, 58)} ${formatMacros(item)}`);
       }
     }
     lines.push('');
@@ -1712,6 +1720,94 @@ function renderMealPlanText(report: EraFitMealPlanReport): string {
     }
   }
   return `${lines.join('\n')}\n`;
+}
+
+function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
+  const serving = formatMealPlanItemServing(item);
+  const name = formatMealPlanItemName(item.name, serving);
+  const grams = formatMealItemGrams(item);
+  const plain = `${serving ? `${serving.text} ${name}` : name}${grams ? ` [${grams}]` : ''}`;
+  const styled = `${serving ? `${chalk.cyan(serving.text)} ${name}` : name}${grams ? ` ${chalk.cyan(`[${grams}]`)}` : ''}`;
+  return { plain, styled };
+}
+
+function formatMealPlanItemServing(item: EraFitMealPlanFoodItem): MealItemServing | null {
+  const candidates = uniqueStrings([item.serving, item.description, item.description?.split(':').at(-1) ?? null]
+    .filter((value): value is string => value != null));
+  for (const candidate of candidates) {
+    const serving = parseMealPlanItemServingText(candidate, item);
+    if (serving) {
+      return serving;
+    }
+  }
+  return null;
+}
+
+function parseMealPlanItemServingText(value: string, item: EraFitMealPlanFoodItem): MealItemServing | null {
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*([A-Za-z%]+)?/);
+  if (!match) {
+    return null;
+  }
+  const quantity = parseQuantity(match[1]);
+  if (quantity == null) {
+    return null;
+  }
+  const text = match[0].trim();
+  const rest = trimmed.slice(match[0].length).trim();
+  const unit = canonicalShoppingUnit(match[2], rest, item.name);
+  if (!unit) {
+    return null;
+  }
+  const measure = {
+    quantity,
+    unit,
+    priority: shoppingUnitPriority(unit),
+  };
+  if (shouldSuppressMealItemServing(measure, item)) {
+    return null;
+  }
+  return { text, measure };
+}
+
+function shouldSuppressMealItemServing(measure: ShoppingMeasure, item: EraFitMealPlanFoodItem): boolean {
+  if (measure.unit === 'g' && item.unit === 'g' && item.amount != null && Math.abs(measure.quantity - item.amount) < 0.001) {
+    return true;
+  }
+  return measure.quantity === 1 && ['eggs', 'egg whites', 'bananas', 'avocados'].includes(measure.unit);
+}
+
+function formatMealPlanItemName(name: string, serving: MealItemServing | null): string {
+  if (!serving) {
+    return name;
+  }
+  const lower = name.toLowerCase();
+  const quantity = serving.measure.quantity;
+  if (serving.measure.unit === 'avocados' && lower === 'avocados') {
+    return quantity <= 1 ? 'Avocado' : 'Avocados';
+  }
+  if (serving.measure.unit === 'bananas' && lower === 'banana') {
+    return quantity === 1 ? 'Banana' : 'Bananas';
+  }
+  if (serving.measure.unit === 'eggs' && lower.endsWith('egg') && quantity !== 1) {
+    return `${name}s`;
+  }
+  if (serving.measure.unit === 'egg whites' && lower.endsWith('egg white') && quantity !== 1) {
+    return `${name}s`;
+  }
+  return name;
+}
+
+function formatMealItemGrams(item: EraFitMealPlanFoodItem): string | null {
+  if (item.unit === 'g' && item.amount != null) {
+    return `${formatNumber(roundNumber(item.amount))}g`;
+  }
+  const grams = item.description?.match(/\((\d+(?:\.\d+)?)g\)/i);
+  if (!grams) {
+    return null;
+  }
+  const amount = parseNumberLike(grams[1]);
+  return amount == null ? null : `${formatNumber(roundNumber(amount))}g`;
 }
 
 function formatMacros(value: EraFitMacroTotals): string {
@@ -1737,6 +1833,10 @@ function formatMealPlanTime(value: string): string {
 
 function padEnd(value: string, length: number): string {
   return value.length >= length ? value : value.padEnd(length);
+}
+
+function padVisibleEnd(value: string, visibleLength: number, length: number): string {
+  return visibleLength >= length ? value : `${value}${' '.repeat(length - visibleLength)}`;
 }
 
 function renderOutput(options: {
