@@ -59,6 +59,11 @@ const links = [
     source: path.join(repoRoot, 'src', 'voice-memo-parse.ts'),
     target: path.join(home, 'bin', 'voice-memo-parse'),
   },
+  {
+    name: 'anylist',
+    source: path.join(repoRoot, 'src', 'anylist.ts'),
+    target: path.join(home, 'bin', 'anylist'),
+  },
 ];
 
 const addedLinks: string[] = [];

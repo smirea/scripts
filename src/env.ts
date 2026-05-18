@@ -19,6 +19,7 @@ const env = z.object({
   AI_COMMITTER_EMAIL: z.string().optional(),
   DEFAULT_AI_COMITTER_EMAIL: z.string().optional(),
   DEFAULT_AI_COMMITTER_EMAIL: z.string().optional(),
+  ANYLIST_CREDENTIALS: z.string().regex(/.+@.+:.+/).optional(),
 }).parse(process.env);
 
 export default env;
