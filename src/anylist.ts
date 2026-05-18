@@ -27,6 +27,7 @@ interface InputItem {
   name: string;
   serving?: string;
   description?: string;
+  categoryMatchId?: string;
 }
 
 interface PrintableItem {
@@ -60,6 +61,25 @@ interface CreatedShoppingList {
 
 interface CreateShoppingListOptions {
   replaceExisting?: boolean;
+}
+
+interface AnyListCategory {
+  identifier: string;
+  name: string;
+  categoryMatchId: string;
+}
+
+interface AnyListUserData {
+  userCategoriesResponse?: {
+    categories?: AnyListCategory[];
+  };
+  listSettingsResponse?: {
+    settings?: Array<{
+      identifier?: string;
+      listId?: string | null;
+      listCategoryGroupId?: string | null;
+    }>;
+  };
 }
 
 async function runCli(): Promise<void> {
@@ -357,6 +377,7 @@ function parseCsvItems(raw: string): InputItem[] {
         name: record.name ?? '',
         serving: record.serving,
         description: record.description,
+        categoryMatchId: record.categorymatchid || record.category,
       };
     });
 }
@@ -409,6 +430,7 @@ function normalizeInputItem(item: InputItem): InputItem {
     name,
     serving: item.serving == null ? undefined : String(item.serving).trim(),
     description: item.description == null ? undefined : String(item.description).trim(),
+    categoryMatchId: item.categoryMatchId == null ? undefined : String(item.categoryMatchId).trim(),
   };
 }
 
@@ -495,7 +517,17 @@ function getAnyListUserId(any: AnyList): string {
 
 async function addItems(any: AnyList, list: AnyListShoppingList, items: InputItem[], isFavorite = false): Promise<object[]> {
   const added = [];
+  const categorizedItems = items.filter(item => item.categoryMatchId);
+  const categoryContext = categorizedItems.length > 0 && !isFavorite
+    ? await getCategoryContext(any, list.identifier)
+    : null;
   for (const input of items) {
+    if (input.categoryMatchId && categoryContext) {
+      const item = await addCategorizedItem(any, list, input, categoryContext);
+      added.push(item);
+      continue;
+    }
+
     let item = any.createItem({
       name: input.name,
       quantity: input.serving,
@@ -505,6 +537,96 @@ async function addItems(any: AnyList, list: AnyListShoppingList, items: InputIte
     added.push(item.toJSON());
   }
   return added;
+}
+
+async function getCategoryContext(any: AnyList, listId: string): Promise<{
+  userId: string;
+  listCategoryGroupId: string;
+  categories: Map<string, AnyListCategory>;
+}> {
+  const userData = await (any as AnyList & {
+    _getUserData: (refresh?: boolean) => Promise<AnyListUserData>;
+  })._getUserData(true);
+  const listCategoryGroupId = userData.listSettingsResponse?.settings
+    ?.find(setting => setting.listId === listId)
+    ?.listCategoryGroupId;
+  if (!listCategoryGroupId) {
+    throw new Error(`AnyList did not return a category group for list: ${listId}`);
+  }
+
+  return {
+    userId: getAnyListUserId(any),
+    listCategoryGroupId,
+    categories: new Map((userData.userCategoriesResponse?.categories ?? [])
+      .map(category => [category.categoryMatchId, category])),
+  };
+}
+
+async function addCategorizedItem(
+  any: AnyList,
+  list: AnyListShoppingList,
+  input: InputItem,
+  context: {
+    userId: string;
+    listCategoryGroupId: string;
+    categories: Map<string, AnyListCategory>;
+  }
+): Promise<object> {
+  const category = context.categories.get(input.categoryMatchId ?? '');
+  if (!category) {
+    throw new Error(`Unknown AnyList category: ${input.categoryMatchId}`);
+  }
+
+  const itemId = uuid();
+  const assignmentId = uuid();
+  const listItem = new (any.protobuf as typeof any.protobuf & {
+    ListItem: new (item: Record<string, unknown>) => unknown;
+  }).ListItem({
+    identifier: itemId,
+    listId: list.identifier,
+    name: input.name,
+    details: input.description,
+    checked: false,
+    category: category.categoryMatchId,
+    userId: context.userId,
+    categoryMatchId: category.categoryMatchId,
+    categoryAssignments: [{
+      identifier: assignmentId,
+      categoryGroupId: context.listCategoryGroupId,
+      categoryId: category.identifier,
+    }],
+    quantityPb: input.serving ? { amount: input.serving } : undefined,
+    photoIds: [],
+    storeIds: [],
+    prices: [],
+    ingredients: [],
+  });
+
+  const op = new any.protobuf.PBListOperation();
+  op.setMetadata({
+    operationId: uuid(),
+    handlerId: 'add-shopping-list-item',
+    userId: context.userId,
+  });
+  op.setListId(list.identifier);
+  op.setListItemId(itemId);
+  (op as typeof op & { setListItem: (item: unknown) => void }).setListItem(listItem);
+
+  const ops = new any.protobuf.PBListOperationList();
+  ops.setOperations([op]);
+  const form = new FormData();
+  form.append('operations', ops.toBuffer());
+  await any.client.post('data/shopping-lists/update', { body: form });
+
+  return {
+    listId: list.identifier,
+    identifier: itemId,
+    name: input.name,
+    details: input.description,
+    quantity: input.serving,
+    checked: false,
+    categoryMatchId: category.categoryMatchId,
+  };
 }
 
 async function deleteList(any: AnyList, list: AnyListShoppingList): Promise<object> {

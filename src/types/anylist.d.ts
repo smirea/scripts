@@ -50,6 +50,8 @@ declare module 'anylist' {
       PBListOperation: new () => {
         setMetadata(metadata: Record<string, unknown>): void;
         setListId(listId: string): void;
+        setListItemId(itemId: string): void;
+        setListItem(item: unknown): void;
         setList(list: Record<string, unknown>): void;
       };
       PBListOperationList: new () => {

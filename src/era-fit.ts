@@ -27,6 +27,8 @@ const SOURCE_PATH = 'api://era-fit/nutrition';
 const DEFAULT_DASHBOARD_PATH = '/clients/dashboard';
 const DEFAULT_DAYS = 1;
 const API_RETRY_ATTEMPTS = 3;
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
+const MEALPLAN_CATEGORY_MODEL = 'gemini-2.5-flash';
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
@@ -132,6 +134,24 @@ const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
   moderate_bulk: 500,
   strong_bulk: 1000,
 };
+const MEALPLAN_ANYLIST_CATEGORIES = [
+  'bakery',
+  'beverages',
+  'breakfast-and-cereal',
+  'condiments-oils-and-salad-dressings',
+  'cooking-and-baking',
+  'dairy',
+  'frozen-foods',
+  'grains-pasta-and-side-dishes',
+  'meat',
+  'produce',
+  'seafood',
+  'snacks-cookies-and-candy',
+  'soups-and-canned-goods',
+  'other',
+] as const;
+
+type MealPlanAnyListCategory = (typeof MEALPLAN_ANYLIST_CATEGORIES)[number];
 
 interface Credentials {
   email: string;
@@ -358,6 +378,16 @@ interface EraFitShoppingListItem {
   servings: string[];
 }
 
+interface GeminiGenerateContentResponse {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{
+        text?: string;
+      }>;
+    };
+  }>;
+}
+
 interface ShoppingFoodUse {
   food: EraFitMealPlanFoodItem;
   mealId: string;
@@ -575,16 +605,110 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
 
 async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id: string; name: string; added: number }> {
   const name = `Mealplan ${formatLongDate(new Date())}`;
+  const categories = await categorizeMealPlanShoppingList(report.shoppingList);
   const list = await createShoppingList(name, report.shoppingList.map(item => ({
     name: item.name,
     serving: item.quantity,
     description: item.meals > 1 ? `${item.meals} meals` : undefined,
+    categoryMatchId: categories.get(item.name) ?? 'other',
   })), { replaceExisting: true });
   return {
     id: list.id,
     name: list.name,
     added: list.added.length,
   };
+}
+
+async function categorizeMealPlanShoppingList(items: EraFitShoppingListItem[]): Promise<Map<string, MealPlanAnyListCategory>> {
+  const fallback = new Map(items.map(item => [item.name, inferMealPlanCategory(item.name)]));
+  try {
+    const geminiCategories = await categorizeMealPlanShoppingListWithGemini(items);
+    for (const item of items) {
+      const category = geminiCategories.get(item.name);
+      if (category && isMealPlanAnyListCategory(category)) {
+        fallback.set(item.name, category);
+      }
+    }
+  } catch (error) {
+    console.warn(`Gemini categorization failed, using local category rules: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return fallback;
+}
+
+async function categorizeMealPlanShoppingListWithGemini(items: EraFitShoppingListItem[]): Promise<Map<string, string>> {
+  const response = await fetch(`${GEMINI_BASE_URL}/v1beta/models/${MEALPLAN_CATEGORY_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      contents: [{
+        parts: [{
+          text: [
+            'Categorize these meal-plan shopping list ingredients into AnyList grocery category IDs.',
+            'Return only JSON with this shape: {"items":[{"name":"exact input name","categoryMatchId":"one allowed category"}]}.',
+            `Allowed categories: ${MEALPLAN_ANYLIST_CATEGORIES.join(', ')}`,
+            JSON.stringify(items.map(item => ({
+              name: item.name,
+              quantity: item.quantity,
+              servings: item.servings.slice(0, 6),
+            }))),
+          ].join('\n'),
+        }],
+      }],
+      generationConfig: {
+        responseMimeType: 'application/json',
+      },
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+  }
+
+  const payload = await response.json() as GeminiGenerateContentResponse;
+  const text = payload.candidates
+    ?.flatMap(candidate => candidate.content?.parts ?? [])
+    .map(part => part.text ?? '')
+    .join('\n')
+    .trim();
+  if (!text) {
+    throw new Error('model returned no category JSON');
+  }
+
+  const parsed = JSON.parse(stripJsonCodeFence(text)) as { items?: Array<{ name?: string; categoryMatchId?: string }> };
+  return new Map((parsed.items ?? [])
+    .filter(item => typeof item.name === 'string' && typeof item.categoryMatchId === 'string')
+    .map(item => [item.name as string, item.categoryMatchId as string]));
+}
+
+function stripJsonCodeFence(value: string): string {
+  return value
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
+function isMealPlanAnyListCategory(value: string): value is MealPlanAnyListCategory {
+  return (MEALPLAN_ANYLIST_CATEGORIES as readonly string[]).includes(value);
+}
+
+function inferMealPlanCategory(name: string): MealPlanAnyListCategory {
+  const normalized = name.toLowerCase();
+  if (/\b(chicken|turkey|beef|steak|pork|bacon|sausage)\b/.test(normalized)) return 'meat';
+  if (/\b(salmon|tuna|cod|tilapia|shrimp|seafood)\b/.test(normalized)) return 'seafood';
+  if (/\b(yogurt|milk|cheese|cottage|kefir|egg|eggs|egg white|whey)\b/.test(normalized)) return 'dairy';
+  if (/\b(bread|bagel|tortilla|pita|bun|roll)\b/.test(normalized)) return 'bakery';
+  if (/\b(oat|oatmeal|cereal|granola)\b/.test(normalized)) return 'breakfast-and-cereal';
+  if (/\b(rice|pasta|quinoa|potato|sweet potato|beans|lentils)\b/.test(normalized)) return 'grains-pasta-and-side-dishes';
+  if (/\b(oil|olive|avocado oil|dressing|mustard|mayo|sauce|vinegar|salsa)\b/.test(normalized)) return 'condiments-oils-and-salad-dressings';
+  if (/\b(almond|walnut|cashew|chia|flax|seed|protein powder)\b/.test(normalized)) return 'snacks-cookies-and-candy';
+  if (/\b(frozen)\b/.test(normalized)) return 'frozen-foods';
+  if (/\b(broth|stock|canned|soup)\b/.test(normalized)) return 'soups-and-canned-goods';
+  if (/\b(water|tea|coffee|juice|drink|beverage)\b/.test(normalized)) return 'beverages';
+  if (/\b(flour|sugar|spice|powder|baking)\b/.test(normalized)) return 'cooking-and-baking';
+  if (/\b(arugula|asparagus|avocado|banana|berries|blackberries|blueberries|broccoli|spinach|strawberries|zucchini|apple|orange|lemon|lime|lettuce|tomato|pepper|onion|carrot|fruit|vegetable)\b/.test(normalized)) return 'produce';
+  return 'other';
 }
 
 async function resolveSession(): Promise<EraFitSession> {
