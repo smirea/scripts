@@ -81,7 +81,7 @@ interface OutputCliArgs {
   output?: string;
 }
 
-interface LogCliArgs extends OutputCliArgs {
+interface PrintFoodCliArgs extends OutputCliArgs {
   date?: string;
   days: number;
   start?: string;
@@ -89,14 +89,14 @@ interface LogCliArgs extends OutputCliArgs {
   limit?: number;
 }
 
-export const defaultLogCommand = {
+export const defaultPrintFoodCommand = {
   command: '$0',
   describe: 'Print daily macro log',
-  builder: addLogOptions,
-  handler: runLogCommand,
-} satisfies CommandModule<{}, LogCliArgs>;
+  builder: addPrintFoodOptions,
+  handler: runPrintFoodCommand,
+} satisfies CommandModule<{}, PrintFoodCliArgs>;
 
-function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
+function addPrintFoodOptions<T>(parser: Argv<T>): Argv<T & PrintFoodCliArgs> {
   return addOutputOptions(parser, OUTPUT_FORMATS)
     .option('date', {
       type: 'string',
@@ -120,7 +120,7 @@ function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
       alias: ['l'],
       type: 'number',
       describe: 'Maximum number of logged foods to return',
-    }) as Argv<T & LogCliArgs>;
+    }) as Argv<T & PrintFoodCliArgs>;
 }
 
 function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
@@ -139,7 +139,7 @@ function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<
     }) as unknown as Argv<T & OutputCliArgs>;
 }
 
-async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
+async function runPrintFoodCommand(args: ArgumentsCamelCase<PrintFoodCliArgs>): Promise<void> {
   if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
     throw new Error('--limit must be a positive number.');
   }
@@ -301,9 +301,9 @@ function toTemplateCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
   }));
 }
 
-export const logCommand = {
-  command: 'log',
+export const printFoodCommand = {
+  command: 'print-food',
   describe: 'Print daily macro log',
-  builder: addLogOptions,
-  handler: runLogCommand,
-} satisfies CommandModule<{}, LogCliArgs>;
+  builder: addPrintFoodOptions,
+  handler: runPrintFoodCommand,
+} satisfies CommandModule<{}, PrintFoodCliArgs>;

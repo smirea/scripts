@@ -3,8 +3,8 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import { createScript } from '../utils/createScript';
-import { defaultLogCommand, logCommand } from './commands/log';
 import { mealPlanCommand } from './commands/mealplan';
+import { defaultPrintFoodCommand, printFoodCommand } from './commands/print-food';
 import { trackCommand } from './commands/track';
 
 if (import.meta.main) {
@@ -25,8 +25,9 @@ async function runCli(): Promise<void> {
     .scriptName('era-fit')
     .version(false)
     .strict()
-    .command(defaultLogCommand)
-    .command(logCommand)
+    .strictCommands()
+    .command(defaultPrintFoodCommand)
+    .command(printFoodCommand)
     .command(mealPlanCommand)
     .command(trackCommand)
     .help()
