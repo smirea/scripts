@@ -9,5 +9,13 @@
       "servingDescription": "1 medium (7\" to 7-7/8\" long)",
       "updatedAt": "2026-05-19T17:46:25.118Z"
     }
+  },
+  "mealPlanMealMap": {
+    "breakfast": "breakfast",
+    "morning_snack": "snack_am",
+    "lunch": "lunch",
+    "afternoon_snack": "snack_pm",
+    "dinner": "dinner",
+    "evening_snack": "snack_evening"
   }
 }

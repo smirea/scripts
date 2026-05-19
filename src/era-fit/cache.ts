@@ -4,6 +4,16 @@ import path from 'node:path';
 import { z } from 'zod';
 
 const CACHE_PATH = path.join(import.meta.dir, 'cache.json');
+const EraFitMealKeySchema = z.enum(['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening']);
+
+export const DEFAULT_MEAL_PLAN_MEAL_MAP = {
+  breakfast: 'breakfast',
+  morning_snack: 'snack_am',
+  lunch: 'lunch',
+  afternoon_snack: 'snack_pm',
+  dinner: 'dinner',
+  evening_snack: 'snack_evening',
+} as const;
 
 const CachedFoodSelectionSchema = z.object({
   foodId: z.string(),
@@ -19,6 +29,7 @@ const CachedFoodSelectionSchema = z.object({
 const EraFitCacheSchema = z.object({
   version: z.literal(1),
   foods: z.record(z.string(), CachedFoodSelectionSchema),
+  mealPlanMealMap: z.record(z.string(), EraFitMealKeySchema).default(DEFAULT_MEAL_PLAN_MEAL_MAP),
 });
 
 export type CachedFoodSelection = z.infer<typeof CachedFoodSelectionSchema>;
