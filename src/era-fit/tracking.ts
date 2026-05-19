@@ -111,6 +111,8 @@ export type TrackResolutionResult =
 export interface TrackResolveOptions {
   useCache: boolean;
   writeCache: boolean;
+  interactive?: boolean;
+  aliases?: string[];
   log?: (message: string) => void;
 }
 
@@ -184,28 +186,29 @@ export async function resolveTrackFood(
     }
   }
 
+  const interactive = options.interactive ?? true;
   const food = item.explicitFoodId
     ? await fetchEraFitFatSecretFood(session, item.explicitFoodId)
     : isBarcodeQuery(item.query)
-      ? await resolveFoodFromBarcode(session, item, options.log)
-      : await resolveFoodFromSearch(session, item);
+      ? await resolveFoodFromBarcode(session, item, interactive, options.log)
+      : await resolveFoodFromSearch(session, item, interactive);
   if (food === 'skip' || food === 'cancel') {
     return { status: food };
   }
   const forceServingPrompt = !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query);
-  const serving = await resolveServingChoice(food, item, forceServingPrompt);
+  const serving = await resolveServingChoice(food, item, forceServingPrompt, interactive);
   if (!serving) {
     return { status: 'cancel' };
   }
   const quantity = forceServingPrompt
-    ? await promptForQuantity(item, serving, food)
+    ? interactive ? await promptForQuantity(item, serving, food) : null
     : defaultQuantityForServing(item, serving, food, item.amount);
   if (quantity == null) {
     return { status: 'cancel' };
   }
 
   if (options.writeCache) {
-    rememberFoodSelection(cache, item.query, {
+    const selection = {
       foodId: food.food_id,
       foodName: food.food_name,
       brandName: food.brand_name,
@@ -213,7 +216,11 @@ export async function resolveTrackFood(
       servingId: serving.servingId,
       servingUnit: serving.unit,
       servingDescription: serving.description,
-    });
+    };
+    rememberFoodSelection(cache, item.query, selection);
+    for (const alias of options.aliases ?? []) {
+      rememberFoodSelection(cache, alias, selection);
+    }
   }
 
   return {
@@ -266,6 +273,22 @@ export async function saveTrackedFoods(
   return saved;
 }
 
+export async function deleteTrackedFoods(
+  session: EraFitSession,
+  options: {
+    dateId: string;
+    foods: TrackedFoodEntry[];
+  }
+): Promise<void> {
+  for (const food of options.foods) {
+    const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking`;
+    const logId = food.record.meal_tracking_food_log || `${options.dateId}_${food.meal}_${food.id}`;
+    await setEraFitFirebasePath(session, `${basePath}/data/${options.dateId}/meals/${food.meal}/foods/${food.id}`, null);
+    await setEraFitFirebasePath(session, `${basePath}_food_data/${logId}`, null);
+  }
+  await saveMealTrackingTotals(session, options.dateId);
+}
+
 export async function fetchTrackedFoodsForDate(session: EraFitSession, dateId: string): Promise<TrackedFoodEntry[]> {
   const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking`;
   const meals = await readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/data/${dateId}/meals`) ?? {};
@@ -300,7 +323,8 @@ export function formatEraFitTime(date: Date): string {
 
 async function resolveFoodFromSearch(
   session: EraFitSession,
-  item: ParsedTrackItem
+  item: ParsedTrackItem,
+  interactive: boolean
 ): Promise<EraFitFatSecretFood | 'cancel'> {
   const results = (await searchEraFitFatSecretFoods(session, item.query)).slice(0, 10);
   if (results.length === 0) {
@@ -313,6 +337,9 @@ async function resolveFoodFromSearch(
     if (resolveAutoServingChoice(food, item)) {
       return food;
     }
+  }
+  if (!interactive) {
+    throw new Error(`No exact cached match for "${item.query}". Press S on the item to choose a food.`);
   }
 
   const labels = formatFoodSearchOptionLabels(results);
@@ -332,6 +359,7 @@ async function resolveFoodFromSearch(
 async function resolveFoodFromBarcode(
   session: EraFitSession,
   item: ParsedTrackItem,
+  interactive: boolean,
   log?: (message: string) => void
 ): Promise<EraFitFatSecretFood | BarcodeMissAction> {
   const food = await fetchEraFitFatSecretFoodByBarcode(session, item.query);
@@ -339,7 +367,7 @@ async function resolveFoodFromBarcode(
     return food;
   }
   log?.(`${chalk.yellow('barcode not found')} ${chalk.cyan(item.query)}`);
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  if (!interactive || !process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error(`No Era Fit food found for barcode ${item.query}.`);
   }
   const action = await select({
@@ -397,11 +425,15 @@ function formatSearchMacro(value: number | null, suffix: string): string {
 async function resolveServingChoice(
   food: EraFitFatSecretFood,
   item: ParsedTrackItem,
-  forcePrompt: boolean
+  forcePrompt: boolean,
+  interactive: boolean
 ): Promise<ServingChoice | null> {
   const auto = resolveAutoServingChoice(food, item);
   if (auto && !forcePrompt) {
     return auto;
+  }
+  if (!interactive) {
+    return null;
   }
   const choices = buildServingChoices(food);
   if (choices.length === 0) {

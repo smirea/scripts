@@ -1,5 +1,5 @@
-import { isCancel, Prompt } from '@clack/core';
-import { isCancel as isPromptCancel, select, text } from '@clack/prompts';
+import { isCancel, Prompt, settings as clackSettings } from '@clack/core';
+import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 
 import { type EraFitCache } from './cache';
@@ -10,6 +10,7 @@ import {
   parseNumberLike,
   roundNumber,
   startOfLocalDay,
+  uniqueStrings,
   type EraFitMacroTotals,
   type EraFitMealKey,
   type EraFitMealPlanDay,
@@ -18,6 +19,7 @@ import {
   type EraFitSession,
 } from './core';
 import {
+  deleteTrackedFoods,
   fetchTrackedFoodsForDate,
   formatEraFitTime,
   parseTrackItem,
@@ -26,11 +28,18 @@ import {
   tryParseTrackItem,
   type ParsedTrackItem,
   type ResolvedTrackFood,
+  type SavedTrackFood,
   type TrackedFoodEntry,
   type TrackedFoodRecord,
 } from './tracking';
 
 type NavigationMode = 'meals' | 'items';
+type LoadingKind = 'checking' | 'unchecking';
+
+const CHECKBOX_EMPTY = '○';
+const CHECKBOX_CHECKED = '⊗';
+const CHECKBOX_PARTIAL = '⊝';
+const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
 
 interface InteractiveMealPlanOptions {
   session: EraFitSession;
@@ -61,6 +70,9 @@ interface InteractiveState {
   itemCursor: number;
   completedItemKeys: Set<string>;
   existingItemKeys: Set<string>;
+  trackedItemByKey: Map<string, TrackedFoodEntry>;
+  loadingItemKeys: Map<string, LoadingKind>;
+  tasks: Set<Promise<void>>;
   multipliers: Map<string, number>;
   messages: string[];
 }
@@ -68,7 +80,8 @@ interface InteractiveState {
 type MealPlanPromptAction =
   | { type: 'toggle-meal'; mealIndex: number }
   | { type: 'toggle-item'; mealIndex: number; itemIndex: number }
-  | { type: 'item-action'; mealIndex: number; itemIndex: number }
+  | { type: 'set-serving'; mealIndex: number; itemIndex: number }
+  | { type: 'switch-alternative'; mealIndex: number; itemIndex: number }
   | { type: 'done' };
 
 export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOptions): Promise<void> {
@@ -80,17 +93,36 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   const dateId = formatEraFitDateId(date);
   const tracked = await fetchTrackedFoodsForDate(options.session, dateId);
   const state = createInteractiveState(options.day, options.cache, tracked, options.dryRun);
+  clearInteractiveScreen();
   pushMessage(state, options.dryRun
     ? `dry run for ${formatDateKey(date)}; no Era Fit writes or cache updates`
     : `tracking ${formatDateKey(date)}`);
 
   while (true) {
-    const action = await new MealPlanChecklistPrompt(state).prompt();
+    clearInteractiveScreen();
+    const action = await promptMealPlanChecklist(state);
     if (isCancel(action) || !action || action.type === 'done') {
+      if (state.tasks.size > 0) {
+        process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
+        await Promise.allSettled(Array.from(state.tasks));
+      }
+      clearInteractiveScreen();
       process.stdout.write(chalk.gray('done\n'));
       return;
     }
     await handleMealPlanAction(options.session, options.cache, dateId, state, action);
+  }
+}
+
+async function promptMealPlanChecklist(state: InteractiveState): Promise<symbol | MealPlanPromptAction | undefined> {
+  const previousEscape = clackSettings.aliases.get('escape');
+  clackSettings.aliases.delete('escape');
+  try {
+    return await new MealPlanChecklistPrompt(state).prompt();
+  } finally {
+    if (previousEscape) {
+      clackSettings.aliases.set('escape', previousEscape);
+    }
   }
 }
 
@@ -115,7 +147,7 @@ function createInteractiveState(
       })),
     };
   });
-  const completedItemKeys = matchExistingTrackedItems(meals, tracked);
+  const matched = matchExistingTrackedItems(meals, tracked);
   return {
     day,
     meals,
@@ -123,8 +155,11 @@ function createInteractiveState(
     mode: 'meals',
     mealCursor: 0,
     itemCursor: 0,
-    completedItemKeys,
-    existingItemKeys: new Set(completedItemKeys),
+    completedItemKeys: matched.completed,
+    existingItemKeys: new Set(matched.completed),
+    trackedItemByKey: matched.trackedByItemKey,
+    loadingItemKeys: new Map(),
+    tasks: new Set(),
     multipliers: new Map(),
     messages: [],
   };
@@ -147,7 +182,7 @@ async function handleMealPlanAction(
 ): Promise<void> {
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
-    await logMealItems(session, cache, dateId, state, meal.items);
+    startToggleItemsTask(session, cache, dateId, state, meal.items);
     return;
   }
   if (action.type === 'done') {
@@ -158,36 +193,61 @@ async function handleMealPlanAction(
     return;
   }
   if (action.type === 'toggle-item') {
-    await logMealItems(session, cache, dateId, state, [item]);
+    startToggleItemsTask(session, cache, dateId, state, [item]);
     return;
   }
-  await handleItemAction(session, cache, dateId, state, item);
-}
-
-async function handleItemAction(
-  session: EraFitSession,
-  cache: EraFitCache,
-  dateId: string,
-  state: InteractiveState,
-  item: MealPlanItemRef
-): Promise<void> {
-  const action = await select({
-    message: `Action for ${formatItemDisplayName(item.item)}`,
-    options: [
-      { value: 'replace', label: 'Replace/search and log' },
-      { value: 'multiplier', label: 'Set serving multiplier' },
-      { value: 'cancel', label: 'Cancel' },
-    ],
-  });
-  if (isPromptCancel(action) || action === 'cancel') {
-    pushMessage(state, 'cancelled item action');
-    return;
-  }
-  if (action === 'multiplier') {
+  clearInteractiveScreen();
+  if (action.type === 'set-serving') {
     await promptServingMultiplier(state, item);
     return;
   }
   await promptReplacementAndLog(session, cache, dateId, state, item);
+}
+
+function startToggleItemsTask(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  items: MealPlanItemRef[]
+): void {
+  const available = items.filter(item => !state.loadingItemKeys.has(item.key));
+  if (available.length === 0) {
+    pushMessage(state, 'selection is already updating');
+    return;
+  }
+  const shouldUncheck = available.every(item => state.completedItemKeys.has(item.key));
+  const targets = shouldUncheck
+    ? available.filter(item => state.completedItemKeys.has(item.key))
+    : available.filter(item => !state.completedItemKeys.has(item.key));
+  if (targets.length === 0) {
+    return;
+  }
+
+  for (const item of targets) {
+    state.loadingItemKeys.set(item.key, shouldUncheck ? 'unchecking' : 'checking');
+  }
+
+  let task!: Promise<void>;
+  task = (async () => {
+    try {
+      if (shouldUncheck) {
+        await uncheckMealItems(session, dateId, state, targets);
+      } else {
+        await logMealItems(session, cache, dateId, state, targets, {
+          interactive: false,
+        });
+      }
+    } catch (error) {
+      pushMessage(state, error instanceof Error ? error.message : String(error));
+    } finally {
+      for (const item of targets) {
+        state.loadingItemKeys.delete(item.key);
+      }
+      state.tasks.delete(task);
+    }
+  })();
+  state.tasks.add(task);
 }
 
 async function promptServingMultiplier(state: InteractiveState, item: MealPlanItemRef): Promise<void> {
@@ -201,7 +261,8 @@ async function promptServingMultiplier(state: InteractiveState, item: MealPlanIt
     },
   });
   if (isPromptCancel(value)) {
-    pushMessage(state, 'cancelled multiplier');
+    state.mode = 'items';
+    pushMessage(state, 'serving unchanged');
     return;
   }
   const multiplier = parseNumberLike(value);
@@ -214,6 +275,7 @@ async function promptServingMultiplier(state: InteractiveState, item: MealPlanIt
     state.multipliers.set(item.key, multiplier);
   }
   pushMessage(state, `${formatItemDisplayName(item.item)} multiplier set to ${formatNumber(multiplier)}x`);
+  state.mode = 'items';
 }
 
 async function promptReplacementAndLog(
@@ -235,10 +297,14 @@ async function promptReplacementAndLog(
     },
   });
   if (isPromptCancel(value)) {
-    pushMessage(state, 'cancelled replacement');
+    state.mode = 'meals';
+    pushMessage(state, 'alternative unchanged');
     return;
   }
-  await logMealItems(session, cache, dateId, state, [item], value.trim());
+  await logMealItems(session, cache, dateId, state, [item], {
+    replacement: value.trim(),
+    interactive: true,
+  });
 }
 
 async function logMealItems(
@@ -247,7 +313,10 @@ async function logMealItems(
   dateId: string,
   state: InteractiveState,
   items: MealPlanItemRef[],
-  replacement?: string
+  options: {
+    replacement?: string;
+    interactive: boolean;
+  }
 ): Promise<void> {
   const pending = items.filter(item => !state.completedItemKeys.has(item.key));
   if (pending.length === 0) {
@@ -257,8 +326,8 @@ async function logMealItems(
 
   const resolved: Array<{ item: MealPlanItemRef; food: ResolvedTrackFood }> = [];
   for (const item of pending) {
-    const trackItem = replacement
-      ? buildReplacementTrackItem(item, replacement, state.multipliers.get(item.key) ?? 1)
+    const trackItem = options.replacement
+      ? buildReplacementTrackItem(item, options.replacement, state.multipliers.get(item.key) ?? 1)
       : buildMealPlanTrackItem(item, state.multipliers.get(item.key) ?? 1);
     const result = await resolveTrackFood(
       session,
@@ -268,6 +337,8 @@ async function logMealItems(
       {
         useCache: true,
         writeCache: !state.dryRun,
+        interactive: options.interactive,
+        aliases: foodCacheAliases(item),
         log: message => pushMessage(state, message),
       }
     ).catch(error => {
@@ -278,7 +349,10 @@ async function logMealItems(
       continue;
     }
     if (result.status === 'cancel') {
-      pushMessage(state, 'cancelled logging');
+      if (options.interactive) {
+        state.mode = 'meals';
+      }
+      pushMessage(state, options.interactive ? 'returned to meals' : `needs selection for ${formatItemDisplayName(item.item)}`);
       break;
     }
     if (result.status === 'skip') {
@@ -292,21 +366,70 @@ async function logMealItems(
     return;
   }
 
+  let saved: SavedTrackFood[] = [];
   if (!state.dryRun) {
-    await saveTrackedFoods(session, {
+    saved = await saveTrackedFoods(session, {
       dateId,
       meal: resolved[0].item.trackingMeal,
       foods: resolved.map(entry => entry.food),
     });
   }
 
-  for (const entry of resolved) {
+  for (const [index, entry] of resolved.entries()) {
     state.completedItemKeys.add(entry.item.key);
+    state.existingItemKeys.delete(entry.item.key);
+    const savedFood = saved[index];
+    if (savedFood) {
+      state.trackedItemByKey.set(entry.item.key, {
+        meal: entry.item.trackingMeal,
+        id: savedFood.id,
+        record: savedFood.record,
+      });
+    }
   }
   const label = resolved.length === 1
     ? formatItemDisplayName(resolved[0].item.item)
     : `${resolved.length} items`;
   pushMessage(state, `${state.dryRun ? 'would log' : 'logged'} ${label}`);
+}
+
+async function uncheckMealItems(
+  session: EraFitSession,
+  dateId: string,
+  state: InteractiveState,
+  items: MealPlanItemRef[]
+): Promise<void> {
+  const checked = items.filter(item => state.completedItemKeys.has(item.key));
+  if (checked.length === 0) {
+    return;
+  }
+  const tracked = checked
+    .map(item => state.trackedItemByKey.get(item.key))
+    .filter((entry): entry is TrackedFoodEntry => entry != null);
+
+  if (!state.dryRun && tracked.length > 0) {
+    await deleteTrackedFoods(session, {
+      dateId,
+      foods: tracked,
+    });
+  }
+
+  for (const item of checked) {
+    state.completedItemKeys.delete(item.key);
+    state.existingItemKeys.delete(item.key);
+    state.trackedItemByKey.delete(item.key);
+  }
+  const label = checked.length === 1
+    ? formatItemDisplayName(checked[0].item)
+    : `${checked.length} items`;
+  pushMessage(state, `${state.dryRun ? 'would uncheck' : 'unchecked'} ${label}`);
+}
+
+function foodCacheAliases(item: MealPlanItemRef): string[] {
+  return uniqueStrings([
+    item.item.name,
+    formatItemDisplayName(item.item),
+  ]).filter(alias => alias.trim().length > 0);
 }
 
 function buildMealPlanTrackItem(item: MealPlanItemRef, multiplier: number): ParsedTrackItem {
@@ -334,8 +457,12 @@ function buildMealPlanTrackInput(item: EraFitMealPlanFoodItem, query: string, mu
 function matchExistingTrackedItems(
   meals: InteractiveState['meals'],
   tracked: TrackedFoodEntry[]
-): Set<string> {
+): {
+  completed: Set<string>;
+  trackedByItemKey: Map<string, TrackedFoodEntry>;
+} {
   const completed = new Set<string>();
+  const trackedByItemKey = new Map<string, TrackedFoodEntry>();
   const used = new Set<string>();
   for (const meal of meals) {
     const candidates = tracked.filter(entry => entry.meal === meal.trackingMeal);
@@ -345,6 +472,7 @@ function matchExistingTrackedItems(
         continue;
       }
       completed.add(item.key);
+      trackedByItemKey.set(item.key, best);
       used.add(trackedEntryKey(best));
     }
 
@@ -357,10 +485,11 @@ function matchExistingTrackedItems(
         continue;
       }
       completed.add(item.key);
+      trackedByItemKey.set(item.key, best);
       used.add(trackedEntryKey(best));
     }
   }
-  return completed;
+  return { completed, trackedByItemKey };
 }
 
 function findBestTextTrackedMatch(
@@ -495,12 +624,19 @@ function normalizeMatchText(value: string): string {
 }
 
 class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
+  private readonly repaintTimer: ReturnType<typeof setInterval>;
+
   constructor(private readonly view: InteractiveState) {
     super({
       render() {
         return renderMealPlanFrame(view);
       },
     }, false);
+    this.repaintTimer = setInterval(() => {
+      this.repaint();
+    }, 120);
+    this.once('submit', () => clearInterval(this.repaintTimer));
+    this.once('cancel', () => clearInterval(this.repaintTimer));
     this.on('cursor', action => {
       if (action === 'up' || action === 'down') {
         this.moveCursor(action === 'up' ? -1 : 1);
@@ -513,17 +649,38 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.submitCurrentToggle();
       }
     });
-    this.on('key', key => {
-      if (key === 'q') {
+    this.on('key', (key, info) => {
+      if (info.name === 'escape') {
+        this.goBack();
+      } else if (key === 'q') {
         this.submitAction({ type: 'done' });
       } else if (key === 's' && this.view.mode === 'items') {
         this.submitAction({
-          type: 'item-action',
+          type: 'switch-alternative',
+          mealIndex: this.view.mealCursor,
+          itemIndex: this.view.itemCursor,
+        });
+      } else if (key === 'r' && this.view.mode === 'items') {
+        this.submitAction({
+          type: 'set-serving',
           mealIndex: this.view.mealCursor,
           itemIndex: this.view.itemCursor,
         });
       }
     });
+  }
+
+  private repaint(): void {
+    (this as unknown as { render(): void }).render();
+  }
+
+  private goBack(): void {
+    if (this.view.mode === 'items') {
+      this.view.mode = 'meals';
+      this.repaint();
+      return;
+    }
+    this.submitAction({ type: 'done' });
   }
 
   private moveCursor(delta: number): void {
@@ -593,21 +750,38 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
     ? chalk.cyan(` x${formatNumber(multiplier)}`)
     : '';
   const existingText = existing ? chalk.gray(' tracked') : '';
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${completed ? '[x]' : '[ ]'} ${styledLabel}${multiplierText} ${formatMacros(item.item)}${existingText}`;
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatItemCheckbox(state, item)} ${styledLabel}${multiplierText} ${formatMacros(item.item)}${existingText}`;
   return active ? chalk.cyan(line) : line;
 }
 
 function formatMealCheckbox(state: InteractiveState, items: MealPlanItemRef[]): string {
+  const loading = items.find(item => state.loadingItemKeys.has(item.key));
+  if (loading) {
+    return formatLoadingSpinner(loading.key);
+  }
   const checked = items.filter(item => state.completedItemKeys.has(item.key)).length;
-  if (checked === 0) return '[ ]';
-  if (checked === items.length) return '[x]';
-  return '[-]';
+  if (checked === 0) return CHECKBOX_EMPTY;
+  if (checked === items.length) return CHECKBOX_CHECKED;
+  return CHECKBOX_PARTIAL;
+}
+
+function formatItemCheckbox(state: InteractiveState, item: MealPlanItemRef): string {
+  if (state.loadingItemKeys.has(item.key)) {
+    return formatLoadingSpinner(item.key);
+  }
+  return state.completedItemKeys.has(item.key) ? CHECKBOX_CHECKED : CHECKBOX_EMPTY;
+}
+
+function formatLoadingSpinner(key: string): string {
+  const offset = Array.from(key).reduce((sum, character) => sum + character.charCodeAt(0), 0);
+  const index = Math.floor(Date.now() / 120 + offset) % LOADING_FRAMES.length;
+  return chalk.yellow(LOADING_FRAMES[index]);
 }
 
 function contextHelp(mode: NavigationMode): string {
   return mode === 'meals'
-    ? 'up/down move meals | right enter meal | space log meal | enter/q done | ctrl+c cancel'
-    : 'up/down move items | left meals | space log item | s replace or multiplier | enter/q done | ctrl+c cancel';
+    ? '↑/↓ meals | → items | Space toggle | Esc/q exit | Ctrl-C cancel'
+    : '↑/↓ items | ←/Esc meals | Space toggle | R serving | S alternative | q exit';
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
@@ -625,6 +799,10 @@ function formatMacros(value: EraFitMacroTotals): string {
 
 function formatNullableNumber(value: number | null): string {
   return value == null ? '-' : formatNumber(roundNumber(value));
+}
+
+function clearInteractiveScreen(): void {
+  process.stdout.write('\x1b[2J\x1b[H');
 }
 
 function pushMessage(state: InteractiveState, message: string): void {
