@@ -8,7 +8,7 @@ import type { Argv, ArgumentsCamelCase } from 'yargs';
 import { createShoppingList } from '../../anylist';
 import env from '../../env';
 import { parseOutputFormat, type OutputFormat } from '../../utils/output';
-import { formatTabularRows, padVisibleEnd } from '../../utils/tabular';
+import { formatTabularRows, padVisibleEnd, visibleLength } from '../../utils/tabular';
 import {
   canonicalShoppingUnit,
   fetchEraFitMealPlan,
@@ -349,20 +349,30 @@ function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
     if (meal.recipe) {
       lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
     }
-    for (const item of meal.items) {
-      const label = formatMealPlanItemLabel(item);
-      lines.push(`    ${padVisibleEnd(label.styled, 58)} ${formatMacros(item)}`);
+    const labels = meal.items.map(item => ({ item, label: formatMealPlanItemLabel(item) }));
+    const labelWidth = labels.reduce((width, entry) => Math.max(width, visibleLength(entry.label.styled)), 58);
+    for (const { item, label } of labels) {
+      lines.push(`    ${padVisibleEnd(label.styled, labelWidth)} ${formatMacros(item)}`);
     }
   }
   return lines;
 }
 
 function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
+  if (item.description?.trim()) {
+    return { styled: styleMealPlanItemDescription(item.description.trim()) };
+  }
   const serving = formatMealPlanItemServing(item);
   const name = formatMealPlanItemName(item.name, serving);
   const grams = formatMealItemGrams(item);
   const styled = `${serving ? `${chalk.cyan(serving.text)} ${name}` : name}${grams ? ` ${chalk.cyan(`[${grams}]`)}` : ''}`;
   return { styled };
+}
+
+function styleMealPlanItemDescription(value: string): string {
+  return value
+    .replace(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?\s*[A-Za-z%]*|\d+\s+[A-Za-z]+)/, match => chalk.cyan(match))
+    .replace(/\(([^)]*\d[^)]*)\)$/, match => chalk.cyan(match));
 }
 
 function formatMealPlanItemServing(item: EraFitMealPlanFoodItem): MealItemServing | null {
