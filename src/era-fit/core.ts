@@ -62,6 +62,8 @@ const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
   moderate_bulk: 500,
   strong_bulk: 1000,
 };
+
+let runtimeCredentials: Credentials | null = null;
 interface Credentials {
   email: string;
   password: string;
@@ -386,14 +388,18 @@ export async function resolveSession(): Promise<EraFitSession> {
     }
   }
 
-  return loginAndSaveSession(await promptCredentials());
+  return loginAndSaveSession(await promptCredentials(), { saveCredentials: true });
 }
 
-async function loginAndSaveSession(credentials: Credentials): Promise<EraFitSession> {
+async function loginAndSaveSession(credentials: Credentials, options: { saveCredentials?: boolean } = {}): Promise<EraFitSession> {
   const loginResult = await login(credentials, DEFAULT_DASHBOARD_PATH);
   const app = parseAppCookie(loginResult.cookieHeader);
   if (!app) {
     throw new Error('Era Fit login succeeded, but the app cookie needed for nutrition API calls was not set.');
+  }
+  runtimeCredentials = credentials;
+  if (options.saveCredentials) {
+    saveEnvLocalValue(CREDENTIALS_ENV_KEY, formatCredentials(credentials));
   }
   saveEnvLocalValue(SESSION_ENV_KEY, loginResult.cookieHeader);
 
@@ -590,7 +596,7 @@ async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | 
   if (customToken) {
     return exchangeFirebaseCustomToken(customToken);
   }
-  const credentials = parseOptionalCredentials(env.ERA_FIT_CREDENTIALS);
+  const credentials = runtimeCredentials ?? parseOptionalCredentials(env.ERA_FIT_CREDENTIALS);
   if (!credentials) {
     return null;
   }
@@ -1610,7 +1616,7 @@ function evpBytesToKey(password: string, salt: Buffer, keyLength: number, ivLeng
 
 async function promptCredentials(): Promise<Credentials> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error(`Era Fit needs credentials, but this shell is not interactive enough to prompt.`);
+    throw new Error(`Era Fit needs ${CREDENTIALS_ENV_KEY}=<email>:<password> in .env.local, but this shell is not interactive enough to prompt.`);
   }
 
   const email = await text({
@@ -1664,6 +1670,10 @@ function parseOptionalCredentials(value: string | undefined): Credentials | null
     throw new Error(`${CREDENTIALS_ENV_KEY} must include both a non-empty email and password.`);
   }
   return { email, password };
+}
+
+function formatCredentials(credentials: Credentials): string {
+  return `${credentials.email}:${credentials.password}`;
 }
 
 function parseLoginResponse(text: string): LoginResponse {
