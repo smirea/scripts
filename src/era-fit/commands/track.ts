@@ -62,6 +62,7 @@ interface TrackCliArgs {
   date?: string;
   time?: string;
   dryRun: boolean;
+  cache: boolean;
 }
 
 interface ParsedTrackItem {
@@ -166,7 +167,12 @@ function addTrackOptions<T>(parser: Argv<T>): Argv<T & TrackCliArgs> {
     .option('dry-run', {
       type: 'boolean',
       default: false,
-      describe: 'Run the full food and serving resolution flow, but do not write to Era Fit or update the cache',
+      describe: 'Resolve foods and servings, but do not write to Era Fit or update the cache',
+    })
+    .option('cache', {
+      type: 'boolean',
+      default: true,
+      describe: 'Use cached food and serving selections. Pass --no-cache to force lookup',
     })
     .example('$0 track s1 1 banana, 2scoop boba protein powder', 'Log multiple foods separated with commas') as unknown as Argv<T & TrackCliArgs>;
 }
@@ -190,8 +196,8 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
   const foods: ResolvedTrackFood[] = [];
   for (const item of parsedItems) {
     const food = await resolveTrackFood(session, cache, item, time, {
-      useCache: !args.dryRun,
-      writeCache: !args.dryRun,
+      useCache: args.cache,
+      writeCache: args.cache && !args.dryRun,
     });
     logTrackProgress(`${chalk.green('matched')} ${chalk.bold(food.record.food_name)} ${chalk.gray('to')} ${chalk.cyan(item.raw)}`);
     foods.push(food);
