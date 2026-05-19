@@ -147,7 +147,7 @@ function addTrackOptions<T>(parser: Argv<T>): Argv<T & TrackCliArgs> {
     .positional('items', {
       type: 'string',
       array: true,
-      describe: 'Foods as count [unit] name|id, separated with semicolons, for example "50g chicken breast; 1 banana"',
+      describe: 'Foods as count [unit] name|id, separated with commas',
     })
     .option('date', {
       type: 'string',
@@ -161,14 +161,15 @@ function addTrackOptions<T>(parser: Argv<T>): Argv<T & TrackCliArgs> {
       type: 'boolean',
       default: false,
       describe: 'Resolve foods and servings but do not write to Era Fit',
-    }) as unknown as Argv<T & TrackCliArgs>;
+    })
+    .example('$0 track s1 1 banana, 2scoop boba protein powder', 'Log multiple foods separated with commas') as unknown as Argv<T & TrackCliArgs>;
 }
 
 async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<void> {
   const { meal, itemArgs } = resolveMealAndItemArgs(args.meal, args.items ?? []);
   const parsedItems = splitTrackItemArgs(itemArgs).map(parseTrackItem);
   if (parsedItems.length === 0) {
-    throw new Error('Add at least one food item, for example: era-fit track b "50g chicken breast; 1 banana".');
+    throw new Error('Add at least one food item, for example: era-fit track b 50g chicken breast, 1 banana.');
   }
   if (await shouldExitForPossibleMissingSeparator(parsedItems)) {
     return;
@@ -235,12 +236,12 @@ function splitTrackItemArgs(parts: string[]): string[] {
   if (!raw) {
     return [];
   }
-  if (!raw.includes(';')) {
+  if (!raw.includes(',')) {
     return [raw];
   }
-  const items = raw.split(';').map(part => part.trim());
+  const items = raw.split(',').map(part => part.trim());
   if (items.some(item => item.length === 0)) {
-    throw new Error('Food items must be separated by `;` without empty entries.');
+    throw new Error('Food items must be separated by `,` without empty entries.');
   }
   return items;
 }
@@ -248,7 +249,7 @@ function splitTrackItemArgs(parts: string[]): string[] {
 function parseTrackItem(raw: string): ParsedTrackItem {
   const parsed = tryParseTrackItem(raw);
   if (!parsed) {
-    throw new Error(`Could not parse food item "${raw}". Expected count [unit] name|id, for example "50g chicken breast". Separate multiple foods with \`; \`.`);
+    throw new Error(`Could not parse food item "${raw}". Expected count [unit] name|id, for example "50g chicken breast". Separate multiple foods with \`,\`.`);
   }
   return parsed;
 }
@@ -289,11 +290,11 @@ async function shouldExitForPossibleMissingSeparator(items: ParsedTrackItem[]): 
     return false;
   }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.error('This looks like multiple foods. Separate foods with `;`, for example "50g chicken breast; 1 banana".');
+    console.error('This looks like multiple foods. Separate foods with `,`, for example "50g chicken breast, 1 banana".');
     process.exit(1);
   }
   const answer = await confirm({
-    message: 'did you forget to separate foods by `;`?',
+    message: 'did you forget to separate foods by `,`?',
     initialValue: true,
   });
   if (isCancel(answer)) {

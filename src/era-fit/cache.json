@@ -1,4 +1,13 @@
 {
   "version": 1,
-  "foods": {}
+  "foods": {
+    "banana": {
+      "foodId": "5388",
+      "foodName": "Banana",
+      "servingType": "fatsecret",
+      "servingId": "19134",
+      "servingDescription": "1 medium (7\" to 7-7/8\" long)",
+      "updatedAt": "2026-05-19T17:46:25.118Z"
+    }
+  }
 }
