@@ -442,6 +442,7 @@ interface LogCliArgs extends OutputCliArgs {
 
 interface MealPlanCliArgs extends OutputCliArgs {
   anylist: boolean;
+  today: boolean;
 }
 
 class CookieJar {
@@ -508,7 +509,7 @@ async function runCli(): Promise<void> {
     .strict()
     .command('$0', 'Print daily macro log', addLogOptions, runLogCommand)
     .command('log', 'Print daily macro log', addLogOptions, runLogCommand)
-    .command('mealplan', 'Print the weekly suggested meal plan and aggregate shopping list', addMealPlanOptions, runMealPlanCommand)
+    .command(['mealplan', 'meaplan'], 'Print the weekly suggested meal plan and aggregate shopping list', addMealPlanOptions, runMealPlanCommand)
     .help()
     .parseAsync();
 }
@@ -562,6 +563,12 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
       type: 'boolean',
       default: false,
       describe: 'Create an AnyList shopping list from the suggested mealplan ingredients',
+    })
+    .option('today', {
+      alias: ['t'],
+      type: 'boolean',
+      default: false,
+      describe: 'Print only today\'s suggested meal plan',
     }) as Argv<T & MealPlanCliArgs>;
 }
 
@@ -593,6 +600,9 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
 
 async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
   const format = parseOutputFormat(args.format);
+  if (args.today && args.anylist) {
+    throw new Error('--today only prints today\'s meal plan and cannot be combined with --anylist.');
+  }
   const session = await resolveSession();
 
   const mealPlan = await fetchEraFitMealPlan(session);
@@ -602,6 +612,7 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
     format,
     outputPath: args.output,
     anyListResult,
+    todayOnly: args.today,
   });
 }
 
@@ -1835,18 +1846,43 @@ function renderMealPlanOutput(options: {
   format: OutputFormat;
   outputPath?: string;
   anyListResult: { id: string; name: string; added: number } | null;
+  todayOnly?: boolean;
 }): void {
   if (options.format !== 'table' && options.format !== 'json') {
     throw new Error('The mealplan command supports --format=table or --format=json.');
   }
-  const text = options.format === 'json'
-    ? `${JSON.stringify({ ...options.report, anyList: options.anyListResult }, null, 2)}\n`
-    : renderMealPlanText(options.report, options.anyListResult);
+  const text = renderMealPlanOutputText(options);
   if (options.outputPath) {
     writeFileSync(path.resolve(options.outputPath), text, 'utf8');
     return;
   }
   process.stdout.write(text);
+}
+
+function renderMealPlanOutputText(options: {
+  report: EraFitMealPlanReport;
+  format: OutputFormat;
+  anyListResult: { id: string; name: string; added: number } | null;
+  todayOnly?: boolean;
+}): string {
+  if (options.todayOnly) {
+    const day = getTodayMealPlanDay(options.report);
+    return options.format === 'json'
+      ? `${JSON.stringify(day, null, 2)}\n`
+      : renderMealPlanDayText(day);
+  }
+  return options.format === 'json'
+    ? `${JSON.stringify({ ...options.report, anyList: options.anyListResult }, null, 2)}\n`
+    : renderMealPlanText(options.report, options.anyListResult);
+}
+
+function getTodayMealPlanDay(report: EraFitMealPlanReport): EraFitMealPlanDay {
+  const today = WEEKDAY_NAMES[new Date().getDay()];
+  const day = report.days.find(candidate => candidate.day === today);
+  if (!day) {
+    throw new Error(`Meal plan did not include today (${today}).`);
+  }
+  return day;
 }
 
 function renderMealPlanText(
@@ -1855,26 +1891,7 @@ function renderMealPlanText(
 ): string {
   const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
   for (const day of report.days) {
-    const planned = formatMacros(day.planned);
-    const target = formatMacros(day.targets);
-    lines.push(`${chalk.bold(day.day)} ${chalk.gray(`(${day.template})`)}`);
-    lines.push(`  ${chalk.bold('Planned:')} ${planned} ${chalk.gray('|')} ${chalk.bold('Target:')} ${target}`);
-    if (day.meals.length === 0) {
-      lines.push(chalk.gray('  No suggested meals.'));
-      lines.push('');
-      continue;
-    }
-    for (const meal of day.meals) {
-      lines.push(`  ${chalk.gray(meal.time ? `${formatMealPlanTime(meal.time)} ` : '')}${chalk.bold(meal.meal)}: ${formatMacros(meal.macros)}`);
-      if (meal.recipe) {
-        lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
-      }
-      for (const item of meal.items) {
-        const label = formatMealPlanItemLabel(item);
-        lines.push(`    ${padVisibleEnd(label.styled, label.plain.length, 58)} ${formatMacros(item)}`);
-      }
-    }
-    lines.push('');
+    lines.push(...renderMealPlanDayLines(day), '');
   }
   lines.push(chalk.bold('Shopping List'));
   if (report.shoppingList.length === 0) {
@@ -1892,6 +1909,33 @@ function renderMealPlanText(
     lines.push(`  Created ${chalk.cyan(anyListResult.name)} with ${formatNumber(anyListResult.added)} ingredients.`);
   }
   return `${lines.join('\n')}\n`;
+}
+
+function renderMealPlanDayText(day: EraFitMealPlanDay): string {
+  return `${renderMealPlanDayLines(day).join('\n')}\n`;
+}
+
+function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
+  const lines: string[] = [];
+  const planned = formatMacros(day.planned);
+  const target = formatMacros(day.targets);
+  lines.push(`${chalk.bold(day.day)} ${chalk.gray(`(${day.template})`)}`);
+  lines.push(`  ${chalk.bold('Planned:')} ${planned} ${chalk.gray('|')} ${chalk.bold('Target:')} ${target}`);
+  if (day.meals.length === 0) {
+    lines.push(chalk.gray('  No suggested meals.'));
+    return lines;
+  }
+  for (const meal of day.meals) {
+    lines.push(`  ${chalk.gray(meal.time ? `${formatMealPlanTime(meal.time)} ` : '')}${chalk.bold(meal.meal)}: ${formatMacros(meal.macros)}`);
+    if (meal.recipe) {
+      lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
+    }
+    for (const item of meal.items) {
+      const label = formatMealPlanItemLabel(item);
+      lines.push(`    ${padVisibleEnd(label.styled, label.plain.length, 58)} ${formatMacros(item)}`);
+    }
+  }
+  return lines;
 }
 
 function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
