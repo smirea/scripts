@@ -2,7 +2,7 @@ import { isCancel, select, text } from '@clack/prompts';
 import chalk from 'chalk';
 
 import { formatTabularRows } from '../utils/tabular';
-import { normalizeFoodCacheKey, rememberFoodSelection, type EraFitCache } from './cache';
+import { normalizeFoodCacheKey, rememberFoodSelection, type CachedFoodSelection, type EraFitCache } from './cache';
 import {
   fetchEraFitFatSecretFood,
   fetchEraFitFatSecretFoodByBarcode,
@@ -21,7 +21,7 @@ import {
   type EraFitMealKey,
   type EraFitSession,
 } from './core';
-import { savedFoodSourceLabel, searchSavedFoods, type SavedFoodSearchItem } from './savedFoods';
+import { findSavedFoodFromCache, savedFoodSourceLabel, searchSavedFoods, type SavedFoodSearchItem } from './savedFoods';
 
 const STANDARD_UNITS = ['g', 'oz', 'ml', 'fl_oz'] as const;
 
@@ -174,21 +174,31 @@ export async function resolveTrackFood(
 ): Promise<TrackResolutionResult> {
   const cached = options.useCache && !item.explicitFoodId ? cache.foods[normalizeFoodCacheKey(item.query)] : null;
   if (cached) {
-    const food = await fetchEraFitFatSecretFood(session, cached.foodId);
-    const requestedServing = item.unit ? resolveAutoServingChoice(food, item) : null;
-    const serving = requestedServing ?? (!item.unit ? servingFromCache(food, cached) : null);
-    if (serving) {
-      const quantity = defaultQuantityForServing(item, serving, food, item.amount);
-      return {
-        status: 'resolved',
-        food: {
-          input: item,
-          food,
-          serving,
-          quantity,
-          record: buildTrackedFoodRecord(food, serving, quantity, time),
-        },
-      };
+    if (cached.servingType === 'saved') {
+      const saved = await findSavedFoodFromCache(session, cached);
+      if (saved) {
+        return {
+          status: 'resolved',
+          food: buildSavedResolvedTrackFood(item, saved, time),
+        };
+      }
+    } else {
+      const food = await fetchEraFitFatSecretFood(session, cached.foodId);
+      const requestedServing = item.unit ? resolveAutoServingChoice(food, item) : null;
+      const serving = requestedServing ?? (!item.unit ? servingFromCache(food, cached) : null);
+      if (serving) {
+        const quantity = defaultQuantityForServing(item, serving, food, item.amount);
+        return {
+          status: 'resolved',
+          food: {
+            input: item,
+            food,
+            serving,
+            quantity,
+            record: buildTrackedFoodRecord(food, serving, quantity, time),
+          },
+        };
+      }
     }
   }
 
@@ -202,6 +212,13 @@ export async function resolveTrackFood(
     return { status: food };
   }
   if ('source' in food) {
+    if (options.writeCache) {
+      const selection = cachedSelectionFromSavedFood(food);
+      rememberFoodSelection(cache, item.query, selection);
+      for (const alias of options.aliases ?? []) {
+        rememberFoodSelection(cache, alias, selection);
+      }
+    }
     return {
       status: 'resolved',
       food: buildSavedResolvedTrackFood(item, food, time),
@@ -244,6 +261,21 @@ export async function resolveTrackFood(
       quantity,
       record: buildTrackedFoodRecord(food, serving, quantity, time),
     },
+  };
+}
+
+function cachedSelectionFromSavedFood(saved: SavedFoodSearchItem): Omit<CachedFoodSelection, 'updatedAt'> {
+  return {
+    foodId: saved.foodId ?? saved.customFoodId ?? saved.id,
+    foodName: saved.name,
+    brandName: saved.brandName,
+    servingType: 'saved',
+    servingDescription: saved.servingDescription,
+    servingUnit: saved.servingUnit,
+    servingQuantity: saved.servingQuantity,
+    savedSource: saved.source,
+    savedId: saved.id,
+    customFoodId: saved.customFoodId,
   };
 }
 

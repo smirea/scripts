@@ -1,4 +1,4 @@
-import { normalizeFoodCacheKey } from './cache';
+import { normalizeFoodCacheKey, type CachedFoodSelection } from './cache';
 import { formatNumber, parseNumberLike, readEraFitFirebasePath, type EraFitSession } from './core';
 
 export type SavedFoodSource = 'favorite' | 'custom_food' | 'my_meal';
@@ -22,17 +22,7 @@ export interface SavedFoodSearchItem {
 }
 
 export async function searchSavedFoods(session: EraFitSession, query: string): Promise<SavedFoodSearchItem[]> {
-  const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress`;
-  const [favorites, customFoods, meals] = await Promise.all([
-    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_foods`),
-    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_customized_food`),
-    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_meals`),
-  ]);
-  const candidates = [
-    ...parseSavedFoodCollection(favorites, 'favorite'),
-    ...parseSavedFoodCollection(customFoods, 'custom_food'),
-    ...parseSavedFoodCollection(meals, 'my_meal'),
-  ];
+  const candidates = await listSavedFoods(session);
   const scored = candidates
     .map(food => ({ food, score: scoreSavedFoodMatch(food, query) }))
     .filter(entry => entry.score > 0)
@@ -43,6 +33,40 @@ export async function searchSavedFoods(session: EraFitSession, query: string): P
       a.food.name.localeCompare(b.food.name)
     );
   return dedupeSavedFoods(scored.map(entry => entry.food));
+}
+
+export async function listSavedFoods(session: EraFitSession): Promise<SavedFoodSearchItem[]> {
+  const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress`;
+  const [favorites, customFoods, meals] = await Promise.all([
+    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_foods`),
+    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_customized_food`),
+    readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/my_meals`),
+  ]);
+  return [
+    ...parseSavedFoodCollection(favorites, 'favorite'),
+    ...parseSavedFoodCollection(customFoods, 'custom_food'),
+    ...parseSavedFoodCollection(meals, 'my_meal'),
+  ];
+}
+
+export async function findSavedFoodFromCache(
+  session: EraFitSession,
+  cached: CachedFoodSelection
+): Promise<SavedFoodSearchItem | null> {
+  if (cached.servingType !== 'saved') {
+    return null;
+  }
+  const savedFoods = await listSavedFoods(session);
+  const sourceMatches = (food: SavedFoodSearchItem) => !cached.savedSource || food.source === cached.savedSource;
+  return savedFoods.find(food =>
+    sourceMatches(food) && cached.savedId && food.id === cached.savedId
+  ) ?? savedFoods.find(food =>
+    sourceMatches(food) && cached.customFoodId && food.customFoodId === cached.customFoodId
+  ) ?? savedFoods.find(food =>
+    sourceMatches(food) && cached.foodId && (food.foodId === cached.foodId || food.id === cached.foodId)
+  ) ?? savedFoods.find(food =>
+    sourceMatches(food) && normalizeFoodCacheKey(food.name) === normalizeFoodCacheKey(cached.foodName)
+  ) ?? null;
 }
 
 export function savedFoodSourceLabel(source: SavedFoodSource): string {

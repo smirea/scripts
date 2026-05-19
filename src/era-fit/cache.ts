@@ -19,10 +19,14 @@ const CachedFoodSelectionSchema = z.object({
   foodId: z.string(),
   foodName: z.string(),
   brandName: z.string().optional(),
-  servingType: z.enum(['fatsecret', 'standard']),
+  servingType: z.enum(['fatsecret', 'standard', 'saved']),
   servingId: z.string().optional(),
   servingUnit: z.string().optional(),
   servingDescription: z.string(),
+  savedSource: z.enum(['favorite', 'custom_food', 'my_meal']).optional(),
+  savedId: z.string().optional(),
+  customFoodId: z.string().optional(),
+  servingQuantity: z.number().optional(),
   updatedAt: z.string(),
 });
 

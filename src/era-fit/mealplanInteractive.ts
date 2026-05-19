@@ -3,7 +3,12 @@ import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 
 import { padVisibleEnd, truncateVisibleEnd, visibleLength } from '../utils/tabular';
-import { type EraFitCache } from './cache';
+import {
+  normalizeFoodCacheKey,
+  rememberFoodSelection,
+  type CachedFoodSelection,
+  type EraFitCache,
+} from './cache';
 import {
   formatDateKey,
   formatEraFitDateId,
@@ -34,12 +39,14 @@ import {
   type TrackedFoodRecord,
 } from './tracking';
 
-type NavigationMode = 'meals' | 'items';
+type NavigationMode = 'meals' | 'items' | 'assign';
 type LoadingKind = 'checking' | 'unchecking';
 
 const CHECKBOX_EMPTY = '○';
 const CHECKBOX_CHECKED = '⊗';
 const CHECKBOX_PARTIAL = '⊝';
+const OUTSIDE_PLAN_CHECKED = '✔';
+const ASSIGN_POINTER = '↣';
 const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
 
 interface InteractiveMealPlanOptions {
@@ -58,17 +65,30 @@ interface MealPlanItemRef {
   item: EraFitMealPlanFoodItem;
 }
 
+interface OutsidePlanItemRef {
+  key: string;
+  mealIndex: number;
+  trackingMeal: EraFitMealKey;
+  entry: TrackedFoodEntry;
+}
+
+type MealPlanRowRef =
+  | { type: 'plan'; item: MealPlanItemRef }
+  | { type: 'outside'; item: OutsidePlanItemRef };
+
 interface InteractiveState {
   day: EraFitMealPlanDay;
   meals: Array<{
     meal: EraFitMealPlanMeal;
     trackingMeal: EraFitMealKey;
     items: MealPlanItemRef[];
+    outsideItems: OutsidePlanItemRef[];
   }>;
   dryRun: boolean;
   mode: NavigationMode;
   mealCursor: number;
   itemCursor: number;
+  assignSource: OutsidePlanItemRef | null;
   completedItemKeys: Set<string>;
   existingItemKeys: Set<string>;
   trackedItemByKey: Map<string, TrackedFoodEntry>;
@@ -86,9 +106,11 @@ interface IngredientLineLayout {
 
 type MealPlanPromptAction =
   | { type: 'toggle-meal'; mealIndex: number }
-  | { type: 'toggle-item'; mealIndex: number; itemIndex: number }
-  | { type: 'set-serving'; mealIndex: number; itemIndex: number }
-  | { type: 'switch-alternative'; mealIndex: number; itemIndex: number }
+  | { type: 'toggle-row'; mealIndex: number; rowIndex: number }
+  | { type: 'set-serving'; mealIndex: number; rowIndex: number }
+  | { type: 'switch-alternative'; mealIndex: number; rowIndex: number }
+  | { type: 'start-assign'; mealIndex: number; rowIndex: number }
+  | { type: 'assign-outside'; mealIndex: number; rowIndex: number }
   | { type: 'done' };
 
 export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOptions): Promise<void> {
@@ -139,7 +161,7 @@ function createInteractiveState(
   tracked: TrackedFoodEntry[],
   dryRun: boolean
 ): InteractiveState {
-  const meals = day.meals.map((meal, mealIndex) => {
+  const meals: InteractiveState['meals'] = day.meals.map((meal, mealIndex) => {
     const trackingMeal = resolveTrackingMeal(cache, meal);
     return {
       meal,
@@ -152,9 +174,18 @@ function createInteractiveState(
         trackingMeal,
         item,
       })),
+      outsideItems: [],
     };
   });
-  const matched = matchExistingTrackedItems(meals, tracked);
+  const matched = matchExistingTrackedItems(cache, meals, tracked);
+  for (const [mealIndex, meal] of meals.entries()) {
+    meal.outsideItems = matched.outsideByMeal.get(meal.trackingMeal)?.map((entry, outsideIndex) => ({
+      key: `${meal.trackingMeal}:outside:${entry.id}:${outsideIndex}`,
+      mealIndex,
+      trackingMeal: meal.trackingMeal,
+      entry,
+    })) ?? [];
+  }
   return {
     day,
     meals,
@@ -162,6 +193,7 @@ function createInteractiveState(
     mode: 'meals',
     mealCursor: 0,
     itemCursor: 0,
+    assignSource: null,
     completedItemKeys: matched.completed,
     existingItemKeys: new Set(matched.completed),
     trackedItemByKey: matched.trackedByItemKey,
@@ -196,20 +228,36 @@ async function handleMealPlanAction(
   if (action.type === 'done') {
     return;
   }
-  const item = state.meals[action.mealIndex]?.items[action.itemIndex];
-  if (!item) {
+  const row = getMealRow(state, action.mealIndex, action.rowIndex);
+  if (action.type === 'toggle-row') {
+    if (row?.type === 'plan') {
+      startToggleItemsTask(session, cache, dateId, state, [row.item]);
+    } else if (row?.type === 'outside') {
+      pushMessage(state, 'logged outside plan; press A to assign it');
+    }
     return;
   }
-  if (action.type === 'toggle-item') {
-    startToggleItemsTask(session, cache, dateId, state, [item]);
+  if (action.type === 'start-assign') {
+    if (row?.type === 'outside') {
+      startAssignMode(state, row.item);
+    }
+    return;
+  }
+  if (action.type === 'assign-outside') {
+    if (row?.type === 'plan' && state.assignSource) {
+      assignOutsideTrackedFood(cache, state, state.assignSource, row.item);
+    }
+    return;
+  }
+  if (row?.type !== 'plan') {
     return;
   }
   clearInteractiveScreen();
   if (action.type === 'set-serving') {
-    await promptServingMultiplier(state, item);
+    await promptServingMultiplier(state, row.item);
     return;
   }
-  await promptReplacementAndLog(session, cache, dateId, state, item);
+  await promptReplacementAndLog(session, cache, dateId, state, row.item);
 }
 
 function startToggleItemsTask(
@@ -446,6 +494,163 @@ function foodCacheAliases(item: MealPlanItemRef): string[] {
   ]).filter(alias => alias.trim().length > 0);
 }
 
+function getMealRows(state: InteractiveState, mealIndex: number): MealPlanRowRef[] {
+  const meal = state.meals[mealIndex];
+  if (!meal) {
+    return [];
+  }
+  return [
+    ...meal.items.map(item => ({ type: 'plan' as const, item })),
+    ...meal.outsideItems.map(item => ({ type: 'outside' as const, item })),
+  ];
+}
+
+function getMealRow(state: InteractiveState, mealIndex: number, rowIndex: number): MealPlanRowRef | null {
+  return getMealRows(state, mealIndex)[rowIndex] ?? null;
+}
+
+function getAssignablePlanItems(state: InteractiveState): MealPlanItemRef[] {
+  return state.meals.flatMap(meal =>
+    meal.items.filter(item => !state.completedItemKeys.has(item.key) && !state.loadingItemKeys.has(item.key))
+  );
+}
+
+function itemRowIndex(state: InteractiveState, item: MealPlanItemRef): number {
+  return Math.max(0, state.meals[item.mealIndex]?.items.findIndex(candidate => candidate.key === item.key) ?? 0);
+}
+
+function outsideItemRowIndex(state: InteractiveState, item: OutsidePlanItemRef): number {
+  const meal = state.meals[item.mealIndex];
+  if (!meal) {
+    return 0;
+  }
+  const outsideIndex = meal.outsideItems.findIndex(candidate => candidate.key === item.key);
+  return meal.items.length + Math.max(0, outsideIndex);
+}
+
+function startAssignMode(state: InteractiveState, source: OutsidePlanItemRef): void {
+  const targets = getAssignablePlanItems(state);
+  if (targets.length === 0) {
+    pushMessage(state, 'no unchecked mealplan items to assign');
+    return;
+  }
+  const target = targets.find(item => item.mealIndex === source.mealIndex) ?? targets[0];
+  state.assignSource = source;
+  state.mode = 'assign';
+  state.mealCursor = target.mealIndex;
+  state.itemCursor = itemRowIndex(state, target);
+  pushMessage(state, `assign ${formatTrackedFoodDisplayName(source.entry.record)} to a mealplan item`);
+}
+
+function assignOutsideTrackedFood(
+  cache: EraFitCache,
+  state: InteractiveState,
+  source: OutsidePlanItemRef,
+  target: MealPlanItemRef
+): void {
+  if (state.completedItemKeys.has(target.key)) {
+    pushMessage(state, 'choose an unchecked mealplan item');
+    return;
+  }
+  const selection = cachedSelectionFromTrackedEntry(source.entry);
+  if (!selection) {
+    pushMessage(state, `cannot cache ${formatTrackedFoodDisplayName(source.entry.record)}`);
+    return;
+  }
+  if (!state.dryRun) {
+    for (const alias of foodCacheAliases(target)) {
+      rememberFoodSelection(cache, alias, selection);
+    }
+  }
+  state.completedItemKeys.add(target.key);
+  state.existingItemKeys.add(target.key);
+  state.trackedItemByKey.set(target.key, source.entry);
+  const sourceMeal = state.meals[source.mealIndex];
+  if (sourceMeal) {
+    sourceMeal.outsideItems = sourceMeal.outsideItems.filter(item => item.key !== source.key);
+  }
+  state.assignSource = null;
+  state.mode = 'items';
+  state.mealCursor = target.mealIndex;
+  state.itemCursor = itemRowIndex(state, target);
+  pushMessage(state, `${state.dryRun ? 'would assign' : 'assigned'} ${formatTrackedFoodDisplayName(source.entry.record)} to ${formatItemDisplayName(target.item)}`);
+}
+
+function cachedSelectionFromTrackedEntry(entry: TrackedFoodEntry): Omit<CachedFoodSelection, 'updatedAt'> | null {
+  const record = entry.record as TrackedFoodRecord & {
+    type_item?: string;
+    food_customized_id?: string;
+    title?: string;
+  };
+  const foodId = nonEmptyString(record.food_id);
+  const customFoodId = nonEmptyString(record.food_customized_id);
+  const foodName = nonEmptyString(record.food_name) ?? nonEmptyString(record.title);
+  if (!foodName) {
+    return null;
+  }
+
+  const servingQuantity = parseNumberLike(record.serving_qtd) ?? undefined;
+  const base = {
+    foodId: foodId ?? customFoodId ?? nonEmptyString(record.id) ?? '',
+    foodName,
+    brandName: nonEmptyString(record.brand_name) ?? undefined,
+    servingDescription: nonEmptyString(record.serving_description) ?? formatTrackedServing(record),
+    servingUnit: nonEmptyString(record.serving_unit) ?? undefined,
+    servingQuantity,
+  };
+
+  if (record.type_item === 'my_meals' || record.food_type === 'my_meals') {
+    const savedId = foodId ?? nonEmptyString(record.id);
+    if (!savedId) {
+      return null;
+    }
+    return {
+      ...base,
+      foodId: savedId,
+      servingType: 'saved',
+      savedSource: 'my_meal',
+      savedId,
+    };
+  }
+
+  if (record.type_item === 'food_customized' || customFoodId) {
+    if (!customFoodId) {
+      return null;
+    }
+    return {
+      ...base,
+      foodId: customFoodId,
+      servingType: 'saved',
+      savedSource: 'custom_food',
+      savedId: customFoodId,
+      customFoodId,
+    };
+  }
+
+  if (!foodId) {
+    return null;
+  }
+
+  const standardUnit = parseCacheStandardUnit(record.serving_unit);
+  if (standardUnit) {
+    return {
+      ...base,
+      servingType: 'standard',
+      servingUnit: standardUnit,
+    };
+  }
+
+  if (record.serving_id) {
+    return {
+      ...base,
+      servingType: 'fatsecret',
+      servingId: record.serving_id,
+    };
+  }
+
+  return null;
+}
+
 function buildMealPlanTrackItem(item: MealPlanItemRef, multiplier: number): ParsedTrackItem {
   return parseTrackItem(buildMealPlanTrackInput(item.item, item.item.name, multiplier));
 }
@@ -469,11 +674,13 @@ function buildMealPlanTrackInput(item: EraFitMealPlanFoodItem, query: string, mu
 }
 
 function matchExistingTrackedItems(
+  cache: EraFitCache,
   meals: InteractiveState['meals'],
   tracked: TrackedFoodEntry[]
 ): {
   completed: Set<string>;
   trackedByItemKey: Map<string, TrackedFoodEntry>;
+  outsideByMeal: Map<EraFitMealKey, TrackedFoodEntry[]>;
 } {
   const completed = new Set<string>();
   const trackedByItemKey = new Map<string, TrackedFoodEntry>();
@@ -481,6 +688,19 @@ function matchExistingTrackedItems(
   for (const meal of meals) {
     const candidates = tracked.filter(entry => entry.meal === meal.trackingMeal);
     for (const item of meal.items) {
+      const best = findBestCachedTrackedMatch(cache, item, candidates, used);
+      if (!best) {
+        continue;
+      }
+      completed.add(item.key);
+      trackedByItemKey.set(item.key, best);
+      used.add(trackedEntryKey(best));
+    }
+
+    for (const item of meal.items) {
+      if (completed.has(item.key)) {
+        continue;
+      }
       const best = findBestTextTrackedMatch(item.item, candidates, used);
       if (!best) {
         continue;
@@ -503,7 +723,60 @@ function matchExistingTrackedItems(
       used.add(trackedEntryKey(best));
     }
   }
-  return { completed, trackedByItemKey };
+  const outsideByMeal = new Map<EraFitMealKey, TrackedFoodEntry[]>();
+  for (const entry of tracked) {
+    if (used.has(trackedEntryKey(entry))) {
+      continue;
+    }
+    const entries = outsideByMeal.get(entry.meal) ?? [];
+    entries.push(entry);
+    outsideByMeal.set(entry.meal, entries);
+  }
+  return { completed, trackedByItemKey, outsideByMeal };
+}
+
+function findBestCachedTrackedMatch(
+  cache: EraFitCache,
+  item: MealPlanItemRef,
+  candidates: TrackedFoodEntry[],
+  used: Set<string>
+): TrackedFoodEntry | null {
+  const aliases = foodCacheAliases(item)
+    .map(alias => cache.foods[normalizeFoodCacheKey(alias)])
+    .filter((cached): cached is CachedFoodSelection => cached != null);
+  if (aliases.length === 0) {
+    return null;
+  }
+  return candidates.find(entry =>
+    !used.has(trackedEntryKey(entry)) &&
+    aliases.some(cached => trackedRecordMatchesCachedSelection(entry.record, cached))
+  ) ?? null;
+}
+
+function trackedRecordMatchesCachedSelection(record: TrackedFoodRecord, cached: CachedFoodSelection): boolean {
+  const raw = record as TrackedFoodRecord & {
+    type_item?: string;
+    food_customized_id?: string;
+    title?: string;
+  };
+  if (cached.servingType === 'saved') {
+    if (cached.savedSource === 'custom_food') {
+      return Boolean(cached.customFoodId && raw.food_customized_id === cached.customFoodId) ||
+        Boolean(cached.savedId && (raw.food_customized_id === cached.savedId || record.food_id === cached.savedId));
+    }
+    if (cached.savedSource === 'my_meal') {
+      return raw.type_item === 'my_meals' &&
+        (record.food_id === cached.savedId || record.food_id === cached.foodId || raw.title === cached.foodName);
+    }
+    return record.food_id === cached.foodId || normalizeMatchText(record.food_name ?? '') === normalizeMatchText(cached.foodName);
+  }
+  if (record.food_id !== cached.foodId) {
+    return false;
+  }
+  if (cached.servingType === 'standard' && cached.servingUnit) {
+    return normalizeServingText(record.serving_unit) === normalizeServingText(cached.servingUnit);
+  }
+  return !cached.servingId || record.serving_id === cached.servingId;
 }
 
 function findBestTextTrackedMatch(
@@ -637,6 +910,29 @@ function normalizeMatchText(value: string): string {
     .trim();
 }
 
+function normalizeServingText(value: string | null | undefined): string {
+  return value?.toLowerCase().replaceAll(/[_\s]+/g, ' ').replace(/s$/, '') ?? '';
+}
+
+function parseCacheStandardUnit(value: string | null | undefined): 'g' | 'oz' | 'ml' | 'fl_oz' | null {
+  const normalized = normalizeServingText(value).replaceAll(' ', '_');
+  if (['g', 'gram'].includes(normalized)) return 'g';
+  if (['oz', 'ounce'].includes(normalized)) return 'oz';
+  if (['ml', 'milliliter'].includes(normalized)) return 'ml';
+  if (['fl_oz', 'floz', 'fluid_ounce'].includes(normalized)) return 'fl_oz';
+  return null;
+}
+
+function formatTrackedServing(record: TrackedFoodRecord): string {
+  const quantity = parseNumberLike(record.serving_qtd);
+  const unit = nonEmptyString(record.serving_unit);
+  return [quantity == null ? null : formatNumber(quantity), unit].filter(Boolean).join(' ') || 'serving';
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   private readonly repaintTimer: ReturnType<typeof setInterval>;
 
@@ -655,7 +951,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.submitAction({
           type: 'switch-alternative',
           mealIndex: pendingSearch.mealIndex,
-          itemIndex: pendingSearch.itemIndex,
+          rowIndex: pendingSearch.itemIndex,
         });
         return;
       }
@@ -668,11 +964,17 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.moveCursor(action === 'up' ? -1 : 1);
       } else if (action === 'right' && this.view.mode === 'meals') {
         this.view.mode = 'items';
-        this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealItems().length - 1));
+        this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealRows().length - 1));
       } else if (action === 'left' && this.view.mode === 'items') {
         this.view.mode = 'meals';
+      } else if (action === 'left' && this.view.mode === 'assign') {
+        this.cancelAssignMode();
       } else if (action === 'space') {
-        this.submitCurrentToggle();
+        if (this.view.mode === 'assign') {
+          this.submitCurrentAssign();
+        } else {
+          this.submitCurrentToggle();
+        }
       }
     });
     this.on('key', (key, info) => {
@@ -680,17 +982,25 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.goBack();
       } else if (key === 'q') {
         this.submitAction({ type: 'done' });
-      } else if (key === 's' && this.view.mode === 'items') {
+      } else if (key === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
+        this.submitAction({
+          type: 'start-assign',
+          mealIndex: this.view.mealCursor,
+          rowIndex: this.view.itemCursor,
+        });
+      } else if (key === 'a' && this.view.mode === 'assign') {
+        this.submitCurrentAssign();
+      } else if (key === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
         this.submitAction({
           type: 'switch-alternative',
           mealIndex: this.view.mealCursor,
-          itemIndex: this.view.itemCursor,
+          rowIndex: this.view.itemCursor,
         });
-      } else if (key === 'r' && this.view.mode === 'items') {
+      } else if (key === 'r' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
         this.submitAction({
           type: 'set-serving',
           mealIndex: this.view.mealCursor,
-          itemIndex: this.view.itemCursor,
+          rowIndex: this.view.itemCursor,
         });
       }
     });
@@ -701,6 +1011,10 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   }
 
   private goBack(): void {
+    if (this.view.mode === 'assign') {
+      this.cancelAssignMode();
+      return;
+    }
     if (this.view.mode === 'items') {
       this.view.mode = 'meals';
       this.repaint();
@@ -710,12 +1024,29 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   }
 
   private moveCursor(delta: number): void {
-    if (this.view.mode === 'meals') {
-      this.view.mealCursor = wrap(this.view.mealCursor + delta, this.view.meals.length);
-      this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealItems().length - 1));
+    if (this.view.mode === 'assign') {
+      this.moveAssignCursor(delta);
       return;
     }
-    this.view.itemCursor = wrap(this.view.itemCursor + delta, this.currentMealItems().length);
+    if (this.view.mode === 'meals') {
+      this.view.mealCursor = wrap(this.view.mealCursor + delta, this.view.meals.length);
+      this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealRows().length - 1));
+      return;
+    }
+    this.view.itemCursor = wrap(this.view.itemCursor + delta, this.currentMealRows().length);
+  }
+
+  private moveAssignCursor(delta: number): void {
+    const targets = getAssignablePlanItems(this.view);
+    if (targets.length === 0) {
+      return;
+    }
+    const currentIndex = targets.findIndex(item =>
+      item.mealIndex === this.view.mealCursor && itemRowIndex(this.view, item) === this.view.itemCursor
+    );
+    const next = targets[wrap((currentIndex === -1 ? 0 : currentIndex) + delta, targets.length)];
+    this.view.mealCursor = next.mealIndex;
+    this.view.itemCursor = itemRowIndex(this.view, next);
   }
 
   private submitCurrentToggle(): void {
@@ -724,10 +1055,29 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       return;
     }
     this.submitAction({
-      type: 'toggle-item',
+      type: 'toggle-row',
       mealIndex: this.view.mealCursor,
-      itemIndex: this.view.itemCursor,
+      rowIndex: this.view.itemCursor,
     });
+  }
+
+  private submitCurrentAssign(): void {
+    this.submitAction({
+      type: 'assign-outside',
+      mealIndex: this.view.mealCursor,
+      rowIndex: this.view.itemCursor,
+    });
+  }
+
+  private cancelAssignMode(): void {
+    const source = this.view.assignSource;
+    this.view.mode = 'items';
+    this.view.assignSource = null;
+    if (source) {
+      this.view.mealCursor = source.mealIndex;
+      this.view.itemCursor = outsideItemRowIndex(this.view, source);
+    }
+    this.repaint();
   }
 
   private submitAction(action: MealPlanPromptAction): void {
@@ -736,8 +1086,12 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
     this.emit('submit');
   }
 
-  private currentMealItems(): MealPlanItemRef[] {
-    return this.view.meals[this.view.mealCursor]?.items ?? [];
+  private currentRow(): MealPlanRowRef | null {
+    return getMealRow(this.view, this.view.mealCursor, this.view.itemCursor);
+  }
+
+  private currentMealRows(): MealPlanRowRef[] {
+    return getMealRows(this.view, this.view.mealCursor);
   }
 }
 
@@ -753,12 +1107,20 @@ function renderMealPlanFrame(state: InteractiveState): string {
     const mealLine = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')} ${formatMacros(meal.meal.macros)}`;
     lines.push(activeMeal ? chalk.cyan(mealLine) : mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
-      const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
+      const activeItem = (state.mode === 'items' || state.mode === 'assign') && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
       lines.push(renderItemLine(state, item, activeItem, ingredientLayout));
+    }
+    for (const [outsideIndex, item] of meal.outsideItems.entries()) {
+      const rowIndex = meal.items.length + outsideIndex;
+      const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === rowIndex;
+      lines.push(renderOutsidePlanItemLine(state, item, activeItem, ingredientLayout));
     }
   }
   lines.push('');
-  lines.push(chalk.gray(contextHelp(state.mode)));
+  if (state.meals.some(meal => meal.outsideItems.length > 0)) {
+    lines.push(`${chalk.green(OUTSIDE_PLAN_CHECKED)} ${chalk.gray('logged outside plan')}`);
+  }
+  lines.push(chalk.gray(contextHelp(state)));
   for (const message of state.messages.slice(-3)) {
     lines.push(chalk.gray(message));
   }
@@ -776,10 +1138,30 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
   return active ? chalk.cyan(line) : line;
 }
 
+function renderOutsidePlanItemLine(
+  state: InteractiveState,
+  item: OutsidePlanItemRef,
+  active: boolean,
+  layout: IngredientLineLayout
+): string {
+  const label = truncateVisibleEnd(formatOutsidePlanItemLabel(item), layout.labelWidth);
+  const styledLabel = chalk.green(label);
+  const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${chalk.green(OUTSIDE_PLAN_CHECKED)} ${paddedLabel}  ${chalk.green(formatMacroColumns(trackedMacroTotals(item.entry.record), layout.macroWidths))}`;
+  return line;
+}
+
 function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout {
   const items = state.meals.flatMap(meal => meal.items);
-  const macroWidths = getMacroColumnWidths(items.map(item => item.item));
-  const naturalLabelWidth = items.reduce((width, item) => Math.max(width, visibleLength(formatInteractiveItemLabel(state, item))), 0);
+  const outsideItems = state.meals.flatMap(meal => meal.outsideItems);
+  const macroWidths = getMacroColumnWidths([
+    ...items.map(item => item.item),
+    ...outsideItems.map(item => trackedMacroTotals(item.entry.record)),
+  ]);
+  const naturalLabelWidth = [
+    ...items.map(item => formatInteractiveItemLabel(state, item)),
+    ...outsideItems.map(item => formatOutsidePlanItemLabel(item)),
+  ].reduce((width, label) => Math.max(width, visibleLength(label)), 0);
   const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
   const trackedWidth = items.some(item => state.existingItemKeys.has(item.key)) ? visibleLength(' tracked') : 0;
   const availableLabelWidth = process.stdout.columns
@@ -794,6 +1176,31 @@ function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout 
 function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemRef): string {
   const multiplier = state.multipliers.get(item.key);
   return `${formatItemDisplayName(item.item)}${multiplier && Math.abs(multiplier - 1) > 0.0001 ? ` x${formatNumber(multiplier)}` : ''}`;
+}
+
+function formatOutsidePlanItemLabel(item: OutsidePlanItemRef): string {
+  const record = item.entry.record;
+  const serving = nonEmptyString(record.serving_description);
+  const name = formatTrackedFoodDisplayName(record);
+  return serving ? `${name} (${serving})` : name;
+}
+
+function formatTrackedFoodDisplayName(record: TrackedFoodRecord): string {
+  return nonEmptyString(record.food_name) ?? 'Logged food';
+}
+
+function trackedMacroTotals(record: TrackedFoodRecord): EraFitMealPlanFoodItem {
+  return {
+    name: formatTrackedFoodDisplayName(record),
+    description: null,
+    amount: null,
+    unit: null,
+    serving: null,
+    calories: parseNumberLike(record.calories),
+    protein: parseNumberLike(record.protein),
+    net_carbs: parseNumberLike(record.carbohydrate),
+    fat: parseNumberLike(record.fat),
+  };
 }
 
 function formatMealCheckbox(state: InteractiveState, items: MealPlanItemRef[]): string {
@@ -811,6 +1218,14 @@ function formatItemCheckbox(state: InteractiveState, item: MealPlanItemRef): str
   if (state.loadingItemKeys.has(item.key)) {
     return formatLoadingSpinner(item.key);
   }
+  if (state.mode === 'assign') {
+    if (state.completedItemKeys.has(item.key)) {
+      return CHECKBOX_CHECKED;
+    }
+    return state.mealCursor === item.mealIndex && state.itemCursor === itemRowIndex(state, item)
+      ? chalk.cyan(ASSIGN_POINTER)
+      : ' ';
+  }
   return state.completedItemKeys.has(item.key) ? CHECKBOX_CHECKED : CHECKBOX_EMPTY;
 }
 
@@ -820,9 +1235,16 @@ function formatLoadingSpinner(key: string): string {
   return chalk.yellow(LOADING_FRAMES[index]);
 }
 
-function contextHelp(mode: NavigationMode): string {
-  return mode === 'meals'
-    ? '↑/↓ meals | → items | ␣ toggle | Esc/q exit | Ctrl-C cancel'
+function contextHelp(state: InteractiveState): string {
+  if (state.mode === 'meals') {
+    return '↑/↓ meals | → items | ␣ toggle | Esc/q exit | Ctrl-C cancel';
+  }
+  if (state.mode === 'assign') {
+    return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
+  }
+  const row = getMealRow(state, state.mealCursor, state.itemCursor);
+  return row?.type === 'outside'
+    ? '↑/↓ items | ←/Esc meals | A assign | q exit'
     : '↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative | q exit';
 }
 
