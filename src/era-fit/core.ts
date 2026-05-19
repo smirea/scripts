@@ -17,7 +17,8 @@ const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
 const FIREBASE_API_KEY_ENV = 'ERA_FIT_FIREBASE_API_KEY';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-const MEAL_KEYS = ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'] as const;
+export const MEAL_KEYS = ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'] as const;
+export type EraFitMealKey = (typeof MEAL_KEYS)[number];
 const MEAL_PLAN_MEAL_KEYS = [
   'breakfast',
   'morning_snack',
@@ -26,7 +27,7 @@ const MEAL_PLAN_MEAL_KEYS = [
   'dinner',
   'evening_snack',
 ] as const;
-const MEAL_LABELS: Record<(typeof MEAL_KEYS)[number], string> = {
+export const MEAL_LABELS: Record<EraFitMealKey, string> = {
   breakfast: 'Breakfast',
   snack_am: 'AM Snack',
   lunch: 'Lunch',
@@ -105,6 +106,53 @@ export interface EraFitSession {
   dashboard: DashboardCheck;
 }
 
+export interface EraFitFatSecretSearchFood {
+  food_id: string;
+  food_name: string;
+  food_type: string;
+  food_url: string;
+  food_description: string;
+  brand_name?: string;
+}
+
+export interface EraFitFatSecretServing {
+  serving_id: string;
+  serving_description: string;
+  serving_url?: string;
+  metric_serving_amount?: string;
+  metric_serving_unit?: string;
+  number_of_units?: string;
+  measurement_description?: string;
+  calories?: string;
+  carbohydrate?: string;
+  protein?: string;
+  fat?: string;
+  saturated_fat?: string;
+  trans_fat?: string;
+  polyunsaturated_fat?: string;
+  monounsaturated_fat?: string;
+  cholesterol?: string;
+  sodium?: string;
+  potassium?: string;
+  fiber?: string;
+  sugar?: string;
+  vitamin_a?: string;
+  vitamin_c?: string;
+  vitamin_d?: string;
+  calcium?: string;
+  iron?: string;
+  added_sugars?: string;
+}
+
+export interface EraFitFatSecretFood {
+  food_id: string;
+  food_name: string;
+  food_type: string;
+  food_url: string;
+  brand_name?: string;
+  servings: Record<string, EraFitFatSecretServing>;
+}
+
 interface EraFitApiResponse<T> {
   ret_code?: number;
   ret_msg?: string;
@@ -119,6 +167,15 @@ interface EraFitGlobalsResponse {
 
 interface EraFitLazyloadResponse {
   data_array_meals?: string;
+}
+
+interface EraFitFatSecretSearchResponse {
+  foods?: unknown;
+  pagination?: unknown;
+}
+
+interface EraFitFatSecretFoodResponse {
+  food?: unknown;
 }
 
 interface EraFitTemplate {
@@ -489,6 +546,41 @@ async function fetchMealTrackingDay(session: EraFitSession, date: string): Promi
   return parseBase64Json(data.data_array_meals, `nutrition data for ${date}`) as EraFitDayPayload;
 }
 
+export async function searchEraFitFatSecretFoods(
+  session: EraFitSession,
+  search: string,
+  options: { page?: number; maxResultFixed?: number | false } = {}
+): Promise<EraFitFatSecretSearchFood[]> {
+  const data = await postApi<EraFitFatSecretSearchResponse>(session, '/api/fatsecret_seach', {
+    page: options.page ?? 0,
+    search,
+    max_result_fixed: options.maxResultFixed ?? false,
+    method: 'food_name',
+  });
+  const foods = Array.isArray(data.foods) ? data.foods : Object.values(asRecord(data.foods) ?? {});
+  return foods
+    .map(food => parseFatSecretSearchFood(asRecord(food)))
+    .filter((food): food is EraFitFatSecretSearchFood => food != null);
+}
+
+export async function fetchEraFitFatSecretFood(
+  session: EraFitSession,
+  foodId: string,
+  servingScreen: 'meal_tracking' | 'meal_plan' = 'meal_tracking'
+): Promise<EraFitFatSecretFood> {
+  const data = await postApi<EraFitFatSecretFoodResponse>(session, '/api/fatsecret_seach_id', {
+    code: foodId,
+    method: 'food_id',
+    option: 'insert',
+    serving_screen: servingScreen,
+  });
+  const food = parseFatSecretFood(asRecord(data.food));
+  if (!food) {
+    throw new Error(`Era Fit did not return FatSecret details for food id ${foodId}.`);
+  }
+  return food;
+}
+
 export async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPlanReport> {
   const [globals, slots, aiPlan, baseTdee] = await Promise.all([
     fetchMealTrackingGlobals(session),
@@ -587,7 +679,7 @@ async function fetchMealPlanAiData(session: EraFitSession): Promise<Record<strin
   return data;
 }
 
-async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | null> {
+export async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | null> {
   const token = normalizeOptionalString(env.ERA_FIT_FIREBASE_ID_TOKEN);
   if (token) {
     return token;
@@ -687,10 +779,10 @@ async function fetchCurrentBaseTdee(session: EraFitSession): Promise<number | nu
   }
 }
 
-async function postApi<T>(
+export async function postApi<T>(
   session: EraFitSession,
   apiPath: string,
-  data: Record<string, string | number>
+  data: Record<string, string | number | boolean>
 ): Promise<T> {
   for (let attempt = 1; attempt <= API_RETRY_ATTEMPTS; attempt += 1) {
     const response = await fetchUrl(apiPath, {
@@ -720,6 +812,50 @@ async function postApi<T>(
     return json.ret_data;
   }
   throw new Error(`Era Fit API request failed after ${API_RETRY_ATTEMPTS} attempts (${apiPath})`);
+}
+
+export async function readEraFitFirebasePath<T>(session: EraFitSession, dbPath: string): Promise<T | null> {
+  const response = await firebaseRequest(session, dbPath, { method: 'GET' });
+  return await response.json() as T | null;
+}
+
+export async function setEraFitFirebasePath(session: EraFitSession, dbPath: string, value: unknown): Promise<void> {
+  await firebaseRequest(session, dbPath, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(value),
+  });
+}
+
+export async function updateEraFitFirebasePath(
+  session: EraFitSession,
+  dbPath: string,
+  value: Record<string, unknown>
+): Promise<void> {
+  await firebaseRequest(session, dbPath, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(value),
+  });
+}
+
+async function firebaseRequest(session: EraFitSession, dbPath: string, init: RequestInit): Promise<Response> {
+  const token = await resolveFirebaseIdToken(session);
+  if (!token) {
+    throw new Error(`${FIREBASE_API_KEY_ENV} and ${CREDENTIALS_ENV_KEY} are required for Era Fit Firebase writes.`);
+  }
+  const url = new URL(`https://erafit-${session.app.biz_id}.firebaseio.com/${dbPath.replace(/^\/+/, '')}.json`);
+  url.searchParams.set('auth', token);
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Era Fit Firebase request failed: ${response.status} ${response.statusText} (${dbPath}) ${text.slice(0, 500)}`);
+  }
+  return response;
 }
 
 function isRetryableStatus(status: number): boolean {
@@ -923,6 +1059,89 @@ function parseTemplates(value: unknown): Record<string, EraFitTemplate> {
     templates.default = fallbackTemplate();
   }
   return templates;
+}
+
+function parseFatSecretSearchFood(raw: Record<string, unknown> | null): EraFitFatSecretSearchFood | null {
+  const foodId = parseString(raw?.food_id);
+  const foodName = parseString(raw?.food_name);
+  const foodType = parseString(raw?.food_type);
+  const foodUrl = parseString(raw?.food_url);
+  const foodDescription = parseString(raw?.food_description);
+  if (!foodId || !foodName || !foodType || !foodUrl || !foodDescription) {
+    return null;
+  }
+  return {
+    food_id: foodId,
+    food_name: foodName,
+    food_type: foodType,
+    food_url: foodUrl,
+    food_description: foodDescription,
+    brand_name: parseString(raw?.brand_name) ?? undefined,
+  };
+}
+
+function parseFatSecretFood(raw: Record<string, unknown> | null): EraFitFatSecretFood | null {
+  const foodId = parseString(raw?.food_id);
+  const foodName = parseString(raw?.food_name);
+  const foodType = parseString(raw?.food_type);
+  const foodUrl = parseString(raw?.food_url);
+  const servings = asRecord(raw?.servings);
+  if (!foodId || !foodName || !foodType || !foodUrl || !servings) {
+    return null;
+  }
+  return {
+    food_id: foodId,
+    food_name: foodName,
+    food_type: foodType,
+    food_url: foodUrl,
+    brand_name: parseString(raw?.brand_name) ?? undefined,
+    servings: Object.fromEntries(
+      Object.entries(servings)
+        .map(([key, value]) => {
+          const serving = parseFatSecretServing(asRecord(value));
+          return serving ? [serving.serving_id || key, serving] : null;
+        })
+        .filter((entry): entry is [string, EraFitFatSecretServing] => entry != null)
+    ),
+  };
+}
+
+function parseFatSecretServing(raw: Record<string, unknown> | null): EraFitFatSecretServing | null {
+  const servingId = parseString(raw?.serving_id);
+  const servingDescription = parseString(raw?.serving_description);
+  if (!servingId || !servingDescription) {
+    return null;
+  }
+  return Object.fromEntries(
+    Object.entries({
+      serving_id: servingId,
+      serving_description: servingDescription,
+      serving_url: parseString(raw?.serving_url),
+      metric_serving_amount: parseString(raw?.metric_serving_amount),
+      metric_serving_unit: parseString(raw?.metric_serving_unit),
+      number_of_units: parseString(raw?.number_of_units),
+      measurement_description: parseString(raw?.measurement_description),
+      calories: parseString(raw?.calories),
+      carbohydrate: parseString(raw?.carbohydrate),
+      protein: parseString(raw?.protein),
+      fat: parseString(raw?.fat),
+      saturated_fat: parseString(raw?.saturated_fat),
+      trans_fat: parseString(raw?.trans_fat),
+      polyunsaturated_fat: parseString(raw?.polyunsaturated_fat),
+      monounsaturated_fat: parseString(raw?.monounsaturated_fat),
+      cholesterol: parseString(raw?.cholesterol),
+      sodium: parseString(raw?.sodium),
+      potassium: parseString(raw?.potassium),
+      fiber: parseString(raw?.fiber),
+      sugar: parseString(raw?.sugar),
+      vitamin_a: parseString(raw?.vitamin_a),
+      vitamin_c: parseString(raw?.vitamin_c),
+      vitamin_d: parseString(raw?.vitamin_d),
+      calcium: parseString(raw?.calcium),
+      iron: parseString(raw?.iron),
+      added_sugars: parseString(raw?.added_sugars),
+    }).filter((entry): entry is [string, string] => entry[1] != null)
+  ) as unknown as EraFitFatSecretServing;
 }
 
 function parseTemplate(raw: Record<string, unknown> | null): EraFitTemplate | null {
@@ -1722,7 +1941,7 @@ function listDateKeysBetween(start: Date, end: Date): string[] {
   return dates;
 }
 
-function parseLocalDate(value: string, label: string): Date {
+export function parseLocalDate(value: string, label: string): Date {
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!match) {
     throw new Error(`Invalid ${label} date: ${value}. Expected YYYY-MM-DD.`);
@@ -1737,7 +1956,7 @@ function parseLocalDate(value: string, label: string): Date {
   return date;
 }
 
-function startOfLocalDay(value: Date): Date {
+export function startOfLocalDay(value: Date): Date {
   return new Date(value.getFullYear(), value.getMonth(), value.getDate());
 }
 
@@ -1747,7 +1966,7 @@ function addDays(value: Date, days: number): Date {
   return next;
 }
 
-function formatDateKey(value: Date): string {
+export function formatDateKey(value: Date): string {
   const year = value.getFullYear();
   const month = String(value.getMonth() + 1).padStart(2, '0');
   const day = String(value.getDate()).padStart(2, '0');
@@ -1767,7 +1986,7 @@ export function formatLongDate(value: Date): string {
   }).format(value);
 }
 
-function formatEraFitDateId(date: Date): string {
+export function formatEraFitDateId(date: Date): string {
   const dayOfYearZeroBased = Math.floor(
     (Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(date.getFullYear(), 0, 1)) / MS_PER_DAY
   );

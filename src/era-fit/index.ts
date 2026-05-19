@@ -5,6 +5,7 @@ import { hideBin } from 'yargs/helpers';
 import { createScript } from '../utils/createScript';
 import { defaultLogCommand, logCommand } from './commands/log';
 import { mealPlanCommand } from './commands/mealplan';
+import { trackCommand } from './commands/track';
 
 if (import.meta.main) {
   await createScript(runCliWithErrorFormatting);
@@ -27,6 +28,7 @@ async function runCli(): Promise<void> {
     .command(defaultLogCommand)
     .command(logCommand)
     .command(mealPlanCommand)
+    .command(trackCommand)
     .help()
     .parseAsync();
 }
