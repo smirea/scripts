@@ -22,13 +22,13 @@ import {
   shoppingUnitPriority,
   uniqueStrings,
   WEEKDAY_NAMES,
-  type EraFitMacroTotals,
   type EraFitMealPlanDay,
   type EraFitMealPlanFoodItem,
   type EraFitMealPlanReport,
   type EraFitShoppingListItem,
   type ShoppingMeasure,
 } from '../core';
+import { formatMacroColumns, formatMacros, getMacroColumnWidths, type MacroColumnWidths } from '../macroFormat';
 import { runInteractiveTodayMealPlan } from '../mealplanInteractive';
 
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
@@ -76,6 +76,11 @@ interface MealItemLabel {
 interface MealItemServing {
   text: string;
   measure: ShoppingMeasure;
+}
+
+interface MealPlanRenderContext {
+  itemLabelWidth: number;
+  itemMacroWidths: MacroColumnWidths;
 }
 
 export const mealPlanCommand = {
@@ -300,8 +305,9 @@ function renderMealPlanText(
   anyListResult: { id: string; name: string; added: number } | null = null
 ): string {
   const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
+  const context = createMealPlanRenderContext(report.days);
   for (const day of report.days) {
-    lines.push(...renderMealPlanDayLines(day), '');
+    lines.push(...renderMealPlanDayLines(day, context), '');
   }
   lines.push(chalk.bold('Shopping List'));
   if (report.shoppingList.length === 0) {
@@ -330,10 +336,10 @@ function renderMealPlanText(
 }
 
 function renderMealPlanDayText(day: EraFitMealPlanDay): string {
-  return `${renderMealPlanDayLines(day).join('\n')}\n`;
+  return `${renderMealPlanDayLines(day, createMealPlanRenderContext([day])).join('\n')}\n`;
 }
 
-function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
+function renderMealPlanDayLines(day: EraFitMealPlanDay, context: MealPlanRenderContext): string[] {
   const lines: string[] = [];
   const planned = formatMacros(day.planned);
   const target = formatMacros(day.targets);
@@ -349,12 +355,19 @@ function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
       lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
     }
     const labels = meal.items.map(item => ({ item, label: formatMealPlanItemLabel(item) }));
-    const labelWidth = labels.reduce((width, entry) => Math.max(width, visibleLength(entry.label.styled)), 58);
     for (const { item, label } of labels) {
-      lines.push(`    ${padVisibleEnd(label.styled, labelWidth)} ${formatMacros(item)}`);
+      lines.push(`    ${padVisibleEnd(label.styled, context.itemLabelWidth)}  ${formatMacroColumns(item, context.itemMacroWidths)}`);
     }
   }
   return lines;
+}
+
+function createMealPlanRenderContext(days: EraFitMealPlanDay[]): MealPlanRenderContext {
+  const items = days.flatMap(day => day.meals.flatMap(meal => meal.items));
+  return {
+    itemLabelWidth: items.reduce((width, item) => Math.max(width, visibleLength(formatMealPlanItemLabel(item).styled)), 58),
+    itemMacroWidths: getMacroColumnWidths(items),
+  };
 }
 
 function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
@@ -451,19 +464,6 @@ function formatMealItemGrams(item: EraFitMealPlanFoodItem): string | null {
   }
   const amount = parseNumberLike(grams[1]);
   return amount == null ? null : `${formatNumber(roundNumber(amount))}g`;
-}
-
-function formatMacros(value: EraFitMacroTotals): string {
-  return [
-    chalk.blue(`${formatNullableNumber(value.calories)} kcal`),
-    chalk.red(`P ${formatNullableNumber(value.protein)}g`),
-    chalk.yellow(`C ${formatNullableNumber(value.net_carbs)}g`),
-    chalk.magenta(`F ${formatNullableNumber(value.fat)}g`),
-  ].join(' | ');
-}
-
-function formatNullableNumber(value: number | null): string {
-  return value == null ? '-' : formatNumber(roundNumber(value));
 }
 
 function formatMealPlanTime(value: string): string {

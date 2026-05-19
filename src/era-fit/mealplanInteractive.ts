@@ -2,6 +2,7 @@ import { isCancel, Prompt, settings as clackSettings } from '@clack/core';
 import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 
+import { padVisibleEnd, truncateVisibleEnd, visibleLength } from '../utils/tabular';
 import { type EraFitCache } from './cache';
 import {
   formatDateKey,
@@ -11,13 +12,13 @@ import {
   roundNumber,
   startOfLocalDay,
   uniqueStrings,
-  type EraFitMacroTotals,
   type EraFitMealKey,
   type EraFitMealPlanDay,
   type EraFitMealPlanFoodItem,
   type EraFitMealPlanMeal,
   type EraFitSession,
 } from './core';
+import { formatMacroColumns, formatMacros, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
 import {
   deleteTrackedFoods,
   fetchTrackedFoodsForDate,
@@ -76,6 +77,11 @@ interface InteractiveState {
   multipliers: Map<string, number>;
   pendingSearchItems: MealPlanItemRef[];
   messages: string[];
+}
+
+interface IngredientLineLayout {
+  labelWidth: number;
+  macroWidths: MacroColumnWidths;
 }
 
 type MealPlanPromptAction =
@@ -736,6 +742,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
 }
 
 function renderMealPlanFrame(state: InteractiveState): string {
+  const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
     `${chalk.bold(state.day.day)} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
     `  ${formatMacros(state.day.planned)} ${chalk.gray('| target')} ${formatMacros(state.day.targets)}`,
@@ -747,7 +754,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
     lines.push(activeMeal ? chalk.cyan(mealLine) : mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
       const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
-      lines.push(renderItemLine(state, item, activeItem));
+      lines.push(renderItemLine(state, item, activeItem, ingredientLayout));
     }
   }
   lines.push('');
@@ -758,20 +765,35 @@ function renderMealPlanFrame(state: InteractiveState): string {
   return lines.join('\n');
 }
 
-function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean): string {
+function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean, layout: IngredientLineLayout): string {
   const completed = state.completedItemKeys.has(item.key);
   const existing = state.existingItemKeys.has(item.key);
-  const multiplier = state.multipliers.get(item.key);
-  const label = formatItemDisplayName(item.item);
-  const styledLabel = completed
-    ? chalk.strikethrough(chalk.gray(label))
-    : label;
-  const multiplierText = multiplier && Math.abs(multiplier - 1) > 0.0001
-    ? chalk.cyan(` x${formatNumber(multiplier)}`)
-    : '';
+  const label = truncateVisibleEnd(formatInteractiveItemLabel(state, item), layout.labelWidth);
+  const styledLabel = completed ? chalk.strikethrough(chalk.gray(label)) : label;
   const existingText = existing ? chalk.gray(' tracked') : '';
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatItemCheckbox(state, item)} ${styledLabel}${multiplierText} ${formatMacros(item.item)}${existingText}`;
+  const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(item.item, layout.macroWidths)}${existingText}`;
   return active ? chalk.cyan(line) : line;
+}
+
+function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout {
+  const items = state.meals.flatMap(meal => meal.items);
+  const macroWidths = getMacroColumnWidths(items.map(item => item.item));
+  const naturalLabelWidth = items.reduce((width, item) => Math.max(width, visibleLength(formatInteractiveItemLabel(state, item))), 0);
+  const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
+  const trackedWidth = items.some(item => state.existingItemKeys.has(item.key)) ? visibleLength(' tracked') : 0;
+  const availableLabelWidth = process.stdout.columns
+    ? Math.max(18, process.stdout.columns - 6 - 2 - macroWidth - trackedWidth)
+    : naturalLabelWidth;
+  return {
+    labelWidth: Math.min(naturalLabelWidth, availableLabelWidth),
+    macroWidths,
+  };
+}
+
+function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemRef): string {
+  const multiplier = state.multipliers.get(item.key);
+  return `${formatItemDisplayName(item.item)}${multiplier && Math.abs(multiplier - 1) > 0.0001 ? ` x${formatNumber(multiplier)}` : ''}`;
 }
 
 function formatMealCheckbox(state: InteractiveState, items: MealPlanItemRef[]): string {
@@ -806,19 +828,6 @@ function contextHelp(mode: NavigationMode): string {
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
   return item.description?.trim() || item.name;
-}
-
-function formatMacros(value: EraFitMacroTotals): string {
-  return [
-    chalk.blue(`${formatNullableNumber(value.calories)} kcal`),
-    chalk.red(`P ${formatNullableNumber(value.protein)}g`),
-    chalk.yellow(`C ${formatNullableNumber(value.net_carbs)}g`),
-    chalk.magenta(`F ${formatNullableNumber(value.fat)}g`),
-  ].join(chalk.gray(' | '));
-}
-
-function formatNullableNumber(value: number | null): string {
-  return value == null ? '-' : formatNumber(roundNumber(value));
 }
 
 function clearInteractiveScreen(): void {
