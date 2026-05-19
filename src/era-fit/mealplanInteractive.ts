@@ -340,25 +340,66 @@ function matchExistingTrackedItems(
   for (const meal of meals) {
     const candidates = tracked.filter(entry => entry.meal === meal.trackingMeal);
     for (const item of meal.items) {
-      const scored = candidates
-        .filter(entry => !used.has(`${entry.meal}:${entry.id}`))
-        .map(entry => ({
-          entry,
-          score: scoreTrackedMatch(item.item, entry.record),
-        }))
-        .sort((a, b) => b.score - a.score);
-      const best = scored[0];
-      if (!best || best.score < 4) {
+      const best = findBestTextTrackedMatch(item.item, candidates, used);
+      if (!best) {
         continue;
       }
       completed.add(item.key);
-      used.add(`${best.entry.meal}:${best.entry.id}`);
+      used.add(trackedEntryKey(best));
+    }
+
+    for (const item of meal.items) {
+      if (completed.has(item.key)) {
+        continue;
+      }
+      const best = findBestMacroProximityMatch(item.item, candidates, used);
+      if (!best) {
+        continue;
+      }
+      completed.add(item.key);
+      used.add(trackedEntryKey(best));
     }
   }
   return completed;
 }
 
-function scoreTrackedMatch(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
+function findBestTextTrackedMatch(
+  item: EraFitMealPlanFoodItem,
+  candidates: TrackedFoodEntry[],
+  used: Set<string>
+): TrackedFoodEntry | null {
+  const best = candidates
+    .filter(entry => !used.has(trackedEntryKey(entry)))
+    .map(entry => ({
+      entry,
+      score: scoreTrackedTextMatch(item, entry.record),
+    }))
+    .filter(match => match.score >= 4)
+    .sort((a, b) => b.score - a.score)[0];
+  return best?.entry ?? null;
+}
+
+function findBestMacroProximityMatch(
+  item: EraFitMealPlanFoodItem,
+  candidates: TrackedFoodEntry[],
+  used: Set<string>
+): TrackedFoodEntry | null {
+  const best = candidates
+    .filter(entry => !used.has(trackedEntryKey(entry)))
+    .filter(entry => macrosAreWithinFivePercent(item, entry.record))
+    .map(entry => ({
+      entry,
+      distance: macroProximityDistance(item, entry.record),
+    }))
+    .sort((a, b) => a.distance - b.distance)[0];
+  return best?.entry ?? null;
+}
+
+function trackedEntryKey(entry: TrackedFoodEntry): string {
+  return `${entry.meal}:${entry.id}`;
+}
+
+function scoreTrackedTextMatch(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
   const itemTokens = tokenize(`${item.name} ${item.description ?? ''}`);
   const recordTokens = tokenize(record.food_name ?? '');
   const overlap = itemTokens.filter(token => recordTokens.includes(token)).length;
@@ -373,10 +414,6 @@ function scoreTrackedMatch(item: EraFitMealPlanFoodItem, record: TrackedFoodReco
     score += 2;
   }
 
-  const macroDistance = macroMatchDistance(item, record);
-  if (macroDistance <= 8) score += 4;
-  else if (macroDistance <= 18) score += 2;
-
   const itemGrams = item.unit === 'g' ? item.amount : null;
   const recordGrams = trackedRecordGrams(record);
   if (itemGrams != null && recordGrams != null) {
@@ -387,13 +424,33 @@ function scoreTrackedMatch(item: EraFitMealPlanFoodItem, record: TrackedFoodReco
   return score;
 }
 
-function macroMatchDistance(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
+function macrosAreWithinFivePercent(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): boolean {
+  return macroPairs(item, record).every(([planned, tracked]) => isWithinFivePercent(planned, tracked));
+}
+
+function macroProximityDistance(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
+  return macroPairs(item, record).reduce((sum, [planned, tracked]) => {
+    if (planned === 0) {
+      return sum + Math.abs(tracked);
+    }
+    return sum + Math.abs(planned - tracked) / Math.abs(planned);
+  }, 0);
+}
+
+function macroPairs(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): Array<[number, number]> {
   return [
-    Math.abs((item.calories ?? 0) - (record.calories ?? 0)) / 8,
-    Math.abs((item.protein ?? 0) - (record.protein ?? 0)),
-    Math.abs((item.net_carbs ?? 0) - (record.carbohydrate ?? 0)),
-    Math.abs((item.fat ?? 0) - (record.fat ?? 0)),
-  ].reduce((sum, value) => sum + value, 0);
+    [item.calories ?? 0, record.calories ?? 0],
+    [item.protein ?? 0, record.protein ?? 0],
+    [item.net_carbs ?? 0, record.carbohydrate ?? 0],
+    [item.fat ?? 0, record.fat ?? 0],
+  ];
+}
+
+function isWithinFivePercent(planned: number, tracked: number): boolean {
+  if (planned === 0) {
+    return Math.abs(tracked) <= 0.1;
+  }
+  return Math.abs(planned - tracked) <= Math.abs(planned) * 0.05;
 }
 
 function trackedRecordGrams(record: TrackedFoodRecord): number | null {
