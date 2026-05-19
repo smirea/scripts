@@ -4,27 +4,14 @@ import path from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 
 import { isCancel, password, text } from '@clack/prompts';
-import chalk from 'chalk';
-import type { Argv, ArgumentsCamelCase } from 'yargs';
 
-import { createShoppingList } from '../anylist';
 import env from '../env';
-import {
-  OUTPUT_FORMATS,
-  parseOutputFormat,
-  renderCsvRecords,
-  renderTableRecords,
-  type CsvValue,
-  type OutputFormat,
-} from '../utils/output';
 
 const BASE_URL = 'https://app.erafit.com';
-const SOURCE_PATH = 'api://era-fit/nutrition';
+export const NUTRITION_SOURCE_PATH = 'api://era-fit/nutrition';
+export const MEAL_PLAN_SOURCE_PATH = 'api://era-fit/meal-plan';
 const DEFAULT_DASHBOARD_PATH = '/clients/dashboard';
-const DEFAULT_DAYS = 1;
 const API_RETRY_ATTEMPTS = 3;
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
-const MEALPLAN_CATEGORY_MODEL = 'gemini-2.5-flash';
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
@@ -55,63 +42,7 @@ const MEAL_PLAN_MEAL_LABELS: Record<(typeof MEAL_PLAN_MEAL_KEYS)[number], string
   dinner: 'Dinner',
   evening_snack: 'Evening Snack',
 };
-const MEAL_PLAN_OUTPUT_FORMATS = ['json', 'table'] as const;
-const DAILY_COLUMNS = [
-  'date',
-  'template',
-  'status',
-  'calories',
-  'goal_calories',
-  'protein',
-  'goal_protein',
-  'net_carbs',
-  'goal_net_carbs',
-  'fat',
-  'goal_fat',
-  'foods_logged',
-] as const;
-const FOOD_COLUMNS = [
-  'date',
-  'time',
-  'meal',
-  'kind',
-  'name',
-  'brand',
-  'serving',
-  'calories',
-  'protein',
-  'net_carbs',
-  'fat',
-] as const;
-const RECIPE_COLUMNS = [
-  'date',
-  'time',
-  'meal',
-  'recipe',
-  'recipe_serving',
-  'ingredient',
-  'brand',
-  'serving',
-  'calories',
-  'protein',
-  'net_carbs',
-  'fat',
-] as const;
-const TEMPLATE_COLUMNS = [
-  'id',
-  'title',
-  'type',
-  'unit',
-  'body_composition_goal',
-  'calories',
-  'protein',
-  'net_carbs',
-  'fat',
-  'protein_setting',
-  'net_carbs_setting',
-  'fat_setting',
-] as const;
-const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
+export const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const;
 const WEEKDAY_TAGS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'] as const;
 const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
   neg_1000: -1000,
@@ -131,25 +62,6 @@ const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
   moderate_bulk: 500,
   strong_bulk: 1000,
 };
-const MEALPLAN_ANYLIST_CATEGORIES = [
-  'bakery',
-  'beverages',
-  'breakfast-and-cereal',
-  'condiments-oils-and-salad-dressings',
-  'cooking-and-baking',
-  'dairy',
-  'frozen-foods',
-  'grains-pasta-and-side-dishes',
-  'meat',
-  'produce',
-  'seafood',
-  'snacks-cookies-and-candy',
-  'soups-and-canned-goods',
-  'other',
-] as const;
-
-type MealPlanAnyListCategory = (typeof MEALPLAN_ANYLIST_CATEGORIES)[number];
-
 interface Credentials {
   email: string;
   password: string;
@@ -185,7 +97,7 @@ interface EraFitAppCookie {
   coach_id?: string;
 }
 
-interface EraFitSession {
+export interface EraFitSession {
   cookieHeader: string;
   app: EraFitAppCookie;
   dashboard: DashboardCheck;
@@ -235,7 +147,7 @@ interface EraFitDayPayload {
   status_day?: unknown;
 }
 
-interface EraFitReport {
+export interface EraFitReport {
   generatedAt: string;
   sourcePath: string;
   clientId: string;
@@ -251,7 +163,7 @@ interface EraFitReport {
   templates: EraFitTemplateSummary[];
 }
 
-interface EraFitDailyOverviewRecord {
+export interface EraFitDailyOverviewRecord {
   date: string;
   date_id: string;
   template: string;
@@ -268,7 +180,7 @@ interface EraFitDailyOverviewRecord {
   foods_logged: number;
 }
 
-interface EraFitFoodRecord {
+export interface EraFitFoodRecord {
   date: string;
   time: string | null;
   meal: string;
@@ -283,7 +195,7 @@ interface EraFitFoodRecord {
   fat: number | null;
 }
 
-interface EraFitRecipeIngredientRecord {
+export interface EraFitRecipeIngredientRecord {
   date: string;
   time: string | null;
   meal: string;
@@ -299,13 +211,13 @@ interface EraFitRecipeIngredientRecord {
   fat: number | null;
 }
 
-interface EraFitScheduleRecord {
+export interface EraFitScheduleRecord {
   day: string;
   template_id: string;
   template: string;
 }
 
-interface EraFitTemplateSummary {
+export interface EraFitTemplateSummary {
   id: string;
   title: string;
   type: string;
@@ -328,7 +240,7 @@ interface EraFitMealPlanSlot {
   id: string | null;
 }
 
-interface EraFitMealPlanReport {
+export interface EraFitMealPlanReport {
   generatedAt: string;
   sourcePath: string;
   clientId: string;
@@ -336,7 +248,7 @@ interface EraFitMealPlanReport {
   shoppingList: EraFitShoppingListItem[];
 }
 
-interface EraFitMealPlanDay {
+export interface EraFitMealPlanDay {
   day: string;
   day_tag: string;
   template: string;
@@ -346,7 +258,7 @@ interface EraFitMealPlanDay {
   meals: EraFitMealPlanMeal[];
 }
 
-interface EraFitMealPlanMeal {
+export interface EraFitMealPlanMeal {
   meal: string;
   meal_key: string;
   time: string | null;
@@ -355,7 +267,7 @@ interface EraFitMealPlanMeal {
   items: EraFitMealPlanFoodItem[];
 }
 
-interface EraFitMealPlanFoodItem {
+export interface EraFitMealPlanFoodItem {
   name: string;
   description: string | null;
   amount: number | null;
@@ -367,7 +279,7 @@ interface EraFitMealPlanFoodItem {
   fat: number | null;
 }
 
-interface EraFitShoppingListItem {
+export interface EraFitShoppingListItem {
   name: string;
   quantity: string;
   meals: number;
@@ -376,38 +288,18 @@ interface EraFitShoppingListItem {
   variations: string[];
 }
 
-interface GeminiGenerateContentResponse {
-  candidates?: Array<{
-    content?: {
-      parts?: Array<{
-        text?: string;
-      }>;
-    };
-  }>;
-}
-
 interface ShoppingFoodUse {
   food: EraFitMealPlanFoodItem;
   mealId: string;
 }
 
-interface ShoppingMeasure {
+export interface ShoppingMeasure {
   quantity: number;
   unit: string;
   priority: number;
 }
 
-interface MealItemLabel {
-  plain: string;
-  styled: string;
-}
-
-interface MealItemServing {
-  text: string;
-  measure: ShoppingMeasure;
-}
-
-interface EraFitMacroTotals {
+export interface EraFitMacroTotals {
   calories: number | null;
   protein: number | null;
   net_carbs: number | null;
@@ -418,27 +310,9 @@ interface EraFitMacroTargets extends EraFitMacroTotals {
   goal_calories: number | null;
 }
 
-interface ResolvedDateWindow {
+export interface ResolvedDateWindow {
   start: Date;
   end: Date;
-}
-
-interface OutputCliArgs {
-  format: string;
-  output?: string;
-}
-
-export interface LogCliArgs extends OutputCliArgs {
-  date?: string;
-  days: number;
-  start?: string;
-  end?: string;
-  limit?: number;
-}
-
-export interface MealPlanCliArgs extends OutputCliArgs {
-  anylist: boolean;
-  today: boolean;
 }
 
 class CookieJar {
@@ -485,225 +359,7 @@ class CookieJar {
   }
 }
 
-function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
-  return parser
-    .option('format', {
-      alias: ['f'],
-      type: 'string',
-      choices,
-      default: 'table',
-      describe: 'Output format',
-    })
-    .option('output', {
-      alias: ['o'],
-      type: 'string',
-      describe: 'Write output to this file path',
-    }) as unknown as Argv<T & OutputCliArgs>;
-}
-
-export function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
-  return addOutputOptions(parser, OUTPUT_FORMATS)
-    .option('date', {
-      type: 'string',
-      describe: 'Local date to report, in YYYY-MM-DD format. Defaults to today when --start is not set',
-    })
-    .option('days', {
-      alias: ['d'],
-      type: 'number',
-      default: DEFAULT_DAYS,
-      describe: 'Lookback window in days when --start is not set',
-    })
-    .option('start', {
-      type: 'string',
-      describe: 'Start date in YYYY-MM-DD format',
-    })
-    .option('end', {
-      type: 'string',
-      describe: 'End date in YYYY-MM-DD format',
-    })
-    .option('limit', {
-      alias: ['l'],
-      type: 'number',
-      describe: 'Maximum number of logged foods to return',
-    }) as Argv<T & LogCliArgs>;
-}
-
-export function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
-  return addOutputOptions(parser, MEAL_PLAN_OUTPUT_FORMATS)
-    .option('anylist', {
-      type: 'boolean',
-      default: false,
-      describe: 'Create an AnyList shopping list from the suggested mealplan ingredients',
-    })
-    .option('today', {
-      alias: ['t'],
-      type: 'boolean',
-      default: false,
-      describe: 'Print only today\'s suggested meal plan',
-    }) as Argv<T & MealPlanCliArgs>;
-}
-
-export async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
-  if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
-    throw new Error('--limit must be a positive number.');
-  }
-
-  const format = parseOutputFormat(args.format);
-  const session = await resolveSession();
-
-  const window = resolveDateWindow({
-    days: args.days,
-    date: args.date,
-    start: args.start,
-    end: args.end,
-  });
-  const report = await fetchEraFitReport(session, {
-    window,
-    limit: args.limit,
-  });
-
-  renderOutput({
-    report,
-    format,
-    outputPath: args.output,
-  });
-}
-
-export async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
-  const format = parseOutputFormat(args.format);
-  if (args.today && args.anylist) {
-    throw new Error('--today only prints today\'s meal plan and cannot be combined with --anylist.');
-  }
-  const session = await resolveSession();
-
-  const mealPlan = await fetchEraFitMealPlan(session);
-  const anyListResult = args.anylist ? await createAnyListMealPlan(mealPlan) : null;
-  renderMealPlanOutput({
-    report: mealPlan,
-    format,
-    outputPath: args.output,
-    anyListResult,
-    todayOnly: args.today,
-  });
-}
-
-async function createAnyListMealPlan(report: EraFitMealPlanReport): Promise<{ id: string; name: string; added: number }> {
-  const name = `Mealplan ${formatLongDate(new Date())}`;
-  const categories = await categorizeMealPlanShoppingList(report.shoppingList);
-  const list = await createShoppingList(name, report.shoppingList.map(item => ({
-    name: item.name,
-    serving: item.quantity,
-    description: formatAnyListMealPlanDescription(item),
-    categoryMatchId: categories.get(item.name) ?? 'other',
-  })), { replaceExisting: true });
-  return {
-    id: list.id,
-    name: list.name,
-    added: list.added.length,
-  };
-}
-
-function formatAnyListMealPlanDescription(item: EraFitShoppingListItem): string | undefined {
-  const parts = [
-    item.meals > 1 ? `${item.meals} meals` : null,
-    ...item.variations,
-  ].filter((part): part is string => !!part);
-  return parts.length > 0 ? parts.join('; ') : undefined;
-}
-
-async function categorizeMealPlanShoppingList(items: EraFitShoppingListItem[]): Promise<Map<string, MealPlanAnyListCategory>> {
-  const fallback = new Map(items.map(item => [item.name, inferMealPlanCategory(item.name)]));
-  try {
-    const geminiCategories = await categorizeMealPlanShoppingListWithGemini(items);
-    for (const item of items) {
-      const category = geminiCategories.get(item.name);
-      if (category && isMealPlanAnyListCategory(category)) {
-        fallback.set(item.name, category);
-      }
-    }
-  } catch (error) {
-    console.warn(`Gemini categorization failed, using local category rules: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  return fallback;
-}
-
-async function categorizeMealPlanShoppingListWithGemini(items: EraFitShoppingListItem[]): Promise<Map<string, string>> {
-  const response = await fetch(`${GEMINI_BASE_URL}/v1beta/models/${MEALPLAN_CATEGORY_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      contents: [{
-        parts: [{
-          text: [
-            'Categorize these meal-plan shopping list ingredients into AnyList grocery category IDs.',
-            'Return only JSON with this shape: {"items":[{"name":"exact input name","categoryMatchId":"one allowed category"}]}.',
-            `Allowed categories: ${MEALPLAN_ANYLIST_CATEGORIES.join(', ')}`,
-            JSON.stringify(items.map(item => ({
-              name: item.name,
-              quantity: item.quantity,
-              servings: item.servings.slice(0, 6),
-            }))),
-          ].join('\n'),
-        }],
-      }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-      },
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
-  }
-
-  const payload = await response.json() as GeminiGenerateContentResponse;
-  const text = payload.candidates
-    ?.flatMap(candidate => candidate.content?.parts ?? [])
-    .map(part => part.text ?? '')
-    .join('\n')
-    .trim();
-  if (!text) {
-    throw new Error('model returned no category JSON');
-  }
-
-  const parsed = JSON.parse(stripJsonCodeFence(text)) as { items?: Array<{ name?: string; categoryMatchId?: string }> };
-  return new Map((parsed.items ?? [])
-    .filter(item => typeof item.name === 'string' && typeof item.categoryMatchId === 'string')
-    .map(item => [item.name as string, item.categoryMatchId as string]));
-}
-
-function stripJsonCodeFence(value: string): string {
-  return value
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-}
-
-function isMealPlanAnyListCategory(value: string): value is MealPlanAnyListCategory {
-  return (MEALPLAN_ANYLIST_CATEGORIES as readonly string[]).includes(value);
-}
-
-function inferMealPlanCategory(name: string): MealPlanAnyListCategory {
-  const normalized = name.toLowerCase();
-  if (/\b(chicken|turkey|beef|steak|pork|bacon|sausage)\b/.test(normalized)) return 'meat';
-  if (/\b(salmon|tuna|cod|tilapia|shrimp|seafood)\b/.test(normalized)) return 'seafood';
-  if (/\b(yogurt|milk|cheese|cottage|kefir|egg|eggs|egg white|whey)\b/.test(normalized)) return 'dairy';
-  if (/\b(bread|bagel|tortilla|pita|bun|roll)\b/.test(normalized)) return 'bakery';
-  if (/\b(oat|oatmeal|cereal|granola)\b/.test(normalized)) return 'breakfast-and-cereal';
-  if (/\b(rice|pasta|quinoa|potato|sweet potato|beans|lentils)\b/.test(normalized)) return 'grains-pasta-and-side-dishes';
-  if (/\b(oil|olive|avocado oil|dressing|mustard|mayo|sauce|vinegar|salsa)\b/.test(normalized)) return 'condiments-oils-and-salad-dressings';
-  if (/\b(almond|walnut|cashew|chia|flax|seed|protein powder)\b/.test(normalized)) return 'snacks-cookies-and-candy';
-  if (/\b(frozen)\b/.test(normalized)) return 'frozen-foods';
-  if (/\b(broth|stock|canned|soup)\b/.test(normalized)) return 'soups-and-canned-goods';
-  if (/\b(water|tea|coffee|juice|drink|beverage)\b/.test(normalized)) return 'beverages';
-  if (/\b(flour|sugar|spice|powder|baking)\b/.test(normalized)) return 'cooking-and-baking';
-  if (/\b(arugula|asparagus|avocado|banana|berries|blackberries|blueberries|broccoli|spinach|strawberries|zucchini|apple|orange|lemon|lime|lettuce|tomato|pepper|onion|carrot|fruit|vegetable)\b/.test(normalized)) return 'produce';
-  return 'other';
-}
-
-async function resolveSession(): Promise<EraFitSession> {
+export async function resolveSession(): Promise<EraFitSession> {
   const existingSession = normalizeOptionalString(env.ERA_FIT_SESSION_COOKIE);
   if (existingSession) {
     const sessionCheck = await checkDashboard(existingSession, DEFAULT_DASHBOARD_PATH);
@@ -748,7 +404,7 @@ async function loginAndSaveSession(credentials: Credentials): Promise<EraFitSess
   };
 }
 
-async function fetchEraFitReport(
+export async function fetchEraFitReport(
   session: EraFitSession,
   options: {
     window: ResolvedDateWindow;
@@ -783,7 +439,7 @@ async function fetchEraFitReport(
 
   return {
     generatedAt: formatLocalIso(new Date()),
-    sourcePath: SOURCE_PATH,
+    sourcePath: NUTRITION_SOURCE_PATH,
     clientId: session.app.id_app,
     window: {
       start: formatDateKey(options.window.start),
@@ -827,7 +483,7 @@ async function fetchMealTrackingDay(session: EraFitSession, date: string): Promi
   return parseBase64Json(data.data_array_meals, `nutrition data for ${date}`) as EraFitDayPayload;
 }
 
-async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPlanReport> {
+export async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPlanReport> {
   const [globals, slots, aiPlan, baseTdee] = await Promise.all([
     fetchMealTrackingGlobals(session),
     fetchMealPlanSlots(session),
@@ -870,7 +526,7 @@ async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPl
 
   return {
     generatedAt: formatLocalIso(new Date()),
-    sourcePath: 'api://era-fit/meal-plan',
+    sourcePath: MEAL_PLAN_SOURCE_PATH,
     clientId: session.app.id_app,
     days,
     shoppingList: buildShoppingList(days),
@@ -1679,7 +1335,7 @@ function parseShoppingMeasureText(value: string, foodName: string): ShoppingMeas
   };
 }
 
-function canonicalShoppingUnit(rawUnit: string | undefined, rest: string, foodName: string): string | null {
+export function canonicalShoppingUnit(rawUnit: string | undefined, rest: string, foodName: string): string | null {
   const unit = rawUnit?.toLowerCase();
   if (unit && ['g', 'gram', 'grams'].includes(unit)) {
     return 'g';
@@ -1727,7 +1383,7 @@ function canonicalShoppingUnit(rawUnit: string | undefined, rest: string, foodNa
   return null;
 }
 
-function shoppingUnitPriority(unit: string): number {
+export function shoppingUnitPriority(unit: string): number {
   if (['eggs', 'egg whites', 'bananas', 'avocados', 'slices', 'spears', 'scoops', 'packets'].includes(unit)) {
     return 10;
   }
@@ -1784,7 +1440,7 @@ function singularShoppingUnit(unit: string): string {
   return singulars[unit] ?? unit;
 }
 
-function parseQuantity(value: string): number | null {
+export function parseQuantity(value: string): number | null {
   const normalized = value.replace(/\s+/g, '');
   if (normalized.includes('/')) {
     const [numerator, denominator] = normalized.split('/').map(Number);
@@ -1796,7 +1452,7 @@ function parseQuantity(value: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function uniqueStrings(values: string[]): string[] {
+export function uniqueStrings(values: string[]): string[] {
   return Array.from(new Set(values));
 }
 
@@ -1810,357 +1466,6 @@ function parseDataArrayAttribute(value: string): unknown | null {
     } catch {}
   }
   return null;
-}
-
-function renderMealPlanOutput(options: {
-  report: EraFitMealPlanReport;
-  format: OutputFormat;
-  outputPath?: string;
-  anyListResult: { id: string; name: string; added: number } | null;
-  todayOnly?: boolean;
-}): void {
-  if (options.format !== 'table' && options.format !== 'json') {
-    throw new Error('The mealplan command supports --format=table or --format=json.');
-  }
-  const text = renderMealPlanOutputText(options);
-  if (options.outputPath) {
-    writeFileSync(path.resolve(options.outputPath), text, 'utf8');
-    return;
-  }
-  process.stdout.write(text);
-}
-
-function renderMealPlanOutputText(options: {
-  report: EraFitMealPlanReport;
-  format: OutputFormat;
-  anyListResult: { id: string; name: string; added: number } | null;
-  todayOnly?: boolean;
-}): string {
-  if (options.todayOnly) {
-    const day = getTodayMealPlanDay(options.report);
-    return options.format === 'json'
-      ? `${JSON.stringify(day, null, 2)}\n`
-      : renderMealPlanDayText(day);
-  }
-  return options.format === 'json'
-    ? `${JSON.stringify({ ...options.report, anyList: options.anyListResult }, null, 2)}\n`
-    : renderMealPlanText(options.report, options.anyListResult);
-}
-
-function getTodayMealPlanDay(report: EraFitMealPlanReport): EraFitMealPlanDay {
-  const today = WEEKDAY_NAMES[new Date().getDay()];
-  const day = report.days.find(candidate => candidate.day === today);
-  if (!day) {
-    throw new Error(`Meal plan did not include today (${today}).`);
-  }
-  return day;
-}
-
-function renderMealPlanText(
-  report: EraFitMealPlanReport,
-  anyListResult: { id: string; name: string; added: number } | null = null
-): string {
-  const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
-  for (const day of report.days) {
-    lines.push(...renderMealPlanDayLines(day), '');
-  }
-  lines.push(chalk.bold('Shopping List'));
-  if (report.shoppingList.length === 0) {
-    lines.push(chalk.gray('  No ingredients found.'));
-  } else {
-    lines.push(`  ${chalk.gray(`${padEnd('item', 32)} ${padEnd('qty', 14)} ${padEnd('meals', 5)} servings`)}`);
-    for (const item of report.shoppingList) {
-      const servings = item.servings.length > 0 ? ` (${item.servings.join(', ')})` : '';
-      lines.push(`  ${padEnd(item.name, 32)} ${chalk.cyan(padEnd(item.quantity, 14))} ${padEnd(String(item.meals), 5)}${chalk.gray(servings)}`);
-    }
-  }
-  if (anyListResult) {
-    lines.push('');
-    lines.push(chalk.bold('AnyList'));
-    lines.push(`  Created ${chalk.cyan(anyListResult.name)} with ${formatNumber(anyListResult.added)} ingredients.`);
-  }
-  return `${lines.join('\n')}\n`;
-}
-
-function renderMealPlanDayText(day: EraFitMealPlanDay): string {
-  return `${renderMealPlanDayLines(day).join('\n')}\n`;
-}
-
-function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
-  const lines: string[] = [];
-  const planned = formatMacros(day.planned);
-  const target = formatMacros(day.targets);
-  lines.push(`${chalk.bold(day.day)} ${chalk.gray(`(${day.template})`)}`);
-  lines.push(`  ${chalk.bold('Planned:')} ${planned} ${chalk.gray('|')} ${chalk.bold('Target:')} ${target}`);
-  if (day.meals.length === 0) {
-    lines.push(chalk.gray('  No suggested meals.'));
-    return lines;
-  }
-  for (const meal of day.meals) {
-    lines.push(`  ${chalk.gray(meal.time ? `${formatMealPlanTime(meal.time)} ` : '')}${chalk.bold(meal.meal)}: ${formatMacros(meal.macros)}`);
-    if (meal.recipe) {
-      lines.push(`    ${chalk.gray('Recipe:')} ${meal.recipe}`);
-    }
-    for (const item of meal.items) {
-      const label = formatMealPlanItemLabel(item);
-      lines.push(`    ${padVisibleEnd(label.styled, label.plain.length, 58)} ${formatMacros(item)}`);
-    }
-  }
-  return lines;
-}
-
-function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
-  const serving = formatMealPlanItemServing(item);
-  const name = formatMealPlanItemName(item.name, serving);
-  const grams = formatMealItemGrams(item);
-  const plain = `${serving ? `${serving.text} ${name}` : name}${grams ? ` [${grams}]` : ''}`;
-  const styled = `${serving ? `${chalk.cyan(serving.text)} ${name}` : name}${grams ? ` ${chalk.cyan(`[${grams}]`)}` : ''}`;
-  return { plain, styled };
-}
-
-function formatMealPlanItemServing(item: EraFitMealPlanFoodItem): MealItemServing | null {
-  const candidates = uniqueStrings([item.serving, item.description, item.description?.split(':').at(-1) ?? null]
-    .filter((value): value is string => value != null));
-  for (const candidate of candidates) {
-    const serving = parseMealPlanItemServingText(candidate, item);
-    if (serving) {
-      return serving;
-    }
-  }
-  return null;
-}
-
-function parseMealPlanItemServingText(value: string, item: EraFitMealPlanFoodItem): MealItemServing | null {
-  const trimmed = value.trim();
-  const match = trimmed.match(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*([A-Za-z%]+)?/);
-  if (!match) {
-    return null;
-  }
-  const quantity = parseQuantity(match[1]);
-  if (quantity == null) {
-    return null;
-  }
-  const text = match[0].trim();
-  const rest = trimmed.slice(match[0].length).trim();
-  const unit = canonicalShoppingUnit(match[2], rest, item.name);
-  if (!unit) {
-    return null;
-  }
-  const measure = {
-    quantity,
-    unit,
-    priority: shoppingUnitPriority(unit),
-  };
-  if (shouldSuppressMealItemServing(measure, item)) {
-    return null;
-  }
-  return { text, measure };
-}
-
-function shouldSuppressMealItemServing(measure: ShoppingMeasure, item: EraFitMealPlanFoodItem): boolean {
-  if (measure.unit === 'g' && item.unit === 'g' && item.amount != null && Math.abs(measure.quantity - item.amount) < 0.001) {
-    return true;
-  }
-  return measure.quantity === 1 && ['eggs', 'egg whites', 'bananas', 'avocados'].includes(measure.unit);
-}
-
-function formatMealPlanItemName(name: string, serving: MealItemServing | null): string {
-  if (!serving) {
-    return name;
-  }
-  const lower = name.toLowerCase();
-  const quantity = serving.measure.quantity;
-  if (serving.measure.unit === 'avocados' && lower === 'avocados') {
-    return quantity <= 1 ? 'Avocado' : 'Avocados';
-  }
-  if (serving.measure.unit === 'bananas' && lower === 'banana') {
-    return quantity === 1 ? 'Banana' : 'Bananas';
-  }
-  if (serving.measure.unit === 'eggs' && lower.endsWith('egg') && quantity !== 1) {
-    return `${name}s`;
-  }
-  if (serving.measure.unit === 'egg whites' && lower.endsWith('egg white') && quantity !== 1) {
-    return `${name}s`;
-  }
-  return name;
-}
-
-function formatMealItemGrams(item: EraFitMealPlanFoodItem): string | null {
-  if (item.unit === 'g' && item.amount != null) {
-    return `${formatNumber(roundNumber(item.amount))}g`;
-  }
-  const grams = item.description?.match(/\((\d+(?:\.\d+)?)g\)/i);
-  if (!grams) {
-    return null;
-  }
-  const amount = parseNumberLike(grams[1]);
-  return amount == null ? null : `${formatNumber(roundNumber(amount))}g`;
-}
-
-function formatMacros(value: EraFitMacroTotals): string {
-  return [
-    chalk.blue(`${formatNullableNumber(value.calories)} kcal`),
-    chalk.red(`P ${formatNullableNumber(value.protein)}g`),
-    chalk.yellow(`C ${formatNullableNumber(value.net_carbs)}g`),
-    chalk.magenta(`F ${formatNullableNumber(value.fat)}g`),
-  ].join(' | ');
-}
-
-function formatNullableNumber(value: number | null): string {
-  return value == null ? '-' : formatNumber(roundNumber(value));
-}
-
-function formatMealPlanTime(value: string): string {
-  const match = value.match(/^(\d{1,2})(am|pm)$/i);
-  if (!match) {
-    return value;
-  }
-  return `${match[1]} ${match[2].toUpperCase()}`;
-}
-
-function padEnd(value: string, length: number): string {
-  return value.length >= length ? value : value.padEnd(length);
-}
-
-function padVisibleEnd(value: string, visibleLength: number, length: number): string {
-  return visibleLength >= length ? value : `${value}${' '.repeat(length - visibleLength)}`;
-}
-
-function renderOutput(options: {
-  report: EraFitReport;
-  format: OutputFormat;
-  outputPath?: string;
-}): void {
-  if (options.format === 'table') {
-    if (options.outputPath) {
-      throw new Error('--output is not supported with --format=table. Use --format=csv or --format=json.');
-    }
-    renderTable(options.report);
-    return;
-  }
-
-  const text = (() => {
-    if (options.format === 'json') {
-      return `${JSON.stringify(options.report, null, 2)}\n`;
-    }
-    if (options.format === 'csv:full') {
-      return renderFullCsv(options.report);
-    }
-    return renderCsvRecords(toDailyCsvRows(options.report), DAILY_COLUMNS);
-  })();
-
-  if (options.outputPath) {
-    const outputPath = path.resolve(options.outputPath);
-    writeFileSync(outputPath, text, 'utf8');
-    process.stdout.write(`${outputPath}\n`);
-    return;
-  }
-  process.stdout.write(text);
-}
-
-function renderTable(report: EraFitReport): void {
-  process.stdout.write('Daily Macro Overview\n');
-  renderTableRecords(toDailyCsvRows(report));
-  if (report.foods.length > 0) {
-    process.stdout.write('\nLogged Foods\n');
-    renderTableRecords(toFoodCsvRows(report));
-  }
-  if (report.recipes.length > 0) {
-    process.stdout.write('\nRecipes\n');
-    renderTableRecords(toRecipeCsvRows(report));
-  }
-  if (report.templates.length > 0) {
-    process.stdout.write('\nMacro Templates\n');
-    renderTableRecords(toTemplateCsvRows(report));
-  }
-}
-
-function renderFullCsv(report: EraFitReport): string {
-  return [
-    {
-      name: 'daily_overview',
-      csv: renderCsvRecords(toDailyCsvRows(report), DAILY_COLUMNS),
-    },
-    {
-      name: 'logged_foods',
-      csv: renderCsvRecords(toFoodCsvRows(report), FOOD_COLUMNS),
-    },
-    {
-      name: 'recipes',
-      csv: renderCsvRecords(toRecipeCsvRows(report), RECIPE_COLUMNS),
-    },
-    {
-      name: 'macro_templates',
-      csv: renderCsvRecords(toTemplateCsvRows(report), TEMPLATE_COLUMNS),
-    },
-  ].map(section => `\n==== ${section.name} ===\n${section.csv}`).join('');
-}
-
-function toDailyCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
-  return report.dailyOverview.map(row => ({
-    date: row.date,
-    template: row.template,
-    status: row.status,
-    calories: row.calories,
-    goal_calories: row.goal_calories,
-    protein: row.protein,
-    goal_protein: row.goal_protein,
-    net_carbs: row.net_carbs,
-    goal_net_carbs: row.goal_net_carbs,
-    fat: row.fat,
-    goal_fat: row.goal_fat,
-    foods_logged: row.foods_logged,
-  }));
-}
-
-function toFoodCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
-  return report.foods.map(food => ({
-    date: food.date,
-    time: food.time,
-    meal: food.meal,
-    kind: food.kind,
-    name: food.name,
-    brand: food.brand,
-    serving: food.serving,
-    calories: food.calories,
-    protein: food.protein,
-    net_carbs: food.net_carbs,
-    fat: food.fat,
-  }));
-}
-
-function toRecipeCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
-  return report.recipes.map(recipe => ({
-    date: recipe.date,
-    time: recipe.time,
-    meal: recipe.meal,
-    recipe: recipe.recipe,
-    recipe_serving: recipe.recipe_serving,
-    ingredient: recipe.ingredient,
-    brand: recipe.brand,
-    serving: recipe.serving,
-    calories: recipe.calories,
-    protein: recipe.protein,
-    net_carbs: recipe.net_carbs,
-    fat: recipe.fat,
-  }));
-}
-
-function toTemplateCsvRows(report: EraFitReport): Record<string, CsvValue>[] {
-  return report.templates.map(template => ({
-    id: template.id,
-    title: template.title,
-    type: template.type,
-    unit: template.unit,
-    body_composition_goal: template.body_composition_goal,
-    calories: template.calories,
-    protein: template.protein,
-    net_carbs: template.net_carbs,
-    fat: template.fat,
-    protein_setting: template.protein_setting,
-    net_carbs_setting: template.net_carbs_setting,
-    fat_setting: template.fat_setting,
-  }));
 }
 
 async function login(credentials: Credentials, dashboardPath: string): Promise<{
@@ -2374,7 +1679,7 @@ async function fetchUrl(pathOrUrl: string, init: RequestInit): Promise<Response>
   return fetch(url, init);
 }
 
-function resolveDateWindow(options: {
+export function resolveDateWindow(options: {
   days: number;
   date?: string;
   start?: string;
@@ -2444,7 +1749,7 @@ function formatLocalIso(value: Date): string {
   return new Date(value.getTime() - offsetMs).toISOString().replace('Z', '');
 }
 
-function formatLongDate(value: Date): string {
+export function formatLongDate(value: Date): string {
   return new Intl.DateTimeFormat('en-US', {
     month: 'long',
     day: 'numeric',
@@ -2515,15 +1820,15 @@ function sumNumbers(values: Array<number | null>): number {
   return values.reduce<number>((sum, value) => sum + (value ?? 0), 0);
 }
 
-function formatNumber(value: number): string {
+export function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(3)));
 }
 
-function roundNumber(value: number): number {
+export function roundNumber(value: number): number {
   return Number(value.toFixed(3));
 }
 
-function parseNumberLike(value: unknown): number | null {
+export function parseNumberLike(value: unknown): number | null {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : null;
   }
