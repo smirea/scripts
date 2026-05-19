@@ -8,6 +8,8 @@ import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
 import { hideBin } from "yargs/helpers";
 
+import { formatTabularRows } from "./utils/tabular";
+
 const home = requireEnv("HOME");
 
 void runCli();
@@ -274,8 +276,7 @@ function listWorktrees(info: RepoInfo): void {
     const label = tags.length === 0 ? branch : `${branch} (${tags.join(", ")})`;
     return { label, path: entry.path };
   });
-  const nameWidth = rows.reduce((max, row) => Math.max(max, row.label.length), 0);
-  const lines = rows.map(row => `${row.label.padEnd(nameWidth + 2)}${row.path}`);
+  const lines = formatTabularRows(rows.map(row => [row.label, row.path]));
   console.log(lines.join("\n"));
 }
 

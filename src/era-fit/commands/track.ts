@@ -19,10 +19,12 @@ import {
   startOfLocalDay,
   updateEraFitFirebasePath,
   type EraFitFatSecretFood,
+  type EraFitFatSecretSearchFood,
   type EraFitFatSecretServing,
   type EraFitMealKey,
 } from '../core';
 import { renderTableRecords } from '../../utils/output';
+import { formatTabularRows } from '../../utils/tabular';
 
 const STANDARD_UNITS = ['g', 'oz', 'ml', 'fl_oz'] as const;
 const MEAL_ALIASES: Record<string, EraFitMealKey> = {
@@ -380,28 +382,57 @@ async function resolveFoodFromSearch(
     }
   }
 
-  process.stdout.write(`\nSearch results for "${item.query}"\n`);
-  renderTableRecords(results.map((result, index) => ({
-    '#': index + 1,
-    id: result.food_id,
-    name: result.food_name,
-    brand: result.brand_name ?? '',
-    serving: parseSearchServing(result.food_description),
-    ...parseSearchMacros(result.food_description),
-  })));
-
+  const labels = formatFoodSearchOptionLabels(results);
   const selected = await select({
     message: `Select food for ${item.raw}`,
-    options: results.map(result => ({
+    options: results.map((result, index) => ({
       value: result.food_id,
-      label: `${result.food_name}${result.brand_name ? ` (${result.brand_name})` : ''}`,
-      hint: parseSearchServing(result.food_description),
+      label: labels[index],
     })),
   });
   if (isCancel(selected)) {
     throw new Error('Era Fit food selection cancelled.');
   }
   return fetchEraFitFatSecretFood(session, selected);
+}
+
+function formatFoodSearchOptionLabels(results: EraFitFatSecretSearchFood[]): string[] {
+  const availableWidth = Math.max(60, (process.stdout.columns || 100) - 8);
+  const servingWidth = availableWidth < 92 ? 14 : 18;
+  const nameWidth = Math.max(24, Math.min(44, availableWidth - servingWidth - 32));
+  return formatTabularRows(results.map(result => {
+    const macros = parseSearchMacros(result.food_description);
+    return [
+      formatFoodSearchName(result),
+      `per ${formatSearchServing(result.food_description)}`,
+      formatSearchMacro(macros.calories, 'cal'),
+      formatSearchMacro(macros.protein, 'p'),
+      formatSearchMacro(macros.carbs, 'c'),
+      formatSearchMacro(macros.fat, 'f'),
+    ];
+  }), {
+    gap: '  ',
+    columns: [
+      { maxWidth: nameWidth },
+      { maxWidth: servingWidth },
+      { align: 'right' },
+      { align: 'right' },
+      { align: 'right' },
+      { align: 'right' },
+    ],
+  });
+}
+
+function formatFoodSearchName(food: EraFitFatSecretSearchFood): string {
+  return food.brand_name ? `${food.food_name} by ${food.brand_name}` : food.food_name;
+}
+
+function formatSearchServing(description: string): string {
+  return parseSearchServing(description).replace(/^Per\s+/i, '').trim();
+}
+
+function formatSearchMacro(value: number | null, suffix: string): string {
+  return value == null ? `-${suffix}` : `${formatNumber(roundNumber(value))}${suffix}`;
 }
 
 async function resolveServingChoice(

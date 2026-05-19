@@ -8,6 +8,7 @@ import type { Argv, ArgumentsCamelCase } from 'yargs';
 import { createShoppingList } from '../../anylist';
 import env from '../../env';
 import { parseOutputFormat, type OutputFormat } from '../../utils/output';
+import { formatTabularRows, padVisibleEnd } from '../../utils/tabular';
 import {
   canonicalShoppingUnit,
   fetchEraFitMealPlan,
@@ -71,7 +72,6 @@ interface GeminiGenerateContentResponse {
 }
 
 interface MealItemLabel {
-  plain: string;
   styled: string;
 }
 
@@ -308,11 +308,19 @@ function renderMealPlanText(
   if (report.shoppingList.length === 0) {
     lines.push(chalk.gray('  No ingredients found.'));
   } else {
-    lines.push(`  ${chalk.gray(`${padEnd('item', 32)} ${padEnd('qty', 14)} ${padEnd('meals', 5)} servings`)}`);
-    for (const item of report.shoppingList) {
-      const servings = item.servings.length > 0 ? ` (${item.servings.join(', ')})` : '';
-      lines.push(`  ${padEnd(item.name, 32)} ${chalk.cyan(padEnd(item.quantity, 14))} ${padEnd(String(item.meals), 5)}${chalk.gray(servings)}`);
-    }
+    const shoppingRows = formatTabularRows([
+      [chalk.gray('item'), chalk.gray('qty'), chalk.gray('meals'), chalk.gray('servings')],
+      ...report.shoppingList.map(item => [
+        item.name,
+        chalk.cyan(item.quantity),
+        String(item.meals),
+        chalk.gray(item.servings.join(', ')),
+      ]),
+    ], {
+      gap: ' ',
+      columns: [{ width: 32 }, { width: 14 }, { width: 5 }],
+    });
+    lines.push(...shoppingRows.map(row => `  ${row}`));
   }
   if (anyListResult) {
     lines.push('');
@@ -343,7 +351,7 @@ function renderMealPlanDayLines(day: EraFitMealPlanDay): string[] {
     }
     for (const item of meal.items) {
       const label = formatMealPlanItemLabel(item);
-      lines.push(`    ${padVisibleEnd(label.styled, label.plain.length, 58)} ${formatMacros(item)}`);
+      lines.push(`    ${padVisibleEnd(label.styled, 58)} ${formatMacros(item)}`);
     }
   }
   return lines;
@@ -353,9 +361,8 @@ function formatMealPlanItemLabel(item: EraFitMealPlanFoodItem): MealItemLabel {
   const serving = formatMealPlanItemServing(item);
   const name = formatMealPlanItemName(item.name, serving);
   const grams = formatMealItemGrams(item);
-  const plain = `${serving ? `${serving.text} ${name}` : name}${grams ? ` [${grams}]` : ''}`;
   const styled = `${serving ? `${chalk.cyan(serving.text)} ${name}` : name}${grams ? ` ${chalk.cyan(`[${grams}]`)}` : ''}`;
-  return { plain, styled };
+  return { styled };
 }
 
 function formatMealPlanItemServing(item: EraFitMealPlanFoodItem): MealItemServing | null {
@@ -456,12 +463,4 @@ function formatMealPlanTime(value: string): string {
     return value;
   }
   return `${match[1]} ${match[2].toUpperCase()}`;
-}
-
-function padEnd(value: string, length: number): string {
-  return value.length >= length ? value : value.padEnd(length);
-}
-
-function padVisibleEnd(value: string, visibleLength: number, length: number): string {
-  return visibleLength >= length ? value : `${value}${' '.repeat(length - visibleLength)}`;
 }

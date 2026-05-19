@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import env from "./env";
+import { stripAnsi } from "./utils/tabular";
 
 const LEGACY_DEFAULT_AI_EMAIL = "me+ai@stefanmirea.com";
 const PRIMARY_AI_NAME_KEY = "AI_COMITTER_NAME";
@@ -20,7 +21,6 @@ interface AiIdentity {
 }
 
 const rawArgs = process.argv.slice(2);
-const ANSI_REGEX = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, "g");
 
 if (import.meta.main) {
   try {
@@ -255,10 +255,6 @@ function trimMessageBlock(value: string): string {
     lines.pop();
   }
   return lines.join("\n");
-}
-
-function stripAnsi(value: string): string {
-  return value.replace(ANSI_REGEX, "");
 }
 
 function handleSpawnErrors(result: SpawnSyncReturns<string | Buffer>, label: string): void {
