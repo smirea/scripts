@@ -32,6 +32,7 @@ const MEALPLAN_CATEGORY_MODEL = 'gemini-2.5-flash';
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
+const FIREBASE_API_KEY_ENV = 'ERA_FIT_FIREBASE_API_KEY';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const MEAL_KEYS = ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'] as const;
 const MEAL_PLAN_MEAL_KEYS = [
@@ -956,7 +957,7 @@ async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | 
     return null;
   }
   const response = await fetch(
-    'https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=AIzaSyDti7cwo7I_xjyAlr4VVt8x2wxXljYhu5A',
+    firebaseIdentityToolkitUrl('signInWithPassword'),
     {
       method: 'POST',
       headers: {
@@ -1000,7 +1001,7 @@ async function fetchFirebaseCustomToken(session: EraFitSession): Promise<string 
 
 async function exchangeFirebaseCustomToken(token: string): Promise<string> {
   const response = await fetch(
-    'https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken?key=AIzaSyDti7cwo7I_xjyAlr4VVt8x2wxXljYhu5A',
+    firebaseIdentityToolkitUrl('signInWithCustomToken'),
     {
       method: 'POST',
       headers: {
@@ -1017,6 +1018,14 @@ async function exchangeFirebaseCustomToken(token: string): Promise<string> {
     throw new Error(`Era Fit Firebase token exchange failed: ${json.error?.message ?? response.statusText}`);
   }
   return json.idToken;
+}
+
+function firebaseIdentityToolkitUrl(method: 'signInWithPassword' | 'signInWithCustomToken'): string {
+  const apiKey = normalizeOptionalString(env.ERA_FIT_FIREBASE_API_KEY);
+  if (!apiKey) {
+    throw new Error(`${FIREBASE_API_KEY_ENV} is not set.`);
+  }
+  return `https://identitytoolkit.googleapis.com/v1/accounts:${method}?key=${encodeURIComponent(apiKey)}`;
 }
 
 async function fetchCurrentBaseTdee(session: EraFitSession): Promise<number | null> {
