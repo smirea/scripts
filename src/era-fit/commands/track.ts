@@ -1,4 +1,5 @@
 import { confirm, isCancel, select, text } from '@clack/prompts';
+import chalk from 'chalk';
 import type { Argv, ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import { loadEraFitCache, normalizeFoodCacheKey, rememberFoodSelection, type EraFitCache } from '../cache';
@@ -21,6 +22,7 @@ import {
   type EraFitFatSecretFood,
   type EraFitFatSecretSearchFood,
   type EraFitFatSecretServing,
+  type EraFitSessionLogger,
   type EraFitMealKey,
 } from '../core';
 import { renderTableRecords } from '../../utils/output';
@@ -182,15 +184,17 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
   const date = args.date ? parseLocalDate(args.date, 'date') : startOfLocalDay(new Date());
   const time = args.time?.trim() || formatEraFitTime(new Date());
   const dateId = formatEraFitDateId(date);
-  const session = await resolveSession();
+  const session = await resolveSession(createTrackSessionLogger());
   const cache = loadEraFitCache();
 
   const foods: ResolvedTrackFood[] = [];
   for (const item of parsedItems) {
-    foods.push(await resolveTrackFood(session, cache, item, time, {
+    const food = await resolveTrackFood(session, cache, item, time, {
       useCache: !args.dryRun,
       writeCache: !args.dryRun,
-    }));
+    });
+    logTrackProgress(`${chalk.green('matched')} ${chalk.bold(food.record.food_name)} ${chalk.gray('to')} ${chalk.cyan(item.raw)}`);
+    foods.push(food);
   }
 
   const saved = args.dryRun
@@ -207,6 +211,26 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
     saved,
     dryRun: args.dryRun,
   });
+}
+
+function createTrackSessionLogger(): EraFitSessionLogger {
+  return {
+    loginStart(source) {
+      const suffix = source === 'env' ? chalk.gray(' with env credentials') : chalk.gray(' from prompt');
+      logTrackProgress(`${chalk.yellow('logging in')}${suffix}`);
+    },
+    sessionReady(source) {
+      if (source === 'cookie') {
+        logTrackProgress(chalk.gray('using cached session'));
+      } else {
+        logTrackProgress(chalk.green('logged in'));
+      }
+    },
+  };
+}
+
+function logTrackProgress(message: string): void {
+  process.stderr.write(`${message}\n`);
 }
 
 function resolveMealAndItemArgs(rawMeal: string | undefined, rawItems: string[]): {

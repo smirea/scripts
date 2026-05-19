@@ -106,6 +106,11 @@ export interface EraFitSession {
   dashboard: DashboardCheck;
 }
 
+export interface EraFitSessionLogger {
+  loginStart?(source: 'env' | 'prompt'): void;
+  sessionReady?(source: 'cookie' | 'login'): void;
+}
+
 export interface EraFitFatSecretSearchFood {
   food_id: string;
   food_name: string;
@@ -418,12 +423,13 @@ class CookieJar {
   }
 }
 
-export async function resolveSession(): Promise<EraFitSession> {
+export async function resolveSession(logger: EraFitSessionLogger = {}): Promise<EraFitSession> {
   const existingSession = normalizeOptionalString(env.ERA_FIT_SESSION_COOKIE);
   if (existingSession) {
     const sessionCheck = await checkDashboard(existingSession, DEFAULT_DASHBOARD_PATH);
     const app = parseAppCookie(existingSession);
     if (sessionCheck.ok && app) {
+      logger.sessionReady?.('cookie');
       return {
         cookieHeader: existingSession,
         app,
@@ -439,13 +445,20 @@ export async function resolveSession(): Promise<EraFitSession> {
   const envCredentials = parseCredentialsForLogin(env.ERA_FIT_CREDENTIALS);
   if (envCredentials) {
     try {
-      return await loginAndSaveSession(envCredentials);
+      logger.loginStart?.('env');
+      const session = await loginAndSaveSession(envCredentials);
+      logger.sessionReady?.('login');
+      return session;
     } catch (error) {
       console.warn(`${CREDENTIALS_ENV_KEY} did not work: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
-  return loginAndSaveSession(await promptCredentials(), { saveCredentials: true });
+  const credentials = await promptCredentials();
+  logger.loginStart?.('prompt');
+  const session = await loginAndSaveSession(credentials, { saveCredentials: true });
+  logger.sessionReady?.('login');
+  return session;
 }
 
 async function loginAndSaveSession(credentials: Credentials, options: { saveCredentials?: boolean } = {}): Promise<EraFitSession> {
