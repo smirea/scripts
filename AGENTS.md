@@ -1,6 +1,6 @@
 # AGENTS
 
-- Run `src/setup.ts` to (re)create symlinks for scripts. Add new scripts here as needed
+- Run `src/setup.ts` to (re)create command wrappers for scripts. Add new scripts to `src/scriptCommands.ts`
 - when making a new script try using `src/utils/createScript.ts` and use bun headers and make the file executable
 - use `yargs` for arg management, always use `.help()` and `.strict()` arg parsing and proper reasonable arg types, remove the --version and allow the text to wrap to the terminal dimensions. write descriptions for each argument where not obvious
 - if interactivity is desired see how other scripts in this repo do it and use the same libs

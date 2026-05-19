@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
-import { existsSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+
+import { SCRIPT_COMMANDS } from './scriptCommands';
 
 const home = process.env.HOME;
 if (!home) {
@@ -8,99 +10,56 @@ if (!home) {
 }
 
 const repoRoot = path.resolve(import.meta.dir, '..');
-const links = [
-  {
-    name: 'gai',
-    source: path.join(repoRoot, 'src', 'git-commit-ai.ts'),
-    target: path.join(home, 'bin', 'gai'),
-  },
-  {
-    name: 'git-ai-cim',
-    source: path.join(repoRoot, 'src', 'git-commit-ai.ts'),
-    target: path.join(home, 'bin', 'git-ai-cim'),
-  },
-  {
-    name: 'git-worktree',
-    source: path.join(repoRoot, 'src', 'git-worktree.ts'),
-    target: path.join(home, 'bin', 'git-worktree'),
-  },
-  {
-    name: 'git-invite-ai-to-repos',
-    source: path.join(repoRoot, 'src', 'git-invite-ai-to-repos.ts'),
-    target: path.join(home, 'bin', 'git-invite-ai-to-repos'),
-  },
-  {
-    name: 'wt',
-    source: path.join(repoRoot, 'src', 'git-worktree.ts'),
-    target: path.join(home, 'bin', 'wt'),
-  },
-  {
-    name: 'whoop-pull',
-    source: path.join(repoRoot, 'src', 'whoop.ts'),
-    target: path.join(home, 'bin', 'whoop-pull'),
-  },
-  {
-    name: 'macrofactor',
-    source: path.join(repoRoot, 'src', 'macrofactor.ts'),
-    target: path.join(home, 'bin', 'macrofactor'),
-  },
-  {
-    name: 'era-fit',
-    source: path.join(repoRoot, 'src', 'era-fit.ts'),
-    target: path.join(home, 'bin', 'era-fit'),
-  },
-  {
-    name: 'workouts',
-    source: path.join(repoRoot, 'src', 'workouts.ts'),
-    target: path.join(home, 'bin', 'workouts'),
-  },
-  {
-    name: 'voice-memo-parse',
-    source: path.join(repoRoot, 'src', 'voice-memo-parse.ts'),
-    target: path.join(home, 'bin', 'voice-memo-parse'),
-  },
-  {
-    name: 'anylist',
-    source: path.join(repoRoot, 'src', 'anylist.ts'),
-    target: path.join(home, 'bin', 'anylist'),
-  },
-];
+const launcher = path.join(repoRoot, 'src', 'run.ts');
 
-const addedLinks: string[] = [];
-for (const link of links) {
-  if (ensureLink(link)) {
-    addedLinks.push(`${link.target} -> ${link.source}`);
+const installedWrappers: string[] = [];
+for (const command of SCRIPT_COMMANDS) {
+  const source = path.join(repoRoot, command.source);
+  const target = path.join(home, 'bin', command.name);
+  if (ensureWrapper({ name: command.name, source, target })) {
+    installedWrappers.push(target);
   }
 }
 
-for (const added of addedLinks) {
-  console.log(`Added ${added}`);
+for (const wrapper of installedWrappers) {
+  console.log(`Installed ${wrapper}`);
 }
 
-function ensureLink(link: { name: string; source: string; target: string }): boolean {
-  if (!existsSync(link.source)) {
-    throw new Error(`Missing source for ${link.name}: ${link.source}`);
+function ensureWrapper(command: { name: string; source: string; target: string }): boolean {
+  if (!existsSync(command.source)) {
+    throw new Error(`Missing source for ${command.name}: ${command.source}`);
   }
-  const targetDir = path.dirname(link.target);
+  if (!existsSync(launcher)) {
+    throw new Error(`Missing launcher: ${launcher}`);
+  }
+  const targetDir = path.dirname(command.target);
   if (!existsSync(targetDir)) {
     mkdirSync(targetDir, { recursive: true });
   }
-  const stat = lstatOrNull(link.target);
-  if (stat) {
-    if (stat.isDirectory()) {
-      throw new Error(`Refusing to replace directory at ${link.target}`);
-    }
-    if (stat.isSymbolicLink()) {
-      const current = readlinkSync(link.target);
-      const resolved = path.resolve(targetDir, current);
-      if (resolved === path.resolve(link.source)) {
-        return false;
-      }
-    }
-    unlinkSync(link.target);
+  const wrapper = buildWrapper(command.name);
+  const stat = lstatOrNull(command.target);
+  if (stat?.isDirectory()) {
+    throw new Error(`Refusing to replace directory at ${command.target}`);
   }
-  symlinkSync(link.source, link.target);
+  if (stat && !stat.isSymbolicLink() && readFileSync(command.target, 'utf8') === wrapper) {
+    chmodSync(command.target, 0o755);
+    return false;
+  }
+  if (stat) {
+    unlinkSync(command.target);
+  }
+  writeFileSync(command.target, wrapper, { encoding: 'utf8', mode: 0o755 });
   return true;
+}
+
+function buildWrapper(commandName: string): string {
+  return `#!/bin/sh
+exec bun --no-env-file ${shellQuote(launcher)} ${shellQuote(commandName)} "$@"
+`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function lstatOrNull(target: string) {
