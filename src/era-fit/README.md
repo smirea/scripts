@@ -81,7 +81,7 @@ At startup, and after assignments, the checklist tries to match current Era Fit 
 
 1. Cache aliases in `src/era-fit/cache.json`.
 2. Rough text match on planned item name/description and tracked food name.
-3. Macro proximity when text matching fails: calories, protein, carbs, and fat must all be within 5%.
+3. Macro proximity when text matching fails: calories, protein, net carbs, and fat must all be within 5%.
 
 Matched logs are consumed once so one tracked food does not satisfy multiple planned rows. Anything left unmatched appears as a green outside-plan item under its Era Fit meal.
 

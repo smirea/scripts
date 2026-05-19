@@ -9,6 +9,7 @@ import {
   formatNumber,
   MEAL_LABELS,
   parseLocalDate,
+  parseNetCarbsValue,
   resolveSession,
   startOfLocalDay,
   type EraFitSessionLogger,
@@ -275,7 +276,7 @@ function renderTrackResult(options: {
       quantity: formatNumber(food.record.serving_qtd),
       calories: food.record.calories,
       protein: food.record.protein,
-      net_carbs: food.record.carbohydrate,
+      net_carbs: parseNetCarbsValue(food.record.net_carbs, food.record.carbohydrate),
       fat: food.record.fat,
     };
     if (!options.dryRun) {

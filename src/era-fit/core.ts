@@ -371,6 +371,23 @@ export interface EraFitMacroTotals {
   fat: number | null;
 }
 
+export function parseNetCarbsValue(netCarbs: unknown, carbohydrate: unknown): number | null {
+  const explicitNetCarbs = parseNumberLike(netCarbs);
+  if (explicitNetCarbs != null) {
+    return explicitNetCarbs;
+  }
+  return parseNumberLike(carbohydrate);
+}
+
+export function calculateNetCarbsFromTotalCarbs(carbohydrate: unknown, fiber: unknown = null): number | null {
+  const carbs = parseNumberLike(carbohydrate);
+  if (carbs == null) {
+    return null;
+  }
+  const fiberValue = parseNumberLike(fiber) ?? 0;
+  return roundNumber(Math.max(0, carbs - fiberValue));
+}
+
 interface EraFitMacroTargets extends EraFitMacroTotals {
   goal_calories: number | null;
 }
@@ -1040,8 +1057,7 @@ function parseFoodRecord(
     protein: scaleNullable(parseNumberLike(total?.protein), totalMultiplier) ?? parseNumberLike(raw.protein),
     net_carbs:
       scaleNullable(parseNumberLike(total?.net_carbs), totalMultiplier) ??
-      parseNumberLike(raw.net_carbs) ??
-      parseNumberLike(raw.carbohydrate),
+      parseNetCarbsValue(raw.net_carbs, raw.carbohydrate),
     fat: scaleNullable(parseNumberLike(total?.fat), totalMultiplier) ?? parseNumberLike(raw.fat),
   };
 }
@@ -1067,7 +1083,7 @@ function parseRecipeIngredientRecord(
     protein: scaleNullable(parseNumberLike(ingredient.protein), multiplier),
     net_carbs:
       scaleNullable(parseNumberLike(ingredient.net_carbs), multiplier) ??
-      scaleNullable(parseNumberLike(ingredient.carbohydrate), multiplier),
+      scaleNullable(parseNetCarbsValue(ingredient.net_carbs, ingredient.carbohydrate), multiplier),
     fat: scaleNullable(parseNumberLike(ingredient.fat), multiplier),
   };
 }
@@ -1332,7 +1348,8 @@ function parseMealPlanMeal(
   const macros = {
     calories: parseNumberLike(total?.calories) ?? sumNumbers(items.map(item => item.calories)),
     protein: parseNumberLike(total?.protein_g) ?? parseNumberLike(total?.protein) ?? sumNumbers(items.map(item => item.protein)),
-    net_carbs: parseNumberLike(total?.carbs_g) ?? parseNumberLike(total?.carbs) ?? sumNumbers(items.map(item => item.net_carbs)),
+    net_carbs: parseNetCarbsValue(total?.net_carbs, parseNumberLike(total?.carbs_g) ?? total?.carbs) ??
+      sumNumbers(items.map(item => item.net_carbs)),
     fat: parseNumberLike(total?.fat_g) ?? parseNumberLike(total?.fat) ?? sumNumbers(items.map(item => item.fat)),
   };
   return {
@@ -1378,7 +1395,7 @@ function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
     serving: serving || null,
     calories: parseNumberLike(raw.calories),
     protein: parseNumberLike(raw.protein_g) ?? parseNumberLike(raw.protein),
-    net_carbs: parseNumberLike(raw.carbs_g) ?? parseNumberLike(raw.carbs) ?? parseNumberLike(raw.net_carbs),
+    net_carbs: parseNetCarbsValue(raw.net_carbs, parseNumberLike(raw.carbs_g) ?? raw.carbs),
     fat: parseNumberLike(raw.fat_g) ?? parseNumberLike(raw.fat),
   };
 }

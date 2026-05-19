@@ -15,9 +15,11 @@ import {
   formatEraFitDateId,
   formatNumber,
   parseNumberLike,
+  parseNetCarbsValue,
   roundNumber,
   startOfLocalDay,
   uniqueStrings,
+  type EraFitMacroTotals,
   type EraFitMealKey,
   type EraFitMealPlanDay,
   type EraFitMealPlanFoodItem,
@@ -1505,7 +1507,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
     `${chalk.bold(state.day.day)} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
-    `  ${formatMacroBalance(state.day)}`,
+    `  ${formatMacroBalance(state)}`,
     '',
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
@@ -1536,24 +1538,47 @@ function renderMealPlanFrame(state: InteractiveState): string {
   return lines.join('\n');
 }
 
-function formatMacroBalance(day: EraFitMealPlanDay): string {
+function formatMacroBalance(state: InteractiveState): string {
+  const logged = sumTrackedMacros(state.trackedEntries);
   return [
-    formatMacroBalanceValue(day.targets.calories, day.planned.calories, 'calories'),
-    formatMacroBalanceValue(day.targets.protein, day.planned.protein, 'protein'),
-    formatMacroBalanceValue(day.targets.net_carbs, day.planned.net_carbs, 'net carbs'),
-    formatMacroBalanceValue(day.targets.fat, day.planned.fat, 'fat'),
+    formatMacroBalanceValue(targetCalories(state.day), logged.calories, 'calories'),
+    formatMacroBalanceValue(state.day.targets.protein, logged.protein, 'protein'),
+    formatMacroBalanceValue(state.day.targets.net_carbs, logged.net_carbs, 'net carbs'),
+    formatMacroBalanceValue(state.day.targets.fat, logged.fat, 'fat'),
   ].join(chalk.gray(' | '));
 }
 
-function formatMacroBalanceValue(target: number | null, planned: number | null, label: string): string {
-  if (target == null || planned == null) {
+function targetCalories(day: EraFitMealPlanDay): number | null {
+  return day.targets.goal_calories ?? day.targets.calories;
+}
+
+function sumTrackedMacros(entries: TrackedFoodEntry[]): EraFitMacroTotals {
+  return entries.reduce<EraFitMacroTotals>((sum, entry) => {
+    const macros = trackedMacroTotals(entry.record);
+    return {
+      calories: (sum.calories ?? 0) + (macros.calories ?? 0),
+      protein: (sum.protein ?? 0) + (macros.protein ?? 0),
+      net_carbs: (sum.net_carbs ?? 0) + (macros.net_carbs ?? 0),
+      fat: (sum.fat ?? 0) + (macros.fat ?? 0),
+    };
+  }, { calories: 0, protein: 0, net_carbs: 0, fat: 0 });
+}
+
+function formatMacroBalanceValue(target: number | null, current: number | null, label: string): string {
+  if (target == null || current == null) {
     return chalk.gray(`${label} unknown`);
   }
-  const difference = roundNumber(target - planned);
-  const amount = formatNumber(Math.abs(difference));
+  const difference = roundNumber(target - current);
+  const amount = formatMacroBalanceAmount(Math.abs(difference), label);
   return difference >= 0
     ? chalk.green(`${amount} ${label} left`)
     : chalk.red(`${amount} ${label} over`);
+}
+
+function formatMacroBalanceAmount(value: number, label: string): string {
+  return label === 'calories'
+    ? formatNumber(Math.round(value))
+    : formatNumber(roundNumber(Number(value.toFixed(1))));
 }
 
 function renderFoodSearchLines(search: FoodSearchState): string[] {
@@ -1646,9 +1671,9 @@ function trackedMacroTotals(record: TrackedFoodRecord): EraFitMealPlanFoodItem {
     amount: null,
     unit: null,
     serving: null,
-    calories: parseNumberLike(record.calories),
+    calories: parseNumberLike(record.energy) ?? parseNumberLike(record.calories),
     protein: parseNumberLike(record.protein),
-    net_carbs: parseNumberLike(record.carbohydrate),
+    net_carbs: parseNetCarbsValue(record.net_carbs, record.carbohydrate),
     fat: parseNumberLike(record.fat),
   };
 }

@@ -56,7 +56,7 @@ function formatProteinMacro(value: EraFitMacroTotals): string {
 }
 
 function formatCarbsMacro(value: EraFitMacroTotals): string {
-  return `C ${formatNullableNumber(value.net_carbs)}g`;
+  return `NC ${formatNullableNumber(value.net_carbs)}g`;
 }
 
 function formatFatMacro(value: EraFitMacroTotals): string {

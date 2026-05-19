@@ -1,5 +1,5 @@
 import { normalizeFoodCacheKey, type CachedFoodSelection } from './cache';
-import { formatNumber, parseNumberLike, readEraFitFirebasePath, type EraFitSession } from './core';
+import { formatNumber, parseNetCarbsValue, parseNumberLike, readEraFitFirebasePath, type EraFitSession } from './core';
 
 export type SavedFoodSource = 'favorite' | 'custom_food' | 'my_meal';
 
@@ -125,7 +125,7 @@ function parseSavedFoodItem(id: string, raw: Record<string, unknown> | null, sou
     servingUnit,
     calories: parseNumberLike(raw.calories) ?? 0,
     protein: parseNumberLike(raw.protein) ?? 0,
-    carbohydrate: parseNumberLike(raw.carbohydrate) ?? parseNumberLike(raw.net_carbs) ?? 0,
+    carbohydrate: parseNetCarbsValue(raw.net_carbs, raw.carbohydrate) ?? 0,
     fat: parseNumberLike(raw.fat) ?? 0,
     timestamp: parseNumberLike(raw.timestamp) ?? 0,
     raw,

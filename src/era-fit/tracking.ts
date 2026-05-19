@@ -8,7 +8,9 @@ import {
   fetchEraFitFatSecretFoodByBarcode,
   formatNumber,
   isEraFitMealKey,
+  calculateNetCarbsFromTotalCarbs,
   parseNumberLike,
+  parseNetCarbsValue,
   parseQuantity,
   readEraFitFirebasePath,
   roundNumber,
@@ -63,7 +65,9 @@ export interface TrackedFoodRecord {
   calories: number;
   protein: number;
   carbohydrate: number;
+  net_carbs?: number;
   fat: number;
+  energy?: number;
   saturated_fat: number;
   trans_fat: number;
   polyunsaturated_fat: number;
@@ -529,7 +533,7 @@ export function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): strin
       ? {
         calories: result.saved.calories,
         protein: result.saved.protein,
-        carbs: result.saved.carbohydrate,
+        netCarbs: result.saved.carbohydrate,
         fat: result.saved.fat,
       }
       : parseSearchMacros(result.food.food_description);
@@ -538,7 +542,7 @@ export function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): strin
       `per ${formatSearchServing(result)}`,
       formatSearchMacro(macros.calories, 'cal'),
       formatSearchMacro(macros.protein, 'p'),
-      formatSearchMacro(macros.carbs, 'c'),
+      formatSearchMacro(macros.netCarbs, 'nc'),
       formatSearchMacro(macros.fat, 'f'),
     ];
   }), {
@@ -792,6 +796,7 @@ function buildSavedMealRecord(saved: SavedFoodSearchItem, quantity: number, time
     calories: saved.calories * quantity,
     protein: saved.protein * quantity,
     carbohydrate: saved.carbohydrate * quantity,
+    net_carbs: saved.carbohydrate * quantity,
     fat: saved.fat * quantity,
     time,
   } as unknown as TrackedFoodRecord);
@@ -819,6 +824,7 @@ function buildSavedFoodRecord(saved: SavedFoodSearchItem, item: ParsedTrackItem,
     calories: saved.calories * usage.factor,
     protein: saved.protein * usage.factor,
     carbohydrate: saved.carbohydrate * usage.factor,
+    net_carbs: saved.carbohydrate * usage.factor,
     fat: saved.fat * usage.factor,
     saturated_fat: numeric(saved.raw.saturated_fat) * usage.factor,
     trans_fat: numeric(saved.raw.trans_fat) * usage.factor,
@@ -925,7 +931,7 @@ function calculateFoodTotals(food: Record<string, unknown> | null): { protein: n
     : 1;
   return {
     protein: (parseNumberLike(food.protein) ?? 0) * multiplier,
-    net_carbs: ((parseNumberLike(food.net_carbs) ?? parseNumberLike(food.carbohydrate)) ?? 0) * multiplier,
+    net_carbs: (parseNetCarbsValue(food.net_carbs, food.carbohydrate) ?? 0) * multiplier,
     fat: (parseNumberLike(food.fat) ?? 0) * multiplier,
     energy: (parseNumberLike(food.energy) ?? parseNumberLike(food.calories) ?? 0) * multiplier,
   };
@@ -936,6 +942,7 @@ function calculateFatSecretServing(
   quantity: number,
   foodInfo: Pick<TrackedFoodRecord, 'food_id' | 'food_name' | 'food_type' | 'food_url' | 'brand_name'>
 ): TrackedFoodRecord {
+  const netCarbs = calculateNetCarbsFromTotalCarbs(serving.carbohydrate, serving.fiber) ?? 0;
   return {
     ...foodInfo,
     serving_qtd: quantity,
@@ -944,7 +951,8 @@ function calculateFatSecretServing(
     serving_description: serving.serving_description,
     calories: numeric(serving.calories) * quantity,
     protein: numeric(serving.protein) * quantity,
-    carbohydrate: numeric(serving.carbohydrate) * quantity,
+    carbohydrate: netCarbs * quantity,
+    net_carbs: netCarbs * quantity,
     fat: numeric(serving.fat) * quantity,
     saturated_fat: numeric(serving.saturated_fat) * quantity,
     trans_fat: numeric(serving.trans_fat) * quantity,
@@ -1003,6 +1011,7 @@ function calculateNutritionByUnit(
     calories: perUnit.calories * baseAmount,
     protein: perUnit.protein * baseAmount,
     carbohydrate: perUnit.carbohydrate * baseAmount,
+    net_carbs: (perUnit.net_carbs ?? perUnit.carbohydrate) * baseAmount,
     fat: perUnit.fat * baseAmount,
     saturated_fat: perUnit.saturated_fat * baseAmount,
     trans_fat: perUnit.trans_fat * baseAmount,
@@ -1168,11 +1177,13 @@ function parseSearchServing(description: string): string {
   return description.split('-')[0]?.trim() ?? description;
 }
 
-function parseSearchMacros(description: string): { calories: number | null; protein: number | null; carbs: number | null; fat: number | null } {
+function parseSearchMacros(description: string): { calories: number | null; protein: number | null; netCarbs: number | null; fat: number | null } {
+  const carbs = parseNumberLike(description.match(/Carbs:\s*([\d.]+)/i)?.[1]);
+  const fiber = parseNumberLike(description.match(/Fiber:\s*([\d.]+)/i)?.[1]);
   return {
     calories: parseNumberLike(description.match(/Calories:\s*([\d.]+)/i)?.[1]),
     protein: parseNumberLike(description.match(/Protein:\s*([\d.]+)/i)?.[1]),
-    carbs: parseNumberLike(description.match(/Carbs:\s*([\d.]+)/i)?.[1]),
+    netCarbs: calculateNetCarbsFromTotalCarbs(carbs, fiber),
     fat: parseNumberLike(description.match(/Fat:\s*([\d.]+)/i)?.[1]),
   };
 }
