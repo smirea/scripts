@@ -132,6 +132,9 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
       logTrackProgress(`${chalk.yellow('skipped')} ${chalk.cyan(item.raw)}`);
       continue;
     }
+    if (result.status === 'needs-selection') {
+      throw new Error(`Food selection required for ${item.raw}.`);
+    }
     logTrackProgress(`${chalk.green('matched')} ${chalk.bold(result.food.record.food_name)} ${chalk.gray('to')} ${chalk.cyan(item.raw)}`);
     foods.push(result.food);
   }

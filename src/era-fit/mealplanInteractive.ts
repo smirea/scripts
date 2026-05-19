@@ -74,6 +74,7 @@ interface InteractiveState {
   loadingItemKeys: Map<string, LoadingKind>;
   tasks: Set<Promise<void>>;
   multipliers: Map<string, number>;
+  pendingSearchItems: MealPlanItemRef[];
   messages: string[];
 }
 
@@ -94,9 +95,9 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   const tracked = await fetchTrackedFoodsForDate(options.session, dateId);
   const state = createInteractiveState(options.day, options.cache, tracked, options.dryRun);
   clearInteractiveScreen();
-  pushMessage(state, options.dryRun
-    ? `dry run for ${formatDateKey(date)}; no Era Fit writes or cache updates`
-    : `tracking ${formatDateKey(date)}`);
+  if (options.dryRun) {
+    pushMessage(state, `dry run for ${formatDateKey(date)}; no Era Fit writes or cache updates`);
+  }
 
   while (true) {
     clearInteractiveScreen();
@@ -161,6 +162,7 @@ function createInteractiveState(
     loadingItemKeys: new Map(),
     tasks: new Set(),
     multipliers: new Map(),
+    pendingSearchItems: [],
     messages: [],
   };
 }
@@ -347,6 +349,12 @@ async function logMealItems(
     });
     if (!result) {
       continue;
+    }
+    if (result.status === 'needs-selection') {
+      if (!options.interactive) {
+        state.pendingSearchItems.push(item);
+      }
+      break;
     }
     if (result.status === 'cancel') {
       if (options.interactive) {
@@ -633,6 +641,18 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       },
     }, false);
     this.repaintTimer = setInterval(() => {
+      const pendingSearch = this.view.pendingSearchItems.shift();
+      if (pendingSearch) {
+        this.view.mode = 'items';
+        this.view.mealCursor = pendingSearch.mealIndex;
+        this.view.itemCursor = pendingSearch.itemIndex;
+        this.submitAction({
+          type: 'switch-alternative',
+          mealIndex: pendingSearch.mealIndex,
+          itemIndex: pendingSearch.itemIndex,
+        });
+        return;
+      }
       this.repaint();
     }, 120);
     this.once('submit', () => clearInterval(this.repaintTimer));

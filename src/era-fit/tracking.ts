@@ -106,7 +106,8 @@ export type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
 export type TrackResolutionResult =
   | { status: 'resolved'; food: ResolvedTrackFood }
   | { status: 'skip' }
-  | { status: 'cancel' };
+  | { status: 'cancel' }
+  | { status: 'needs-selection' };
 
 export interface TrackResolveOptions {
   useCache: boolean;
@@ -192,19 +193,19 @@ export async function resolveTrackFood(
     : isBarcodeQuery(item.query)
       ? await resolveFoodFromBarcode(session, item, interactive, options.log)
       : await resolveFoodFromSearch(session, item, interactive);
-  if (food === 'skip' || food === 'cancel') {
+  if (food === 'skip' || food === 'cancel' || food === 'needs-selection') {
     return { status: food };
   }
   const forceServingPrompt = !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query);
   const serving = await resolveServingChoice(food, item, forceServingPrompt, interactive);
   if (!serving) {
-    return { status: 'cancel' };
+    return { status: interactive ? 'cancel' : 'needs-selection' };
   }
   const quantity = forceServingPrompt
     ? interactive ? await promptForQuantity(item, serving, food) : null
     : defaultQuantityForServing(item, serving, food, item.amount);
   if (quantity == null) {
-    return { status: 'cancel' };
+    return { status: interactive ? 'cancel' : 'needs-selection' };
   }
 
   if (options.writeCache) {
@@ -325,9 +326,12 @@ async function resolveFoodFromSearch(
   session: EraFitSession,
   item: ParsedTrackItem,
   interactive: boolean
-): Promise<EraFitFatSecretFood | 'cancel'> {
+): Promise<EraFitFatSecretFood | 'cancel' | 'needs-selection'> {
   const results = (await searchEraFitFatSecretFoods(session, item.query)).slice(0, 10);
   if (results.length === 0) {
+    if (!interactive) {
+      return 'needs-selection';
+    }
     throw new Error(`No Era Fit food results for "${item.query}".`);
   }
 
@@ -339,7 +343,7 @@ async function resolveFoodFromSearch(
     }
   }
   if (!interactive) {
-    throw new Error(`No exact cached match for "${item.query}". Press S on the item to choose a food.`);
+    return 'needs-selection';
   }
 
   const labels = formatFoodSearchOptionLabels(results);
