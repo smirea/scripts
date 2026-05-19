@@ -9,6 +9,7 @@ import { createShoppingList } from '../../anylist';
 import env from '../../env';
 import { parseOutputFormat, type OutputFormat } from '../../utils/output';
 import { formatTabularRows, padVisibleEnd, visibleLength } from '../../utils/tabular';
+import { loadEraFitCache } from '../cache';
 import {
   canonicalShoppingUnit,
   fetchEraFitMealPlan,
@@ -28,6 +29,7 @@ import {
   type EraFitShoppingListItem,
   type ShoppingMeasure,
 } from '../core';
+import { runInteractiveTodayMealPlan } from '../mealplanInteractive';
 
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const MEALPLAN_CATEGORY_MODEL = 'gemini-2.5-flash';
@@ -59,6 +61,7 @@ interface OutputCliArgs {
 interface MealPlanCliArgs extends OutputCliArgs {
   anylist: boolean;
   today: boolean;
+  dryRun: boolean;
 }
 
 interface GeminiGenerateContentResponse {
@@ -98,8 +101,13 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
       alias: ['t'],
       type: 'boolean',
       default: false,
-      describe: 'Print only today\'s suggested meal plan',
-    }) as Argv<T & MealPlanCliArgs>;
+      describe: 'Open today\'s suggested meal plan checklist. Use --format=json for noninteractive output',
+    })
+    .option('dry-run', {
+      type: 'boolean',
+      default: false,
+      describe: 'In interactive --today mode, resolve foods without writing to Era Fit or updating the cache',
+    }) as unknown as Argv<T & MealPlanCliArgs>;
 }
 
 function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
@@ -121,11 +129,23 @@ function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<
 async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
   const format = parseOutputFormat(args.format);
   if (args.today && args.anylist) {
-    throw new Error('--today only prints today\'s meal plan and cannot be combined with --anylist.');
+    throw new Error('--today cannot be combined with --anylist.');
+  }
+  if (args.dryRun && !args.today) {
+    throw new Error('--dry-run only applies to interactive --today mode.');
   }
 
   const session = await resolveSession();
   const mealPlan = await fetchEraFitMealPlan(session);
+  if (args.today && format === 'table' && !args.output) {
+    await runInteractiveTodayMealPlan({
+      session,
+      cache: loadEraFitCache(),
+      day: getTodayMealPlanDay(mealPlan),
+      dryRun: args.dryRun,
+    });
+    return;
+  }
   const anyListResult = args.anylist ? await createAnyListMealPlan(mealPlan) : null;
   renderMealPlanOutput({
     report: mealPlan,

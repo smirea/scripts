@@ -94,6 +94,12 @@ export interface SavedTrackFood extends ResolvedTrackFood {
   logId: string;
 }
 
+export interface TrackedFoodEntry {
+  meal: EraFitMealKey;
+  id: string;
+  record: TrackedFoodRecord;
+}
+
 export type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
 
 export type TrackResolutionResult =
@@ -259,12 +265,40 @@ export async function saveTrackedFoods(
   return saved;
 }
 
+export async function fetchTrackedFoodsForDate(session: EraFitSession, dateId: string): Promise<TrackedFoodEntry[]> {
+  const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking`;
+  const meals = await readEraFitFirebasePath<Record<string, unknown>>(session, `${basePath}/data/${dateId}/meals`) ?? {};
+  const entries: TrackedFoodEntry[] = [];
+  for (const [meal, rawMeal] of Object.entries(meals)) {
+    const foods = asRecord(rawMeal)?.foods;
+    if (!foods || !isEraFitMealKey(meal)) {
+      continue;
+    }
+    for (const [id, rawFood] of Object.entries(foods)) {
+      const record = asRecord(rawFood);
+      if (!record) {
+        continue;
+      }
+      entries.push({
+        meal,
+        id,
+        record: record as unknown as TrackedFoodRecord,
+      });
+    }
+  }
+  return entries;
+}
+
 export function formatEraFitTime(date: Date): string {
   return new Intl.DateTimeFormat('en-US', {
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
   }).format(date);
+}
+
+function isEraFitMealKey(value: string): value is EraFitMealKey {
+  return ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'].includes(value);
 }
 
 async function resolveFoodFromSearch(
