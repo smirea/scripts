@@ -29,9 +29,13 @@ import {
   fetchTrackedFoodsForDate,
   formatEraFitTime,
   parseTrackItem,
+  formatFoodSearchOptionLabels,
   resolveTrackFood,
+  resolveTrackFoodFromSearchChoice,
   saveTrackedFoods,
+  searchTrackFoodChoices,
   tryParseTrackItem,
+  type FoodSearchChoice,
   type ParsedTrackItem,
   type ResolvedTrackFood,
   type SavedTrackFood,
@@ -39,7 +43,7 @@ import {
   type TrackedFoodRecord,
 } from './tracking';
 
-type NavigationMode = 'meals' | 'items' | 'assign';
+type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search';
 type LoadingKind = 'checking' | 'unchecking';
 
 const CHECKBOX_EMPTY = '○';
@@ -76,6 +80,17 @@ type MealPlanRowRef =
   | { type: 'plan'; item: MealPlanItemRef }
   | { type: 'outside'; item: OutsidePlanItemRef };
 
+interface FoodSearchState {
+  item: MealPlanItemRef;
+  trackItem: ParsedTrackItem;
+  query: string;
+  choices: FoodSearchChoice[];
+  labels: string[];
+  cursor: number;
+  loading: boolean;
+  requestId: number;
+}
+
 interface InteractiveState {
   day: EraFitMealPlanDay;
   meals: Array<{
@@ -96,6 +111,7 @@ interface InteractiveState {
   tasks: Set<Promise<void>>;
   multipliers: Map<string, number>;
   pendingSearchItems: MealPlanItemRef[];
+  foodSearch: FoodSearchState | null;
   messages: string[];
 }
 
@@ -108,8 +124,9 @@ type MealPlanPromptAction =
   | { type: 'toggle-meal'; mealIndex: number }
   | { type: 'toggle-row'; mealIndex: number; rowIndex: number }
   | { type: 'set-serving'; mealIndex: number; rowIndex: number }
-  | { type: 'switch-alternative'; mealIndex: number; rowIndex: number }
-  | { type: 'auto-search'; mealIndex: number; rowIndex: number }
+  | { type: 'open-food-search'; mealIndex: number; rowIndex: number; query?: string }
+  | { type: 'select-food-search'; index: number }
+  | { type: 'cancel-food-search' }
   | { type: 'start-assign'; mealIndex: number; rowIndex: number }
   | { type: 'assign-outside'; mealIndex: number; rowIndex: number }
   | { type: 'done' };
@@ -130,7 +147,7 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
 
   while (true) {
     clearInteractiveScreen();
-    const action = await promptMealPlanChecklist(state);
+    const action = await promptMealPlanChecklist(options.session, state);
     if (isCancel(action) || !action || action.type === 'done') {
       if (state.tasks.size > 0) {
         process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
@@ -144,11 +161,11 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   }
 }
 
-async function promptMealPlanChecklist(state: InteractiveState): Promise<symbol | MealPlanPromptAction | undefined> {
+async function promptMealPlanChecklist(session: EraFitSession, state: InteractiveState): Promise<symbol | MealPlanPromptAction | undefined> {
   const previousEscape = clackSettings.aliases.get('escape');
   clackSettings.aliases.delete('escape');
   try {
-    return await new MealPlanChecklistPrompt(state).prompt();
+    return await new MealPlanChecklistPrompt(session, state).prompt();
   } finally {
     if (previousEscape) {
       clackSettings.aliases.set('escape', previousEscape);
@@ -202,6 +219,7 @@ function createInteractiveState(
     tasks: new Set(),
     multipliers: new Map(),
     pendingSearchItems: [],
+    foodSearch: null,
     messages: [],
   };
 }
@@ -229,6 +247,14 @@ async function handleMealPlanAction(
   if (action.type === 'done') {
     return;
   }
+  if (action.type === 'cancel-food-search') {
+    closeFoodSearch(state);
+    return;
+  }
+  if (action.type === 'select-food-search') {
+    await logSelectedFoodSearchChoice(session, cache, dateId, state, action.index);
+    return;
+  }
   const row = getMealRow(state, action.mealIndex, action.rowIndex);
   if (action.type === 'toggle-row') {
     if (row?.type === 'plan') {
@@ -254,15 +280,15 @@ async function handleMealPlanAction(
     return;
   }
   clearInteractiveScreen();
-  if (action.type === 'auto-search') {
-    await searchAndLogMealPlanItem(session, cache, dateId, state, row.item);
+  if (action.type === 'open-food-search') {
+    await openFoodSearch(session, state, row.item, action.query ?? row.item.item.name);
     return;
   }
   if (action.type === 'set-serving') {
     await promptServingMultiplier(state, row.item);
     return;
   }
-  await promptReplacementAndLog(session, cache, dateId, state, row.item);
+  await openFoodSearch(session, state, row.item, row.item.item.name);
 }
 
 function startToggleItemsTask(
@@ -339,47 +365,62 @@ async function promptServingMultiplier(state: InteractiveState, item: MealPlanIt
   state.mode = 'items';
 }
 
-async function promptReplacementAndLog(
+async function openFoodSearch(
   session: EraFitSession,
-  cache: EraFitCache,
-  dateId: string,
   state: InteractiveState,
-  item: MealPlanItemRef
+  item: MealPlanItemRef,
+  query: string
 ): Promise<void> {
   if (state.completedItemKeys.has(item.key)) {
     pushMessage(state, `${formatItemDisplayName(item.item)} is already checked`);
     return;
   }
-  const value = await text({
-    message: `Search name, barcode, or food id for ${formatItemDisplayName(item.item)}`,
-    initialValue: item.item.name,
-    validate(input) {
-      return input?.trim() ? undefined : 'Enter a search, barcode, or food id.';
-    },
-  });
-  if (isPromptCancel(value)) {
-    state.mode = 'meals';
-    pushMessage(state, 'alternative unchanged');
-    return;
+  const trackItem = buildReplacementTrackItem(item, query, state.multipliers.get(item.key) ?? 1);
+  state.mode = 'food-search';
+  state.mealCursor = item.mealIndex;
+  state.itemCursor = itemRowIndex(state, item);
+  state.loadingItemKeys.set(item.key, 'checking');
+  state.foodSearch = {
+    item,
+    trackItem,
+    query: trackItem.query,
+    choices: [],
+    labels: [],
+    cursor: 0,
+    loading: true,
+    requestId: 0,
+  };
+  const repaint = () => {
+    clearInteractiveScreen();
+    process.stdout.write(renderMealPlanFrame(state));
+  };
+  repaint();
+  const timer = setInterval(repaint, 120);
+  try {
+    const choices = await searchTrackFoodChoices(session, trackItem);
+    if (choices.length === 0) {
+      closeFoodSearch(state);
+      pushMessage(state, `no results for ${trackItem.query}`);
+      return;
+    }
+    state.foodSearch = {
+      item,
+      trackItem,
+      query: trackItem.query,
+      choices,
+      labels: formatFoodSearchOptionLabels(choices),
+      cursor: 0,
+      loading: false,
+      requestId: 0,
+    };
+  } catch (error) {
+    closeFoodSearch(state);
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+  } finally {
+    clearInterval(timer);
+    state.loadingItemKeys.delete(item.key);
+    clearInteractiveScreen();
   }
-  await logMealItems(session, cache, dateId, state, [item], {
-    replacement: value.trim(),
-    interactive: true,
-  });
-}
-
-async function searchAndLogMealPlanItem(
-  session: EraFitSession,
-  cache: EraFitCache,
-  dateId: string,
-  state: InteractiveState,
-  item: MealPlanItemRef
-): Promise<void> {
-  await logMealItems(session, cache, dateId, state, [item], {
-    replacement: item.item.name,
-    interactive: true,
-    lookupLoading: true,
-  });
 }
 
 async function logMealItems(
@@ -391,7 +432,6 @@ async function logMealItems(
   options: {
     replacement?: string;
     interactive: boolean;
-    lookupLoading?: boolean;
   }
 ): Promise<void> {
   const pending = items.filter(item => !state.completedItemKeys.has(item.key));
@@ -416,7 +456,6 @@ async function logMealItems(
         interactive: options.interactive,
         aliases: foodCacheAliases(item),
         log: message => pushMessage(state, message),
-        ...createLookupLoadingHandlers(state, item, options.lookupLoading === true),
       }
     ).catch(error => {
       pushMessage(state, error instanceof Error ? error.message : String(error));
@@ -449,6 +488,15 @@ async function logMealItems(
     return;
   }
 
+  await saveResolvedMealItems(session, dateId, state, resolved);
+}
+
+async function saveResolvedMealItems(
+  session: EraFitSession,
+  dateId: string,
+  state: InteractiveState,
+  resolved: Array<{ item: MealPlanItemRef; food: ResolvedTrackFood }>
+): Promise<void> {
   let saved: SavedTrackFood[] = [];
   if (!state.dryRun) {
     saved = await saveTrackedFoods(session, {
@@ -474,6 +522,58 @@ async function logMealItems(
     ? formatItemDisplayName(resolved[0].item.item)
     : `${resolved.length} items`;
   pushMessage(state, `${state.dryRun ? 'would log' : 'logged'} ${label}`);
+}
+
+async function logSelectedFoodSearchChoice(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  index: number
+): Promise<void> {
+  const search = state.foodSearch;
+  const choice = search?.choices[index];
+  if (!search || !choice) {
+    closeFoodSearch(state);
+    return;
+  }
+  const result = await resolveTrackFoodFromSearchChoice(
+    session,
+    cache,
+    search.trackItem,
+    formatEraFitTime(new Date()),
+    choice,
+    {
+      useCache: false,
+      writeCache: !state.dryRun,
+      interactive: false,
+      aliases: foodCacheAliases(search.item),
+      log: message => pushMessage(state, message),
+    }
+  ).catch(error => {
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+    return null;
+  });
+  if (!result) {
+    closeFoodSearch(state);
+    return;
+  }
+  if (result.status === 'needs-selection') {
+    pushMessage(state, `serving selection needed for ${formatItemDisplayName(search.item.item)}`);
+    closeFoodSearch(state);
+    return;
+  }
+  if (result.status === 'cancel') {
+    closeFoodSearch(state);
+    return;
+  }
+  if (result.status === 'skip') {
+    pushMessage(state, `skipped ${formatItemDisplayName(search.item.item)}`);
+    closeFoodSearch(state);
+    return;
+  }
+  await saveResolvedMealItems(session, dateId, state, [{ item: search.item, food: result.food }]);
+  closeFoodSearch(state);
 }
 
 async function uncheckMealItems(
@@ -515,37 +615,9 @@ function foodCacheAliases(item: MealPlanItemRef): string[] {
   ]).filter(alias => alias.trim().length > 0);
 }
 
-function createLookupLoadingHandlers(
-  state: InteractiveState,
-  item: MealPlanItemRef,
-  enabled: boolean
-): {
-  lookupStart?: (query: string) => void;
-  lookupEnd?: () => void;
-} {
-  if (!enabled) {
-    return {};
-  }
-  let timer: ReturnType<typeof setInterval> | null = null;
-  return {
-    lookupStart() {
-      state.loadingItemKeys.set(item.key, 'checking');
-      const repaint = () => {
-        clearInteractiveScreen();
-        process.stdout.write(renderMealPlanFrame(state));
-      };
-      repaint();
-      timer = setInterval(repaint, 120);
-    },
-    lookupEnd() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-      state.loadingItemKeys.delete(item.key);
-      clearInteractiveScreen();
-    },
-  };
+function closeFoodSearch(state: InteractiveState): void {
+  state.foodSearch = null;
+  state.mode = 'items';
 }
 
 function getMealRows(state: InteractiveState, mealIndex: number): MealPlanRowRef[] {
@@ -998,8 +1070,10 @@ function nonEmptyString(value: unknown): string | null {
 
 class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   private readonly repaintTimer: ReturnType<typeof setInterval>;
+  private foodSearchDebounce: ReturnType<typeof setTimeout> | null = null;
+  private disposed = false;
 
-  constructor(private readonly view: InteractiveState) {
+  constructor(private readonly session: EraFitSession, private readonly view: InteractiveState) {
     super({
       render() {
         return renderMealPlanFrame(view);
@@ -1012,7 +1086,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.view.mealCursor = pendingSearch.mealIndex;
         this.view.itemCursor = pendingSearch.itemIndex;
         this.submitAction({
-          type: 'auto-search',
+          type: 'open-food-search',
           mealIndex: pendingSearch.mealIndex,
           rowIndex: pendingSearch.itemIndex,
         });
@@ -1020,9 +1094,15 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       }
       this.repaint();
     }, 120);
-    this.once('submit', () => clearInterval(this.repaintTimer));
-    this.once('cancel', () => clearInterval(this.repaintTimer));
+    this.once('submit', () => this.cleanupTimers());
+    this.once('cancel', () => this.cleanupTimers());
     this.on('cursor', action => {
+      if (this.view.mode === 'food-search') {
+        if (action === 'up' || action === 'down') {
+          this.moveFoodSearchCursor(action === 'up' ? -1 : 1);
+        }
+        return;
+      }
       if (action === 'up' || action === 'down') {
         this.moveCursor(action === 'up' ? -1 : 1);
       } else if (action === 'right' && this.view.mode === 'meals') {
@@ -1041,7 +1121,9 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       }
     });
     this.on('key', (key, info) => {
-      if (info.name === 'escape') {
+      if (this.view.mode === 'food-search') {
+        this.handleFoodSearchKey(key, info);
+      } else if (info.name === 'escape') {
         this.goBack();
       } else if (key === 'q') {
         this.submitAction({ type: 'done' });
@@ -1055,7 +1137,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.submitCurrentAssign();
       } else if (key === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
         this.submitAction({
-          type: 'switch-alternative',
+          type: 'open-food-search',
           mealIndex: this.view.mealCursor,
           rowIndex: this.view.itemCursor,
         });
@@ -1073,7 +1155,130 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
     (this as unknown as { render(): void }).render();
   }
 
+  private cleanupTimers(): void {
+    this.disposed = true;
+    clearInterval(this.repaintTimer);
+    if (this.foodSearchDebounce) {
+      clearTimeout(this.foodSearchDebounce);
+      this.foodSearchDebounce = null;
+    }
+  }
+
+  private handleFoodSearchKey(
+    key: string | undefined,
+    info: { name?: string; ctrl?: boolean; meta?: boolean }
+  ): void {
+    if (info.name === 'escape') {
+      this.goBack();
+      return;
+    }
+    if (info.name === 'return') {
+      this.submitCurrentFoodSearch();
+      return;
+    }
+    if (info.name === 'backspace' || info.name === 'delete') {
+      const search = this.view.foodSearch;
+      if (search?.query) {
+        this.updateFoodSearchQuery(search.query.slice(0, -1));
+      }
+      return;
+    }
+    if (key && key.length === 1 && !info.ctrl && !info.meta) {
+      const search = this.view.foodSearch;
+      if (search) {
+        this.updateFoodSearchQuery(`${search.query}${key}`);
+      }
+    }
+  }
+
+  private updateFoodSearchQuery(query: string): void {
+    if (this.disposed) {
+      return;
+    }
+    const search = this.view.foodSearch;
+    if (!search) {
+      return;
+    }
+    search.query = query;
+    search.choices = [];
+    search.labels = [];
+    search.cursor = 0;
+    search.loading = true;
+    search.requestId += 1;
+    const requestId = search.requestId;
+    if (query.trim()) {
+      search.trackItem = buildReplacementTrackItem(search.item, query, this.view.multipliers.get(search.item.key) ?? 1);
+    }
+    if (this.foodSearchDebounce) {
+      clearTimeout(this.foodSearchDebounce);
+    }
+    this.repaint();
+    this.foodSearchDebounce = setTimeout(() => void this.refreshFoodSearch(requestId), 250);
+  }
+
+  private async refreshFoodSearch(requestId: number): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const search = this.view.foodSearch;
+    if (!search || search.requestId !== requestId) {
+      return;
+    }
+    if (!search.query.trim()) {
+      search.loading = false;
+      this.repaint();
+      return;
+    }
+    let trackItem: ParsedTrackItem;
+    try {
+      trackItem = buildReplacementTrackItem(search.item, search.query, this.view.multipliers.get(search.item.key) ?? 1);
+    } catch {
+      search.loading = false;
+      this.repaint();
+      return;
+    }
+    try {
+      const choices = await searchTrackFoodChoices(this.session, trackItem);
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.foodSearch;
+      if (!current || current.requestId !== requestId) {
+        return;
+      }
+      current.trackItem = trackItem;
+      current.choices = choices;
+      current.labels = formatFoodSearchOptionLabels(choices);
+      current.cursor = 0;
+      current.loading = false;
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.foodSearch;
+      if (!current || current.requestId !== requestId) {
+        return;
+      }
+      current.loading = false;
+      pushMessage(this.view, error instanceof Error ? error.message : String(error));
+    }
+    this.repaint();
+    this.ensureRawMode();
+  }
+
+  private ensureRawMode(): void {
+    const input = this.input as NodeJS.ReadStream;
+    if (input.isTTY && !this.disposed) {
+      input.resume();
+      input.setRawMode(true);
+    }
+  }
+
   private goBack(): void {
+    if (this.view.mode === 'food-search') {
+      this.submitAction({ type: 'cancel-food-search' });
+      return;
+    }
     if (this.view.mode === 'assign') {
       this.cancelAssignMode();
       return;
@@ -1112,6 +1317,14 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
     this.view.itemCursor = itemRowIndex(this.view, next);
   }
 
+  private moveFoodSearchCursor(delta: number): void {
+    const search = this.view.foodSearch;
+    if (!search || search.choices.length === 0) {
+      return;
+    }
+    search.cursor = wrap(search.cursor + delta, search.choices.length);
+  }
+
   private submitCurrentToggle(): void {
     if (this.view.mode === 'meals') {
       this.submitAction({ type: 'toggle-meal', mealIndex: this.view.mealCursor });
@@ -1129,6 +1342,17 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       type: 'assign-outside',
       mealIndex: this.view.mealCursor,
       rowIndex: this.view.itemCursor,
+    });
+  }
+
+  private submitCurrentFoodSearch(): void {
+    const search = this.view.foodSearch;
+    if (!search || search.loading) {
+      return;
+    }
+    this.submitAction({
+      type: 'select-food-search',
+      index: search.cursor,
     });
   }
 
@@ -1183,11 +1407,35 @@ function renderMealPlanFrame(state: InteractiveState): string {
   if (state.meals.some(meal => meal.outsideItems.length > 0)) {
     lines.push(`${chalk.green(OUTSIDE_PLAN_CHECKED)} ${chalk.gray('logged outside plan')}`);
   }
+  if (state.foodSearch) {
+    lines.push('', ...renderFoodSearchLines(state.foodSearch));
+  }
   lines.push(chalk.gray(contextHelp(state)));
   for (const message of state.messages.slice(-3)) {
     lines.push(chalk.gray(message));
   }
   return lines.join('\n');
+}
+
+function renderFoodSearchLines(search: FoodSearchState): string[] {
+  const lines = [
+    `${chalk.cyan('Search')} ${chalk.bold(search.query)}${chalk.inverse(' ')}`,
+  ];
+  if (search.loading) {
+    lines.push(`  ${chalk.yellow(formatLoadingSpinner(search.item.key))} loading results`);
+    return lines;
+  }
+  if (search.choices.length === 0) {
+    lines.push(`  ${chalk.gray('no results')}`);
+    return lines;
+  }
+  for (const [index, label] of search.labels.entries()) {
+    const active = index === search.cursor;
+    const marker = active ? chalk.green('●') : chalk.gray('○');
+    const line = `  ${marker} ${label}`;
+    lines.push(active ? chalk.bold(line) : chalk.gray(line));
+  }
+  return lines;
 }
 
 function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean, layout: IngredientLineLayout): string {
@@ -1304,6 +1552,9 @@ function contextHelp(state: InteractiveState): string {
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
+  }
+  if (state.mode === 'food-search') {
+    return 'type search | ↑/↓ results | Enter select | Esc cancel | Ctrl-C exit';
   }
   const row = getMealRow(state, state.mealCursor, state.itemCursor);
   return row?.type === 'outside'
