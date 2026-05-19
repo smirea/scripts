@@ -89,13 +89,6 @@ interface PrintFoodCliArgs extends OutputCliArgs {
   limit?: number;
 }
 
-export const defaultPrintFoodCommand = {
-  command: '$0',
-  describe: 'Print daily macro log',
-  builder: addPrintFoodOptions,
-  handler: runPrintFoodCommand,
-} satisfies CommandModule<{}, PrintFoodCliArgs>;
-
 function addPrintFoodOptions<T>(parser: Argv<T>): Argv<T & PrintFoodCliArgs> {
   return addOutputOptions(parser, OUTPUT_FORMATS)
     .option('date', {
