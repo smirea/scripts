@@ -133,6 +133,8 @@ interface SavedTrackFood extends ResolvedTrackFood {
   logId: string;
 }
 
+type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
+
 export const trackCommand = {
   command: 'track [meal] [items..]',
   describe: 'Log foods to the Era Fit nutrition tracker',
@@ -162,7 +164,7 @@ function addTrackOptions<T>(parser: Argv<T>): Argv<T & TrackCliArgs> {
     .option('dry-run', {
       type: 'boolean',
       default: false,
-      describe: 'Resolve foods and servings but do not write to Era Fit',
+      describe: 'Run the full food and serving resolution flow, but do not write to Era Fit or update the cache',
     })
     .example('$0 track s1 1 banana, 2scoop boba protein powder', 'Log multiple foods separated with commas') as unknown as Argv<T & TrackCliArgs>;
 }
@@ -185,11 +187,14 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
 
   const foods: ResolvedTrackFood[] = [];
   for (const item of parsedItems) {
-    foods.push(await resolveTrackFood(session, cache, item, time, { writeCache: !args.dryRun }));
+    foods.push(await resolveTrackFood(session, cache, item, time, {
+      useCache: !args.dryRun,
+      writeCache: !args.dryRun,
+    }));
   }
 
   const saved = args.dryRun
-    ? foods.map(food => ({ ...food, id: '(dry-run)', logId: '(dry-run)' }))
+    ? foods
     : await saveTrackedFoods(session, {
       dateId,
       meal,
@@ -316,9 +321,9 @@ async function resolveTrackFood(
   cache: EraFitCache,
   item: ParsedTrackItem,
   time: string,
-  options: { writeCache: boolean }
+  options: { useCache: boolean; writeCache: boolean }
 ): Promise<ResolvedTrackFood> {
-  const cached = item.explicitFoodId ? null : cache.foods[normalizeFoodCacheKey(item.query)];
+  const cached = options.useCache && !item.explicitFoodId ? cache.foods[normalizeFoodCacheKey(item.query)] : null;
   if (cached) {
     const food = await fetchEraFitFatSecretFood(session, cached.foodId);
     const requestedServing = item.unit ? resolveAutoServingChoice(food, item) : null;
@@ -711,21 +716,30 @@ function calculateFoodTotals(food: Record<string, unknown> | null): { protein: n
 function renderTrackResult(options: {
   date: string;
   meal: EraFitMealKey;
-  saved: SavedTrackFood[];
+  saved: TrackResultFood[];
   dryRun: boolean;
 }): void {
-  process.stdout.write(`${options.dryRun ? 'Dry Run' : 'Logged Foods'} - ${options.date} ${MEAL_LABELS[options.meal]}\n`);
-  renderTableRecords(options.saved.map(food => ({
-    item: food.record.food_name,
-    brand: food.record.brand_name || null,
-    serving: food.record.serving_description,
-    quantity: formatNumber(food.record.serving_qtd),
-    calories: food.record.calories,
-    protein: food.record.protein,
-    net_carbs: food.record.carbohydrate,
-    fat: food.record.fat,
-    id: food.id,
-  })));
+  process.stdout.write(`${options.dryRun ? 'Would Log Foods' : 'Logged Foods'} - ${options.date} ${MEAL_LABELS[options.meal]}${options.dryRun ? ' (dry run)' : ''}\n`);
+  renderTableRecords(options.saved.map(food => {
+    const row: Record<string, string | number | null> = {
+      time: food.record.time,
+      item: food.record.food_name,
+      brand: food.record.brand_name || null,
+      serving: food.record.serving_description,
+      quantity: formatNumber(food.record.serving_qtd),
+      calories: food.record.calories,
+      protein: food.record.protein,
+      net_carbs: food.record.carbohydrate,
+      fat: food.record.fat,
+    };
+    if (!options.dryRun) {
+      row.id = 'id' in food ? food.id : null;
+    }
+    return row;
+  }));
+  if (options.dryRun) {
+    process.stdout.write('No Era Fit changes were written and the cache was not updated.\n');
+  }
 }
 
 function calculateFatSecretServing(
