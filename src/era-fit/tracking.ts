@@ -21,6 +21,7 @@ import {
   type EraFitMealKey,
   type EraFitSession,
 } from './core';
+import { savedFoodSourceLabel, searchSavedFoods, type SavedFoodSearchItem } from './savedFoods';
 
 const STANDARD_UNITS = ['g', 'oz', 'ml', 'fl_oz'] as const;
 
@@ -35,7 +36,7 @@ export interface ParsedTrackItem {
 }
 
 export interface ServingChoice {
-  type: 'fatsecret' | 'standard';
+  type: 'fatsecret' | 'standard' | 'saved';
   label: string;
   description: string;
   servingId?: string;
@@ -84,7 +85,7 @@ export interface TrackedFoodRecord {
 
 export interface ResolvedTrackFood {
   input: ParsedTrackItem;
-  food: EraFitFatSecretFood;
+  food: EraFitFatSecretFood | null;
   serving: ServingChoice;
   quantity: number;
   record: TrackedFoodRecord;
@@ -118,6 +119,10 @@ export interface TrackResolveOptions {
 }
 
 type BarcodeMissAction = 'skip' | 'cancel';
+
+type FoodSearchChoice =
+  | { type: 'saved'; saved: SavedFoodSearchItem }
+  | { type: 'fatsecret'; food: EraFitFatSecretSearchFood };
 
 export function parseTrackItem(raw: string): ParsedTrackItem {
   const parsed = tryParseTrackItem(raw);
@@ -196,6 +201,12 @@ export async function resolveTrackFood(
   if (food === 'skip' || food === 'cancel' || food === 'needs-selection') {
     return { status: food };
   }
+  if ('source' in food) {
+    return {
+      status: 'resolved',
+      food: buildSavedResolvedTrackFood(item, food, time),
+    };
+  }
   const forceServingPrompt = !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query);
   const serving = await resolveServingChoice(food, item, forceServingPrompt, interactive);
   if (!serving) {
@@ -208,7 +219,7 @@ export async function resolveTrackFood(
     return { status: interactive ? 'cancel' : 'needs-selection' };
   }
 
-  if (options.writeCache) {
+  if (options.writeCache && serving.type !== 'saved') {
     const selection = {
       foodId: food.food_id,
       foodName: food.food_name,
@@ -326,8 +337,24 @@ async function resolveFoodFromSearch(
   session: EraFitSession,
   item: ParsedTrackItem,
   interactive: boolean
-): Promise<EraFitFatSecretFood | 'cancel' | 'needs-selection'> {
-  const results = (await searchEraFitFatSecretFoods(session, item.query)).slice(0, 10);
+): Promise<EraFitFatSecretFood | SavedFoodSearchItem | 'cancel' | 'needs-selection'> {
+  const [savedResults, fatSecretResults] = await Promise.all([
+    searchSavedFoods(session, item.query),
+    searchEraFitFatSecretFoods(session, item.query),
+  ]);
+  const exactSavedMatches = savedResults.filter(result => normalizeFoodCacheKey(result.name) === normalizeFoodCacheKey(item.query));
+  if (exactSavedMatches.length === 1) {
+    return exactSavedMatches[0];
+  }
+
+  const savedFoodIds = new Set(savedResults.map(result => result.foodId).filter((value): value is string => !!value));
+  const results = [
+    ...savedResults.map(saved => ({ type: 'saved' as const, saved })),
+    ...fatSecretResults
+      .filter(food => !savedFoodIds.has(food.food_id))
+      .map(food => ({ type: 'fatsecret' as const, food })),
+  ].slice(0, 10);
+
   if (results.length === 0) {
     if (!interactive) {
       return 'needs-selection';
@@ -335,14 +362,14 @@ async function resolveFoodFromSearch(
     throw new Error(`No Era Fit food results for "${item.query}".`);
   }
 
-  const exactMatches = results.filter(result => normalizeFoodCacheKey(result.food_name) === normalizeFoodCacheKey(item.query));
-  if (exactMatches.length === 1) {
+  const exactMatches = fatSecretResults.filter(result => normalizeFoodCacheKey(result.food_name) === normalizeFoodCacheKey(item.query));
+  if (savedResults.length === 0 && exactMatches.length === 1) {
     const food = await fetchEraFitFatSecretFood(session, exactMatches[0].food_id);
     if (resolveAutoServingChoice(food, item)) {
       return food;
     }
   }
-  if (!interactive) {
+  if (!interactive || !process.stdin.isTTY || !process.stdout.isTTY) {
     return 'needs-selection';
   }
 
@@ -350,14 +377,20 @@ async function resolveFoodFromSearch(
   const selected = await select({
     message: `Select food for ${item.raw}`,
     options: results.map((result, index) => ({
-      value: result.food_id,
+      value: String(index),
       label: labels[index],
     })),
   });
   if (isCancel(selected)) {
     return 'cancel';
   }
-  return fetchEraFitFatSecretFood(session, selected);
+  const choice = results[Number(selected)];
+  if (!choice) {
+    return 'cancel';
+  }
+  return choice.type === 'saved'
+    ? choice.saved
+    : fetchEraFitFatSecretFood(session, choice.food.food_id);
 }
 
 async function resolveFoodFromBarcode(
@@ -387,15 +420,22 @@ async function resolveFoodFromBarcode(
   return action;
 }
 
-function formatFoodSearchOptionLabels(results: EraFitFatSecretSearchFood[]): string[] {
+function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): string[] {
   const availableWidth = Math.max(60, (process.stdout.columns || 100) - 8);
   const servingWidth = availableWidth < 92 ? 14 : 18;
   const nameWidth = Math.max(24, Math.min(44, availableWidth - servingWidth - 32));
   return formatTabularRows(results.map(result => {
-    const macros = parseSearchMacros(result.food_description);
+    const macros = result.type === 'saved'
+      ? {
+        calories: result.saved.calories,
+        protein: result.saved.protein,
+        carbs: result.saved.carbohydrate,
+        fat: result.saved.fat,
+      }
+      : parseSearchMacros(result.food.food_description);
     return [
       formatFoodSearchName(result),
-      `per ${formatSearchServing(result.food_description)}`,
+      `per ${formatSearchServing(result)}`,
       formatSearchMacro(macros.calories, 'cal'),
       formatSearchMacro(macros.protein, 'p'),
       formatSearchMacro(macros.carbs, 'c'),
@@ -414,12 +454,19 @@ function formatFoodSearchOptionLabels(results: EraFitFatSecretSearchFood[]): str
   });
 }
 
-function formatFoodSearchName(food: EraFitFatSecretSearchFood): string {
-  return food.brand_name ? `${food.food_name} by ${food.brand_name}` : food.food_name;
+function formatFoodSearchName(result: FoodSearchChoice): string {
+  if (result.type === 'saved') {
+    const suffix = result.saved.brandName ? ` by ${result.saved.brandName}` : ` [${savedFoodSourceLabel(result.saved.source)}]`;
+    return `${chalk.yellow('★')} ${result.saved.name}${suffix}`;
+  }
+  return result.food.brand_name ? `${result.food.food_name} by ${result.food.brand_name}` : result.food.food_name;
 }
 
-function formatSearchServing(description: string): string {
-  return parseSearchServing(description).replace(/^Per\s+/i, '').trim();
+function formatSearchServing(result: FoodSearchChoice): string {
+  const value = result.type === 'saved'
+    ? result.saved.servingDescription
+    : parseSearchServing(result.food.food_description);
+  return value.replace(/^Per\s+/i, '').trim();
 }
 
 function formatSearchMacro(value: number | null, suffix: string): string {
@@ -609,6 +656,125 @@ function buildTrackedFoodRecord(
     added_sugars: serving.added_sugars ?? '',
     time,
   });
+}
+
+function buildSavedResolvedTrackFood(item: ParsedTrackItem, saved: SavedFoodSearchItem, time: string): ResolvedTrackFood {
+  const quantity = saved.source === 'my_meal'
+    ? item.amount
+    : resolveSavedServingUsage(item, saved).quantity;
+  return {
+    input: item,
+    food: null,
+    serving: {
+      type: 'saved',
+      label: saved.servingDescription,
+      description: saved.servingDescription,
+    },
+    quantity,
+    record: saved.source === 'my_meal'
+      ? buildSavedMealRecord(saved, item.amount, time)
+      : buildSavedFoodRecord(saved, item, time),
+  };
+}
+
+function buildSavedMealRecord(saved: SavedFoodSearchItem, quantity: number, time: string): TrackedFoodRecord {
+  return cleanFoodRecord({
+    ...saved.raw,
+    food_id: saved.id,
+    food_name: saved.name,
+    food_type: 'my_meals',
+    brand_name: '',
+    title: saved.name,
+    type_item: 'my_meals',
+    serving_qtd: quantity,
+    serving_unit: 'serving',
+    serving_description: `${formatNumber(quantity)} serving${Math.abs(quantity - 1) < 0.0001 ? '' : 's'}`,
+    calories: saved.calories * quantity,
+    protein: saved.protein * quantity,
+    carbohydrate: saved.carbohydrate * quantity,
+    fat: saved.fat * quantity,
+    time,
+  } as unknown as TrackedFoodRecord);
+}
+
+function buildSavedFoodRecord(saved: SavedFoodSearchItem, item: ParsedTrackItem, time: string): TrackedFoodRecord {
+  const usage = resolveSavedServingUsage(item, saved);
+  const sourceRecord: Record<string, unknown> = {
+    ...saved.raw,
+    food_id: saved.foodId ?? saved.customFoodId ?? saved.id,
+    food_name: saved.name,
+    brand_name: saved.brandName ?? '',
+    food_type: parseString(saved.raw.food_type) ?? savedFoodSourceLabel(saved.source),
+  };
+  if (saved.source === 'custom_food' || saved.customFoodId) {
+    sourceRecord.type_item = 'food_customized';
+    sourceRecord.food_customized_id = saved.customFoodId ?? saved.id;
+  }
+  return cleanFoodRecord({
+    ...sourceRecord,
+    ef_version: 1,
+    serving_qtd: usage.quantity,
+    serving_unit: usage.unit,
+    serving_description: usage.description,
+    calories: saved.calories * usage.factor,
+    protein: saved.protein * usage.factor,
+    carbohydrate: saved.carbohydrate * usage.factor,
+    fat: saved.fat * usage.factor,
+    saturated_fat: numeric(saved.raw.saturated_fat) * usage.factor,
+    trans_fat: numeric(saved.raw.trans_fat) * usage.factor,
+    polyunsaturated_fat: numeric(saved.raw.polyunsaturated_fat) * usage.factor,
+    monounsaturated_fat: numeric(saved.raw.monounsaturated_fat) * usage.factor,
+    cholesterol: numeric(saved.raw.cholesterol) * usage.factor,
+    sodium: numeric(saved.raw.sodium) * usage.factor,
+    potassium: numeric(saved.raw.potassium) * usage.factor,
+    fiber: numeric(saved.raw.fiber) * usage.factor,
+    sugar: numeric(saved.raw.sugar) * usage.factor,
+    vitamin_a: numeric(saved.raw.vitamin_a) * usage.factor,
+    vitamin_c: numeric(saved.raw.vitamin_c) * usage.factor,
+    vitamin_d: numeric(saved.raw.vitamin_d) * usage.factor,
+    calcium: numeric(saved.raw.calcium) * usage.factor,
+    iron: numeric(saved.raw.iron) * usage.factor,
+    time,
+  } as unknown as TrackedFoodRecord);
+}
+
+function resolveSavedServingUsage(item: ParsedTrackItem, saved: SavedFoodSearchItem): {
+  quantity: number;
+  unit: string;
+  description: string;
+  factor: number;
+} {
+  const requestedUnit = parseStandardUnit(item.unit);
+  const savedUnit = parseStandardUnit(saved.servingUnit);
+  if (requestedUnit && savedUnit) {
+    const converted = convertStandardAmount(item.amount, requestedUnit, savedUnit);
+    if (converted != null && saved.servingQuantity > 0) {
+      return {
+        quantity: item.amount,
+        unit: requestedUnit,
+        description: `${formatNumber(item.amount)} ${requestedUnit}`,
+        factor: converted / saved.servingQuantity,
+      };
+    }
+  }
+
+  if (item.unit && normalizeServingUnit(item.unit) === normalizeServingUnit(saved.servingUnit) && saved.servingQuantity > 0) {
+    return {
+      quantity: item.amount,
+      unit: saved.servingUnit,
+      description: `${formatNumber(item.amount)} ${formatServingUnitForDisplay(saved.servingUnit)}`,
+      factor: item.amount / saved.servingQuantity,
+    };
+  }
+
+  const factor = item.amount;
+  const quantity = saved.servingQuantity * factor;
+  return {
+    quantity,
+    unit: saved.servingUnit,
+    description: `${formatNumber(quantity)} ${formatServingUnitForDisplay(saved.servingUnit)}`,
+    factor,
+  };
 }
 
 async function saveMealTrackingTotals(session: EraFitSession, dateId: string): Promise<void> {
@@ -845,6 +1011,14 @@ function normalizeRequestedUnit(value: string | null): string | null {
   return parseStandardUnit(value) ?? value?.toLowerCase() ?? null;
 }
 
+function normalizeServingUnit(value: string | null | undefined): string {
+  return value?.toLowerCase().replaceAll(/[_\s]+/g, ' ').replace(/s$/, '') ?? '';
+}
+
+function formatServingUnitForDisplay(value: string): string {
+  return value.replaceAll('_', ' ');
+}
+
 function standardUnitLabel(unit: StandardUnit): string {
   const labels: Record<StandardUnit, string> = {
     g: '1 g (Grams)',
@@ -905,6 +1079,10 @@ function parseSearchMacros(description: string): { calories: number | null; prot
 
 function numeric(value: unknown): number {
   return parseNumberLike(value) ?? 0;
+}
+
+function parseString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
