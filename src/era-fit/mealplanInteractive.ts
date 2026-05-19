@@ -509,6 +509,15 @@ function getMealRow(state: InteractiveState, mealIndex: number, rowIndex: number
   return getMealRows(state, mealIndex)[rowIndex] ?? null;
 }
 
+function firstUncheckedRowIndex(state: InteractiveState, mealIndex: number): number {
+  const meal = state.meals[mealIndex];
+  if (!meal) {
+    return 0;
+  }
+  const uncheckedIndex = meal.items.findIndex(item => !state.completedItemKeys.has(item.key));
+  return uncheckedIndex === -1 ? 0 : uncheckedIndex;
+}
+
 function getAssignablePlanItems(state: InteractiveState): MealPlanItemRef[] {
   return state.meals.flatMap(meal =>
     meal.items.filter(item => !state.completedItemKeys.has(item.key) && !state.loadingItemKeys.has(item.key))
@@ -964,7 +973,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.moveCursor(action === 'up' ? -1 : 1);
       } else if (action === 'right' && this.view.mode === 'meals') {
         this.view.mode = 'items';
-        this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealRows().length - 1));
+        this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
       } else if (action === 'left' && this.view.mode === 'items') {
         this.view.mode = 'meals';
       } else if (action === 'left' && this.view.mode === 'assign') {
