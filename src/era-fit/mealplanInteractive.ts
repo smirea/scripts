@@ -109,6 +109,7 @@ type MealPlanPromptAction =
   | { type: 'toggle-row'; mealIndex: number; rowIndex: number }
   | { type: 'set-serving'; mealIndex: number; rowIndex: number }
   | { type: 'switch-alternative'; mealIndex: number; rowIndex: number }
+  | { type: 'auto-search'; mealIndex: number; rowIndex: number }
   | { type: 'start-assign'; mealIndex: number; rowIndex: number }
   | { type: 'assign-outside'; mealIndex: number; rowIndex: number }
   | { type: 'done' };
@@ -253,6 +254,10 @@ async function handleMealPlanAction(
     return;
   }
   clearInteractiveScreen();
+  if (action.type === 'auto-search') {
+    await searchAndLogMealPlanItem(session, cache, dateId, state, row.item);
+    return;
+  }
   if (action.type === 'set-serving') {
     await promptServingMultiplier(state, row.item);
     return;
@@ -347,7 +352,7 @@ async function promptReplacementAndLog(
   }
   const value = await text({
     message: `Search name, barcode, or food id for ${formatItemDisplayName(item.item)}`,
-    placeholder: item.item.name,
+    initialValue: item.item.name,
     validate(input) {
       return input?.trim() ? undefined : 'Enter a search, barcode, or food id.';
     },
@@ -363,6 +368,20 @@ async function promptReplacementAndLog(
   });
 }
 
+async function searchAndLogMealPlanItem(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  item: MealPlanItemRef
+): Promise<void> {
+  await logMealItems(session, cache, dateId, state, [item], {
+    replacement: item.item.name,
+    interactive: true,
+    lookupLoading: true,
+  });
+}
+
 async function logMealItems(
   session: EraFitSession,
   cache: EraFitCache,
@@ -372,6 +391,7 @@ async function logMealItems(
   options: {
     replacement?: string;
     interactive: boolean;
+    lookupLoading?: boolean;
   }
 ): Promise<void> {
   const pending = items.filter(item => !state.completedItemKeys.has(item.key));
@@ -396,6 +416,7 @@ async function logMealItems(
         interactive: options.interactive,
         aliases: foodCacheAliases(item),
         log: message => pushMessage(state, message),
+        ...createLookupLoadingHandlers(state, item, options.lookupLoading === true),
       }
     ).catch(error => {
       pushMessage(state, error instanceof Error ? error.message : String(error));
@@ -492,6 +513,39 @@ function foodCacheAliases(item: MealPlanItemRef): string[] {
     item.item.name,
     formatItemDisplayName(item.item),
   ]).filter(alias => alias.trim().length > 0);
+}
+
+function createLookupLoadingHandlers(
+  state: InteractiveState,
+  item: MealPlanItemRef,
+  enabled: boolean
+): {
+  lookupStart?: (query: string) => void;
+  lookupEnd?: () => void;
+} {
+  if (!enabled) {
+    return {};
+  }
+  let timer: ReturnType<typeof setInterval> | null = null;
+  return {
+    lookupStart() {
+      state.loadingItemKeys.set(item.key, 'checking');
+      const repaint = () => {
+        clearInteractiveScreen();
+        process.stdout.write(renderMealPlanFrame(state));
+      };
+      repaint();
+      timer = setInterval(repaint, 120);
+    },
+    lookupEnd() {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+      state.loadingItemKeys.delete(item.key);
+      clearInteractiveScreen();
+    },
+  };
 }
 
 function getMealRows(state: InteractiveState, mealIndex: number): MealPlanRowRef[] {
@@ -958,7 +1012,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.view.mealCursor = pendingSearch.mealIndex;
         this.view.itemCursor = pendingSearch.itemIndex;
         this.submitAction({
-          type: 'switch-alternative',
+          type: 'auto-search',
           mealIndex: pendingSearch.mealIndex,
           rowIndex: pendingSearch.itemIndex,
         });

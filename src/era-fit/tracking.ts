@@ -116,6 +116,8 @@ export interface TrackResolveOptions {
   interactive?: boolean;
   aliases?: string[];
   log?: (message: string) => void;
+  lookupStart?: (query: string) => void;
+  lookupEnd?: () => void;
 }
 
 type BarcodeMissAction = 'skip' | 'cancel';
@@ -207,7 +209,7 @@ export async function resolveTrackFood(
     ? await fetchEraFitFatSecretFood(session, item.explicitFoodId)
     : isBarcodeQuery(item.query)
       ? await resolveFoodFromBarcode(session, item, interactive, options.log)
-      : await resolveFoodFromSearch(session, item, interactive);
+      : await resolveFoodFromSearch(session, item, interactive, options);
   if (food === 'skip' || food === 'cancel' || food === 'needs-selection') {
     return { status: food };
   }
@@ -368,12 +370,20 @@ export function formatEraFitTime(date: Date): string {
 async function resolveFoodFromSearch(
   session: EraFitSession,
   item: ParsedTrackItem,
-  interactive: boolean
+  interactive: boolean,
+  options: Pick<TrackResolveOptions, 'lookupStart' | 'lookupEnd'>
 ): Promise<EraFitFatSecretFood | SavedFoodSearchItem | 'cancel' | 'needs-selection'> {
-  const [savedResults, fatSecretResults] = await Promise.all([
-    searchSavedFoods(session, item.query),
-    searchEraFitFatSecretFoods(session, item.query),
-  ]);
+  options.lookupStart?.(item.query);
+  let savedResults: SavedFoodSearchItem[];
+  let fatSecretResults: EraFitFatSecretSearchFood[];
+  try {
+    [savedResults, fatSecretResults] = await Promise.all([
+      searchSavedFoods(session, item.query),
+      searchEraFitFatSecretFoods(session, item.query),
+    ]);
+  } finally {
+    options.lookupEnd?.();
+  }
   const exactSavedMatches = savedResults.filter(result => normalizeFoodCacheKey(result.name) === normalizeFoodCacheKey(item.query));
   if (exactSavedMatches.length === 1) {
     return exactSavedMatches[0];
