@@ -1,4 +1,4 @@
-import { isCancel, select, text } from '@clack/prompts';
+import { confirm, isCancel, select, text } from '@clack/prompts';
 import type { Argv, ArgumentsCamelCase, CommandModule } from 'yargs';
 
 import { loadEraFitCache, normalizeFoodCacheKey, rememberFoodSelection, type EraFitCache } from '../cache';
@@ -133,7 +133,7 @@ interface SavedTrackFood extends ResolvedTrackFood {
 
 export const trackCommand = {
   command: 'track [meal] [items..]',
-  describe: 'Log FatSecret foods to the Era Fit nutrition tracker',
+  describe: 'Log foods to the Era Fit nutrition tracker',
   builder: addTrackOptions,
   handler: runTrackCommand,
 } satisfies CommandModule<{}, TrackCliArgs>;
@@ -147,7 +147,7 @@ function addTrackOptions<T>(parser: Argv<T>): Argv<T & TrackCliArgs> {
     .positional('items', {
       type: 'string',
       array: true,
-      describe: 'Foods as count [unit] name|id, for example "50g chicken breast"',
+      describe: 'Foods as count [unit] name|id, separated with semicolons, for example "50g chicken breast; 1 banana"',
     })
     .option('date', {
       type: 'string',
@@ -168,7 +168,10 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
   const { meal, itemArgs } = resolveMealAndItemArgs(args.meal, args.items ?? []);
   const parsedItems = splitTrackItemArgs(itemArgs).map(parseTrackItem);
   if (parsedItems.length === 0) {
-    throw new Error('Add at least one food item, for example: era-fit track b "50g chicken breast".');
+    throw new Error('Add at least one food item, for example: era-fit track b "50g chicken breast; 1 banana".');
+  }
+  if (await shouldExitForPossibleMissingSeparator(parsedItems)) {
+    return;
   }
 
   const date = args.date ? parseLocalDate(args.date, 'date') : startOfLocalDay(new Date());
@@ -179,7 +182,7 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
 
   const foods: ResolvedTrackFood[] = [];
   for (const item of parsedItems) {
-    foods.push(await resolveTrackFood(session, cache, item, time));
+    foods.push(await resolveTrackFood(session, cache, item, time, { writeCache: !args.dryRun }));
   }
 
   const saved = args.dryRun
@@ -228,26 +231,16 @@ function inferMealFromTime(date: Date): EraFitMealKey {
 }
 
 function splitTrackItemArgs(parts: string[]): string[] {
-  const trimmed = parts.map(part => part.trim()).filter(Boolean);
-  if (trimmed.length === 0) {
+  const raw = parts.map(part => part.trim()).filter(Boolean).join(' ').trim();
+  if (!raw) {
     return [];
   }
-  if (trimmed.every(part => tryParseTrackItem(part))) {
-    return trimmed;
+  if (!raw.includes(';')) {
+    return [raw];
   }
-
-  const items: string[] = [];
-  let current: string[] = [];
-  for (const token of trimmed.join(' ').split(/\s+/g)) {
-    if (isAmountToken(token) && current.length > 0 && tryParseTrackItem(current.join(' '))) {
-      items.push(current.join(' '));
-      current = [token];
-      continue;
-    }
-    current.push(token);
-  }
-  if (current.length > 0) {
-    items.push(current.join(' '));
+  const items = raw.split(';').map(part => part.trim());
+  if (items.some(item => item.length === 0)) {
+    throw new Error('Food items must be separated by `;` without empty entries.');
   }
   return items;
 }
@@ -255,7 +248,7 @@ function splitTrackItemArgs(parts: string[]): string[] {
 function parseTrackItem(raw: string): ParsedTrackItem {
   const parsed = tryParseTrackItem(raw);
   if (!parsed) {
-    throw new Error(`Could not parse food item "${raw}". Expected count [unit] name|id, for example "50g chicken breast".`);
+    throw new Error(`Could not parse food item "${raw}". Expected count [unit] name|id, for example "50g chicken breast". Separate multiple foods with \`; \`.`);
   }
   return parsed;
 }
@@ -291,15 +284,36 @@ function tryParseTrackItem(raw: string): ParsedTrackItem | null {
   };
 }
 
-function isAmountToken(value: string): boolean {
-  return /^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)(?:[A-Za-z_][A-Za-z_.%/-]*)?$/.test(value);
+async function shouldExitForPossibleMissingSeparator(items: ParsedTrackItem[]): Promise<boolean> {
+  if (items.length !== 1 || !hasPossibleMissingFoodSeparator(items[0])) {
+    return false;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error('This looks like multiple foods. Separate foods with `;`, for example "50g chicken breast; 1 banana".');
+    process.exit(1);
+  }
+  const answer = await confirm({
+    message: 'did you forget to separate foods by `;`?',
+    initialValue: true,
+  });
+  if (isCancel(answer)) {
+    throw new Error('Era Fit food logging cancelled.');
+  }
+  return answer;
+}
+
+function hasPossibleMissingFoodSeparator(item: ParsedTrackItem): boolean {
+  const match = item.raw.trim().match(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*([A-Za-z_][A-Za-z_.%/-]*)?\s+(.+)$/);
+  const rest = match?.[3] ?? '';
+  return /(?:^|\s)(?:\d+\s*\/\s*\d+|\d+(?:\.\d+)?)(?!\s*%)(?:\s*(?:g|grams?|oz|ounces?|ml|milliliters?|fl_?oz|cups?|tbsp|tsp|servings?|slices?|pieces?|scoops?|packets?)\b)?(?=\s+[A-Za-z])/.test(rest);
 }
 
 async function resolveTrackFood(
   session: Awaited<ReturnType<typeof resolveSession>>,
   cache: EraFitCache,
   item: ParsedTrackItem,
-  time: string
+  time: string,
+  options: { writeCache: boolean }
 ): Promise<ResolvedTrackFood> {
   const cached = item.explicitFoodId ? null : cache.foods[normalizeFoodCacheKey(item.query)];
   if (cached) {
@@ -327,15 +341,17 @@ async function resolveTrackFood(
     ? await promptForQuantity(item, serving, food)
     : defaultQuantityForServing(item, serving, food, item.amount);
 
-  rememberFoodSelection(cache, item.query, {
-    foodId: food.food_id,
-    foodName: food.food_name,
-    brandName: food.brand_name,
-    servingType: serving.type,
-    servingId: serving.servingId,
-    servingUnit: serving.unit,
-    servingDescription: serving.description,
-  });
+  if (options.writeCache) {
+    rememberFoodSelection(cache, item.query, {
+      foodId: food.food_id,
+      foodName: food.food_name,
+      brandName: food.brand_name,
+      servingType: serving.type,
+      servingId: serving.servingId,
+      servingUnit: serving.unit,
+      servingDescription: serving.description,
+    });
+  }
 
   return {
     input: item,
@@ -352,7 +368,7 @@ async function resolveFoodFromSearch(
 ): Promise<EraFitFatSecretFood> {
   const results = (await searchEraFitFatSecretFoods(session, item.query)).slice(0, 10);
   if (results.length === 0) {
-    throw new Error(`No Era Fit FatSecret results for "${item.query}".`);
+    throw new Error(`No Era Fit food results for "${item.query}".`);
   }
 
   const exactMatches = results.filter(result => normalizeFoodCacheKey(result.food_name) === normalizeFoodCacheKey(item.query));
