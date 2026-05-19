@@ -594,6 +594,29 @@ export async function fetchEraFitFatSecretFood(
   return food;
 }
 
+export async function fetchEraFitFatSecretFoodByBarcode(
+  session: EraFitSession,
+  barcode: string
+): Promise<EraFitFatSecretFood | null> {
+  let data: EraFitFatSecretFoodResponse;
+  try {
+    data = await postApi<EraFitFatSecretFoodResponse>(session, '/api/fatsecret_seach_scan', {
+      barcode,
+      method: 'food_scan',
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('Food ID not found for barcode')) {
+      return null;
+    }
+    throw error;
+  }
+  const food = parseFatSecretFood(asRecord(data.food));
+  if (!food) {
+    throw new Error(`Era Fit did not return FatSecret details for barcode ${barcode}.`);
+  }
+  return food;
+}
+
 export async function fetchEraFitMealPlan(session: EraFitSession): Promise<EraFitMealPlanReport> {
   const [globals, slots, aiPlan, baseTdee] = await Promise.all([
     fetchMealTrackingGlobals(session),

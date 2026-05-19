@@ -5,6 +5,7 @@ import type { Argv, ArgumentsCamelCase, CommandModule } from 'yargs';
 import { loadEraFitCache, normalizeFoodCacheKey, rememberFoodSelection, type EraFitCache } from '../cache';
 import {
   fetchEraFitFatSecretFood,
+  fetchEraFitFatSecretFoodByBarcode,
   formatDateKey,
   formatEraFitDateId,
   formatNumber,
@@ -137,6 +138,11 @@ interface SavedTrackFood extends ResolvedTrackFood {
 }
 
 type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
+type TrackResolutionResult =
+  | { status: 'resolved'; food: ResolvedTrackFood }
+  | { status: 'skip' }
+  | { status: 'cancel' };
+type BarcodeMissAction = 'skip' | 'cancel';
 
 export const trackCommand = {
   command: 'track [meal] [items..]',
@@ -195,12 +201,25 @@ async function runTrackCommand(args: ArgumentsCamelCase<TrackCliArgs>): Promise<
 
   const foods: ResolvedTrackFood[] = [];
   for (const item of parsedItems) {
-    const food = await resolveTrackFood(session, cache, item, time, {
+    const result = await resolveTrackFood(session, cache, item, time, {
       useCache: args.cache,
       writeCache: args.cache && !args.dryRun,
     });
-    logTrackProgress(`${chalk.green('matched')} ${chalk.bold(food.record.food_name)} ${chalk.gray('to')} ${chalk.cyan(item.raw)}`);
-    foods.push(food);
+    if (result.status === 'cancel') {
+      logTrackProgress(chalk.gray('cancelled'));
+      return;
+    }
+    if (result.status === 'skip') {
+      logTrackProgress(`${chalk.yellow('skipped')} ${chalk.cyan(item.raw)}`);
+      continue;
+    }
+    logTrackProgress(`${chalk.green('matched')} ${chalk.bold(result.food.record.food_name)} ${chalk.gray('to')} ${chalk.cyan(item.raw)}`);
+    foods.push(result.food);
+  }
+
+  if (foods.length === 0) {
+    logTrackProgress(chalk.gray('no foods to log'));
+    return;
   }
 
   const saved = args.dryRun
@@ -307,8 +326,6 @@ function tryParseTrackItem(raw: string): ParsedTrackItem | null {
   if (pipeIndex !== -1) {
     explicitFoodId = query.slice(pipeIndex + 1).trim() || null;
     query = query.slice(0, pipeIndex).trim() || explicitFoodId || query;
-  } else if (/^\d+$/.test(query)) {
-    explicitFoodId = query;
   }
   if (!query) {
     return null;
@@ -335,7 +352,7 @@ async function shouldExitForPossibleMissingSeparator(items: ParsedTrackItem[]): 
     initialValue: true,
   });
   if (isCancel(answer)) {
-    throw new Error('Era Fit food logging cancelled.');
+    return true;
   }
   return answer;
 }
@@ -343,7 +360,22 @@ async function shouldExitForPossibleMissingSeparator(items: ParsedTrackItem[]): 
 function hasPossibleMissingFoodSeparator(item: ParsedTrackItem): boolean {
   const match = item.raw.trim().match(/^(\d+\s*\/\s*\d+|\d+(?:\.\d+)?)\s*([A-Za-z_][A-Za-z_.%/-]*)?\s+(.+)$/);
   const rest = match?.[3] ?? '';
-  return /(?:^|\s)(?:\d+\s*\/\s*\d+|\d+(?:\.\d+)?)(?!\s*%)(?:\s*(?:g|grams?|oz|ounces?|ml|milliliters?|fl_?oz|cups?|tbsp|tsp|servings?|slices?|pieces?|scoops?|packets?)\b)?(?=\s+[A-Za-z])/.test(rest);
+  if (isBarcodeQuery(rest.trim())) {
+    return false;
+  }
+  return hasPossibleTextFoodSeparator(rest) || hasPossibleBarcodeFoodSeparator(rest);
+}
+
+function hasPossibleTextFoodSeparator(value: string): boolean {
+  return /(?:^|\s)(?:\d+\s*\/\s*\d+|\d+(?:\.\d+)?)(?!\s*%)(?:\s*(?:g|grams?|oz|ounces?|ml|milliliters?|fl_?oz|cups?|tbsp|tsp|servings?|slices?|pieces?|scoops?|packets?)\b)?(?=\s+[A-Za-z])/.test(value);
+}
+
+function hasPossibleBarcodeFoodSeparator(value: string): boolean {
+  return /(?:^|\s)(?:\d+\s*\/\s*\d+|\d+(?:\.\d+)?)(?!\s*%)(?:\s*(?:g|grams?|oz|ounces?|ml|milliliters?|fl_?oz|cups?|tbsp|tsp|servings?|slices?|pieces?|scoops?|packets?)\b)?(?=\s+\d{6,}\b)/.test(value);
+}
+
+function isBarcodeQuery(value: string): boolean {
+  return /^\d{6,}$/.test(value.trim());
 }
 
 async function resolveTrackFood(
@@ -352,7 +384,7 @@ async function resolveTrackFood(
   item: ParsedTrackItem,
   time: string,
   options: { useCache: boolean; writeCache: boolean }
-): Promise<ResolvedTrackFood> {
+): Promise<TrackResolutionResult> {
   const cached = options.useCache && !item.explicitFoodId ? cache.foods[normalizeFoodCacheKey(item.query)] : null;
   if (cached) {
     const food = await fetchEraFitFatSecretFood(session, cached.foodId);
@@ -361,23 +393,37 @@ async function resolveTrackFood(
     if (serving) {
       const quantity = defaultQuantityForServing(item, serving, food, item.amount);
       return {
-        input: item,
-        food,
-        serving,
-        quantity,
-        record: buildTrackedFoodRecord(food, serving, quantity, time),
+        status: 'resolved',
+        food: {
+          input: item,
+          food,
+          serving,
+          quantity,
+          record: buildTrackedFoodRecord(food, serving, quantity, time),
+        },
       };
     }
   }
 
   const food = item.explicitFoodId
     ? await fetchEraFitFatSecretFood(session, item.explicitFoodId)
-    : await resolveFoodFromSearch(session, item);
-  const forceServingPrompt = !item.explicitFoodId && !isExactFoodMatch(food, item.query);
+    : isBarcodeQuery(item.query)
+      ? await resolveFoodFromBarcode(session, item)
+      : await resolveFoodFromSearch(session, item);
+  if (food === 'skip' || food === 'cancel') {
+    return { status: food };
+  }
+  const forceServingPrompt = !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query);
   const serving = await resolveServingChoice(food, item, forceServingPrompt);
+  if (!serving) {
+    return { status: 'cancel' };
+  }
   const quantity = forceServingPrompt
     ? await promptForQuantity(item, serving, food)
     : defaultQuantityForServing(item, serving, food, item.amount);
+  if (quantity == null) {
+    return { status: 'cancel' };
+  }
 
   if (options.writeCache) {
     rememberFoodSelection(cache, item.query, {
@@ -392,18 +438,21 @@ async function resolveTrackFood(
   }
 
   return {
-    input: item,
-    food,
-    serving,
-    quantity,
-    record: buildTrackedFoodRecord(food, serving, quantity, time),
+    status: 'resolved',
+    food: {
+      input: item,
+      food,
+      serving,
+      quantity,
+      record: buildTrackedFoodRecord(food, serving, quantity, time),
+    },
   };
 }
 
 async function resolveFoodFromSearch(
   session: Awaited<ReturnType<typeof resolveSession>>,
   item: ParsedTrackItem
-): Promise<EraFitFatSecretFood> {
+): Promise<EraFitFatSecretFood | 'cancel'> {
   const results = (await searchEraFitFatSecretFoods(session, item.query)).slice(0, 10);
   if (results.length === 0) {
     throw new Error(`No Era Fit food results for "${item.query}".`);
@@ -426,9 +475,34 @@ async function resolveFoodFromSearch(
     })),
   });
   if (isCancel(selected)) {
-    throw new Error('Era Fit food selection cancelled.');
+    return 'cancel';
   }
   return fetchEraFitFatSecretFood(session, selected);
+}
+
+async function resolveFoodFromBarcode(
+  session: Awaited<ReturnType<typeof resolveSession>>,
+  item: ParsedTrackItem
+): Promise<EraFitFatSecretFood | BarcodeMissAction> {
+  const food = await fetchEraFitFatSecretFoodByBarcode(session, item.query);
+  if (food) {
+    return food;
+  }
+  logTrackProgress(`${chalk.yellow('barcode not found')} ${chalk.cyan(item.query)}`);
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error(`No Era Fit food found for barcode ${item.query}.`);
+  }
+  const action = await select({
+    message: `No food found for barcode ${item.query}`,
+    options: [
+      { value: 'skip', label: 'Skip this item' },
+      { value: 'cancel', label: 'Cancel tracking' },
+    ],
+  });
+  if (isCancel(action)) {
+    return 'cancel';
+  }
+  return action;
 }
 
 function formatFoodSearchOptionLabels(results: EraFitFatSecretSearchFood[]): string[] {
@@ -474,7 +548,7 @@ async function resolveServingChoice(
   food: EraFitFatSecretFood,
   item: ParsedTrackItem,
   forcePrompt: boolean
-): Promise<ServingChoice> {
+): Promise<ServingChoice | null> {
   const auto = resolveAutoServingChoice(food, item);
   if (auto && !forcePrompt) {
     return auto;
@@ -492,7 +566,7 @@ async function resolveServingChoice(
     initialValue: auto ? String(choices.findIndex(choice => sameServingChoice(choice, auto))) : undefined,
   });
   if (isCancel(selected)) {
-    throw new Error('Era Fit serving selection cancelled.');
+    return null;
   }
   return choices[Number(selected)];
 }
@@ -501,7 +575,7 @@ async function promptForQuantity(
   item: ParsedTrackItem,
   serving: ServingChoice,
   food: EraFitFatSecretFood
-): Promise<number> {
+): Promise<number | null> {
   const initialValue = formatNumber(defaultQuantityForServing(item, serving, food, item.amount));
   const value = await text({
     message: `Amount for ${serving.description}`,
@@ -512,7 +586,7 @@ async function promptForQuantity(
     },
   });
   if (isCancel(value)) {
-    throw new Error('Era Fit amount entry cancelled.');
+    return null;
   }
   return parseQuantity(value.trim()) ?? Number(initialValue);
 }
