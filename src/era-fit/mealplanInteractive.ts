@@ -1,4 +1,5 @@
-import { isCancel, Prompt, settings as clackSettings } from '@clack/core';
+import { emitKeypressEvents, type Key } from 'node:readline';
+
 import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 
@@ -52,6 +53,7 @@ const CHECKBOX_PARTIAL = '⊝';
 const OUTSIDE_PLAN_CHECKED = '✔';
 const ASSIGN_POINTER = '↣';
 const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
+let keypressEventsEnabled = false;
 
 interface InteractiveMealPlanOptions {
   session: EraFitSession;
@@ -147,7 +149,7 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   while (true) {
     clearInteractiveScreen();
     const action = await promptMealPlanChecklist(options.session, options.cache, state);
-    if (isCancel(action) || !action || action.type === 'done') {
+    if (!action || action.type === 'done') {
       if (state.tasks.size > 0) {
         process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
         await Promise.allSettled(Array.from(state.tasks));
@@ -164,16 +166,8 @@ async function promptMealPlanChecklist(
   session: EraFitSession,
   cache: EraFitCache,
   state: InteractiveState
-): Promise<symbol | MealPlanPromptAction | undefined> {
-  const previousEscape = clackSettings.aliases.get('escape');
-  clackSettings.aliases.delete('escape');
-  try {
-    return await new MealPlanChecklistPrompt(session, cache, state).prompt();
-  } finally {
-    if (previousEscape) {
-      clackSettings.aliases.set('escape', previousEscape);
-    }
-  }
+): Promise<MealPlanPromptAction | undefined> {
+  return await new MealPlanChecklistPrompt(session, cache, state).prompt();
 }
 
 function createInteractiveState(
@@ -1132,103 +1126,155 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
-  private readonly repaintTimer: ReturnType<typeof setInterval>;
+class MealPlanChecklistPrompt {
+  private readonly input = process.stdin;
+  private readonly output = process.stdout;
+  private repaintTimer: ReturnType<typeof setInterval> | null = null;
   private foodSearchDebounce: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private hadAnimatedState = false;
+  private resolvePrompt: ((action: MealPlanPromptAction | undefined) => void) | null = null;
+  private readonly keypressHandler = (key: string | undefined, info: Key) => this.handleKeypress(key, info);
 
   constructor(
     private readonly session: EraFitSession,
     private readonly cache: EraFitCache,
     private readonly view: InteractiveState
-  ) {
-    super({
-      render() {
-        return renderMealPlanFrame(view);
-      },
-    }, false);
-    this.repaintTimer = setInterval(() => {
-      const pendingSearch = this.view.pendingSearchItems.shift();
-      if (pendingSearch) {
-        this.view.mode = 'items';
-        this.view.mealCursor = pendingSearch.mealIndex;
-        this.view.itemCursor = pendingSearch.itemIndex;
-        this.submitAction({
-          type: 'open-food-search',
-          mealIndex: pendingSearch.mealIndex,
-          rowIndex: pendingSearch.itemIndex,
-        });
-        return;
+  ) {}
+
+  async prompt(): Promise<MealPlanPromptAction | undefined> {
+    return await new Promise(resolve => {
+      this.resolvePrompt = resolve;
+      this.disposed = false;
+      this.output.write('\x1b[?25l');
+      if (!keypressEventsEnabled) {
+        emitKeypressEvents(this.input);
+        keypressEventsEnabled = true;
       }
+      this.input.resume();
+      if (this.input.isTTY) {
+        this.input.setRawMode(true);
+      }
+      this.input.on('keypress', this.keypressHandler);
+      this.repaintTimer = setInterval(() => this.tick(), 120);
       this.repaint();
-    }, 120);
-    this.once('submit', () => this.cleanupTimers());
-    this.once('cancel', () => this.cleanupTimers());
-    this.on('cursor', action => {
-      if (this.view.mode === 'food-search') {
-        if (action === 'up' || action === 'down') {
-          this.moveFoodSearchCursor(action === 'up' ? -1 : 1);
-        }
-        return;
-      }
-      if (action === 'up' || action === 'down') {
-        this.moveCursor(action === 'up' ? -1 : 1);
-      } else if (action === 'right' && this.view.mode === 'meals') {
-        this.view.mode = 'items';
-        this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
-      } else if (action === 'left' && this.view.mode === 'items') {
-        this.view.mode = 'meals';
-      } else if (action === 'left' && this.view.mode === 'assign') {
-        this.cancelAssignMode();
-      } else if (action === 'space') {
-        if (this.view.mode === 'assign') {
-          this.assignCurrentOutside();
-        } else {
-          this.submitCurrentToggle();
-        }
-      }
     });
-    this.on('key', (key, info) => {
-      if (this.view.mode === 'food-search') {
-        this.handleFoodSearchKey(key, info);
-      } else if (info.name === 'escape') {
-        this.goBack();
-      } else if (key === 'q') {
-        this.submitAction({ type: 'done' });
-      } else if (key === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
-        const row = this.currentRow();
-        if (row?.type === 'outside') {
-          startAssignMode(this.view, row.item);
-          this.repaint();
-        }
-      } else if (key === 'a' && this.view.mode === 'assign') {
-        this.assignCurrentOutside();
-      } else if (key === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
-        this.submitAction({
-          type: 'open-food-search',
-          mealIndex: this.view.mealCursor,
-          rowIndex: this.view.itemCursor,
-        });
-      } else if (key === 'r' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
-        this.submitAction({
-          type: 'set-serving',
-          mealIndex: this.view.mealCursor,
-          rowIndex: this.view.itemCursor,
-        });
-      }
-    });
+  }
+
+  private tick(): void {
+    const pendingSearch = this.view.pendingSearchItems.shift();
+    if (pendingSearch) {
+      this.view.mode = 'items';
+      this.view.mealCursor = pendingSearch.mealIndex;
+      this.view.itemCursor = pendingSearch.itemIndex;
+      this.submitAction({
+        type: 'open-food-search',
+        mealIndex: pendingSearch.mealIndex,
+        rowIndex: pendingSearch.itemIndex,
+      });
+      return;
+    }
+
+    const hasAnimatedState = this.view.loadingItemKeys.size > 0 || this.view.foodSearch?.loading === true;
+    if (hasAnimatedState || this.hadAnimatedState) {
+      this.hadAnimatedState = hasAnimatedState;
+      this.repaint();
+    }
   }
 
   private repaint(): void {
-    (this as unknown as { render(): void }).render();
+    if (this.disposed) {
+      return;
+    }
+    clearInteractiveScreen();
+    this.output.write(renderMealPlanFrame(this.view));
   }
 
   private cleanupTimers(): void {
+    if (this.disposed) {
+      return;
+    }
     this.disposed = true;
-    clearInterval(this.repaintTimer);
+    if (this.repaintTimer) {
+      clearInterval(this.repaintTimer);
+      this.repaintTimer = null;
+    }
     if (this.foodSearchDebounce) {
       clearTimeout(this.foodSearchDebounce);
       this.foodSearchDebounce = null;
+    }
+    this.input.off('keypress', this.keypressHandler);
+    if (this.input.isTTY) {
+      this.input.setRawMode(false);
+    }
+    this.output.write('\x1b[?25h');
+  }
+
+  private handleKeypress(key: string | undefined, info: Key): void {
+    if (this.view.mode === 'food-search') {
+      this.handleFoodSearchKey(key, info);
+      return;
+    }
+    if (info.ctrl && info.name === 'c') {
+      this.submitAction({ type: 'done' });
+      return;
+    }
+    if (info.name === 'up' || info.name === 'down') {
+      this.moveCursor(info.name === 'up' ? -1 : 1);
+      this.repaint();
+      return;
+    }
+    if (info.name === 'right' && this.view.mode === 'meals') {
+      this.view.mode = 'items';
+      this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
+      this.repaint();
+      return;
+    }
+    if (info.name === 'left' && this.view.mode === 'items') {
+      this.view.mode = 'meals';
+      this.repaint();
+      return;
+    }
+    if (info.name === 'left' && this.view.mode === 'assign') {
+      this.cancelAssignMode();
+      return;
+    }
+    if (info.name === 'escape') {
+      this.goBack();
+      return;
+    }
+    if (info.name === 'space' || key === ' ') {
+      if (this.view.mode === 'assign') {
+        this.assignCurrentOutside();
+      } else {
+        this.submitCurrentToggle();
+      }
+      return;
+    }
+
+    const command = key?.toLowerCase();
+    if (command === 'q') {
+      this.submitAction({ type: 'done' });
+    } else if (command === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
+      const row = this.currentRow();
+      if (row?.type === 'outside') {
+        startAssignMode(this.view, row.item);
+        this.repaint();
+      }
+    } else if (command === 'a' && this.view.mode === 'assign') {
+      this.assignCurrentOutside();
+    } else if (command === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
+      this.submitAction({
+        type: 'open-food-search',
+        mealIndex: this.view.mealCursor,
+        rowIndex: this.view.itemCursor,
+      });
+    } else if (command === 'r' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
+      this.submitAction({
+        type: 'set-serving',
+        mealIndex: this.view.mealCursor,
+        rowIndex: this.view.itemCursor,
+      });
     }
   }
 
@@ -1236,12 +1282,21 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
     key: string | undefined,
     info: { name?: string; ctrl?: boolean; meta?: boolean }
   ): void {
+    if (info.ctrl && info.name === 'c') {
+      this.submitAction({ type: 'done' });
+      return;
+    }
     if (info.name === 'escape') {
       this.goBack();
       return;
     }
     if (info.name === 'return') {
       this.submitCurrentFoodSearch();
+      return;
+    }
+    if (info.name === 'up' || info.name === 'down') {
+      this.moveFoodSearchCursor(info.name === 'up' ? -1 : 1);
+      this.repaint();
       return;
     }
     if (info.name === 'backspace' || info.name === 'delete') {
@@ -1331,15 +1386,6 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       pushMessage(this.view, error instanceof Error ? error.message : String(error));
     }
     this.repaint();
-    this.ensureRawMode();
-  }
-
-  private ensureRawMode(): void {
-    const input = this.input as NodeJS.ReadStream;
-    if (input.isTTY && !this.disposed) {
-      input.resume();
-      input.setRawMode(true);
-    }
   }
 
   private goBack(): void {
@@ -1437,9 +1483,13 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   }
 
   private submitAction(action: MealPlanPromptAction): void {
-    this.value = action;
-    this.state = 'submit';
-    this.emit('submit');
+    const resolve = this.resolvePrompt;
+    if (!resolve) {
+      return;
+    }
+    this.resolvePrompt = null;
+    this.cleanupTimers();
+    resolve(action);
   }
 
   private currentRow(): MealPlanRowRef | null {
