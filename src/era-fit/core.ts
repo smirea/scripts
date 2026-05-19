@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -6,13 +5,10 @@ import { deflateRawSync } from 'node:zlib';
 
 import { isCancel, password, text } from '@clack/prompts';
 import chalk from 'chalk';
-import yargs from 'yargs';
 import type { Argv, ArgumentsCamelCase } from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
-import { createShoppingList } from './anylist';
-import env from './env';
-import { createScript } from './utils/createScript';
+import { createShoppingList } from '../anylist';
+import env from '../env';
 import {
   OUTPUT_FORMATS,
   parseOutputFormat,
@@ -20,7 +16,7 @@ import {
   renderTableRecords,
   type CsvValue,
   type OutputFormat,
-} from './utils/output';
+} from '../utils/output';
 
 const BASE_URL = 'https://app.erafit.com';
 const SOURCE_PATH = 'api://era-fit/nutrition';
@@ -29,7 +25,7 @@ const DEFAULT_DAYS = 1;
 const API_RETRY_ATTEMPTS = 3;
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const MEALPLAN_CATEGORY_MODEL = 'gemini-2.5-flash';
-const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
+const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
 const FIREBASE_API_KEY_ENV = 'ERA_FIT_FIREBASE_API_KEY';
@@ -432,7 +428,7 @@ interface OutputCliArgs {
   output?: string;
 }
 
-interface LogCliArgs extends OutputCliArgs {
+export interface LogCliArgs extends OutputCliArgs {
   date?: string;
   days: number;
   start?: string;
@@ -440,7 +436,7 @@ interface LogCliArgs extends OutputCliArgs {
   limit?: number;
 }
 
-interface MealPlanCliArgs extends OutputCliArgs {
+export interface MealPlanCliArgs extends OutputCliArgs {
   anylist: boolean;
   today: boolean;
 }
@@ -489,31 +485,6 @@ class CookieJar {
   }
 }
 
-if (import.meta.main) {
-  await createScript(runCliWithErrorFormatting);
-}
-
-async function runCliWithErrorFormatting(): Promise<void> {
-  try {
-    await runCli();
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  }
-}
-
-async function runCli(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('era-fit')
-    .version(false)
-    .strict()
-    .command('$0', 'Print daily macro log', addLogOptions, runLogCommand)
-    .command('log', 'Print daily macro log', addLogOptions, runLogCommand)
-    .command(['mealplan', 'meaplan'], 'Print the weekly suggested meal plan and aggregate shopping list', addMealPlanOptions, runMealPlanCommand)
-    .help()
-    .parseAsync();
-}
-
 function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
   return parser
     .option('format', {
@@ -530,7 +501,7 @@ function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<
     }) as unknown as Argv<T & OutputCliArgs>;
 }
 
-function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
+export function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
   return addOutputOptions(parser, OUTPUT_FORMATS)
     .option('date', {
       type: 'string',
@@ -557,7 +528,7 @@ function addLogOptions<T>(parser: Argv<T>): Argv<T & LogCliArgs> {
     }) as Argv<T & LogCliArgs>;
 }
 
-function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
+export function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
   return addOutputOptions(parser, MEAL_PLAN_OUTPUT_FORMATS)
     .option('anylist', {
       type: 'boolean',
@@ -572,7 +543,7 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
     }) as Argv<T & MealPlanCliArgs>;
 }
 
-async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
+export async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void> {
   if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
     throw new Error('--limit must be a positive number.');
   }
@@ -598,7 +569,7 @@ async function runLogCommand(args: ArgumentsCamelCase<LogCliArgs>): Promise<void
   });
 }
 
-async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
+export async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
   const format = parseOutputFormat(args.format);
   if (args.today && args.anylist) {
     throw new Error('--today only prints today\'s meal plan and cannot be combined with --anylist.');

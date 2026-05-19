@@ -11,7 +11,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'wt', source: 'src/git-worktree.ts' },
   { name: 'whoop-pull', source: 'src/whoop.ts' },
   { name: 'macrofactor', source: 'src/macrofactor.ts' },
-  { name: 'era-fit', source: 'src/era-fit.ts' },
+  { name: 'era-fit', source: 'src/era-fit/index.ts' },
   { name: 'workouts', source: 'src/workouts.ts' },
   { name: 'voice-memo-parse', source: 'src/voice-memo-parse.ts' },
   { name: 'anylist', source: 'src/anylist.ts' },
