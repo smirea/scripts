@@ -822,8 +822,8 @@ function formatLoadingSpinner(key: string): string {
 
 function contextHelp(mode: NavigationMode): string {
   return mode === 'meals'
-    ? '↑/↓ meals | → items | Space toggle | Esc/q exit | Ctrl-C cancel'
-    : '↑/↓ items | ←/Esc meals | Space toggle | R serving | S alternative | q exit';
+    ? '↑/↓ meals | → items | ␣ toggle | Esc/q exit | Ctrl-C cancel'
+    : '↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative | q exit';
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
