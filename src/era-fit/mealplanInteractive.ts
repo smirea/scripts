@@ -425,25 +425,30 @@ function scoreTrackedTextMatch(item: EraFitMealPlanFoodItem, record: TrackedFood
 }
 
 function macrosAreWithinFivePercent(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): boolean {
-  return macroPairs(item, record).every(([planned, tracked]) => isWithinFivePercent(planned, tracked));
+  const pairs = macroPairs(item, record);
+  return pairs != null && pairs.every(([planned, tracked]) => isWithinFivePercent(planned, tracked));
 }
 
 function macroProximityDistance(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
-  return macroPairs(item, record).reduce((sum, [planned, tracked]) => {
+  return macroPairs(item, record)?.reduce((sum, [planned, tracked]) => {
     if (planned === 0) {
       return sum + Math.abs(tracked);
     }
     return sum + Math.abs(planned - tracked) / Math.abs(planned);
-  }, 0);
+  }, 0) ?? Number.POSITIVE_INFINITY;
 }
 
-function macroPairs(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): Array<[number, number]> {
-  return [
-    [item.calories ?? 0, record.calories ?? 0],
-    [item.protein ?? 0, record.protein ?? 0],
-    [item.net_carbs ?? 0, record.carbohydrate ?? 0],
-    [item.fat ?? 0, record.fat ?? 0],
+function macroPairs(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): Array<[number, number]> | null {
+  const pairs = [
+    [item.calories, record.calories],
+    [item.protein, record.protein],
+    [item.net_carbs, record.carbohydrate],
+    [item.fat, record.fat],
   ];
+  if (pairs.some(([planned, tracked]) => planned == null || !Number.isFinite(tracked))) {
+    return null;
+  }
+  return pairs as Array<[number, number]>;
 }
 
 function isWithinFivePercent(planned: number, tracked: number): boolean {

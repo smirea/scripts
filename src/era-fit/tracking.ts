@@ -7,6 +7,7 @@ import {
   fetchEraFitFatSecretFood,
   fetchEraFitFatSecretFoodByBarcode,
   formatNumber,
+  isEraFitMealKey,
   parseNumberLike,
   parseQuantity,
   readEraFitFirebasePath,
@@ -295,10 +296,6 @@ export function formatEraFitTime(date: Date): string {
     minute: '2-digit',
     hour12: true,
   }).format(date);
-}
-
-function isEraFitMealKey(value: string): value is EraFitMealKey {
-  return ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'].includes(value);
 }
 
 async function resolveFoodFromSearch(

@@ -12,10 +12,12 @@ import {
 } from '../core';
 import {
   OUTPUT_FORMATS,
+  addOutputOptions,
   parseOutputFormat,
   renderCsvRecords,
   renderTableRecords,
   type CsvValue,
+  type OutputCliArgs,
   type OutputFormat,
 } from '../../utils/output';
 
@@ -76,11 +78,6 @@ const TEMPLATE_COLUMNS = [
   'fat_setting',
 ] as const;
 
-interface OutputCliArgs {
-  format: string;
-  output?: string;
-}
-
 interface PrintFoodCliArgs extends OutputCliArgs {
   date?: string;
   days: number;
@@ -114,22 +111,6 @@ function addPrintFoodOptions<T>(parser: Argv<T>): Argv<T & PrintFoodCliArgs> {
       type: 'number',
       describe: 'Maximum number of logged foods to return',
     }) as Argv<T & PrintFoodCliArgs>;
-}
-
-function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
-  return parser
-    .option('format', {
-      alias: ['f'],
-      type: 'string',
-      choices,
-      default: 'table',
-      describe: 'Output format',
-    })
-    .option('output', {
-      alias: ['o'],
-      type: 'string',
-      describe: 'Write output to this file path',
-    }) as unknown as Argv<T & OutputCliArgs>;
 }
 
 async function runPrintFoodCommand(args: ArgumentsCamelCase<PrintFoodCliArgs>): Promise<void> {

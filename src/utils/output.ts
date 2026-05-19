@@ -1,8 +1,31 @@
+import type { Argv } from 'yargs';
+
 export const OUTPUT_FORMATS = ['json', 'table', 'csv', 'csv:full'] as const;
 
 export type OutputFormat = (typeof OUTPUT_FORMATS)[number];
 export type CsvValue = string | number | null;
 type ValueFormatter = (value: unknown) => unknown;
+
+export interface OutputCliArgs {
+  format: string;
+  output?: string;
+}
+
+export function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
+  return parser
+    .option('format', {
+      alias: ['f'],
+      type: 'string',
+      choices,
+      default: 'table',
+      describe: 'Output format',
+    })
+    .option('output', {
+      alias: ['o'],
+      type: 'string',
+      describe: 'Write output to this file path',
+    }) as unknown as Argv<T & OutputCliArgs>;
+}
 
 export function parseOutputFormat(value: string): OutputFormat {
   if ((OUTPUT_FORMATS as readonly string[]).includes(value)) {

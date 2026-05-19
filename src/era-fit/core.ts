@@ -65,6 +65,7 @@ const BODY_COMPOSITION_CALORIE_OFFSETS: Record<string, number> = {
 };
 
 let runtimeCredentials: Credentials | null = null;
+let runtimeFirebaseIdToken: string | null = null;
 interface Credentials {
   email: string;
   password: string;
@@ -720,9 +721,13 @@ export async function resolveFirebaseIdToken(session: EraFitSession): Promise<st
   if (token) {
     return token;
   }
+  if (runtimeFirebaseIdToken) {
+    return runtimeFirebaseIdToken;
+  }
   const customToken = await fetchFirebaseCustomToken(session);
   if (customToken) {
-    return exchangeFirebaseCustomToken(customToken);
+    runtimeFirebaseIdToken = await exchangeFirebaseCustomToken(customToken);
+    return runtimeFirebaseIdToken;
   }
   const credentials = runtimeCredentials ?? parseOptionalCredentials(env.ERA_FIT_CREDENTIALS);
   if (!credentials) {
@@ -746,7 +751,8 @@ export async function resolveFirebaseIdToken(session: EraFitSession): Promise<st
   if (!response.ok || !json.idToken) {
     throw new Error(`Era Fit Firebase login failed: ${json.error?.message ?? response.statusText}`);
   }
-  return json.idToken;
+  runtimeFirebaseIdToken = json.idToken;
+  return runtimeFirebaseIdToken;
 }
 
 async function fetchFirebaseCustomToken(session: EraFitSession): Promise<string | null> {
@@ -2027,6 +2033,10 @@ export function formatEraFitDateId(date: Date): string {
     (Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) - Date.UTC(date.getFullYear(), 0, 1)) / MS_PER_DAY
   );
   return `${date.getFullYear()}${dayOfYearZeroBased}`;
+}
+
+export function isEraFitMealKey(value: string): value is EraFitMealKey {
+  return (MEAL_KEYS as readonly string[]).includes(value);
 }
 
 function parseAppCookie(cookieHeader: string): EraFitAppCookie | null {

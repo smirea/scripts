@@ -31,6 +31,9 @@ async function runCli(): Promise<void> {
     .command(mealPlanCommand)
     .command(trackCommand)
     .demandCommand(1, 'Choose an Era Fit command.')
+    .fail((message, error) => {
+      throw error ?? new Error(message);
+    })
     .help();
 
   if (args.length === 0) {

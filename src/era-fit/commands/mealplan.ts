@@ -7,7 +7,7 @@ import type { Argv, ArgumentsCamelCase } from 'yargs';
 
 import { createShoppingList } from '../../anylist';
 import env from '../../env';
-import { parseOutputFormat, type OutputFormat } from '../../utils/output';
+import { addOutputOptions, parseOutputFormat, type OutputCliArgs, type OutputFormat } from '../../utils/output';
 import { formatTabularRows, padVisibleEnd, visibleLength } from '../../utils/tabular';
 import { loadEraFitCache } from '../cache';
 import {
@@ -52,11 +52,6 @@ const MEALPLAN_ANYLIST_CATEGORIES = [
 ] as const;
 
 type MealPlanAnyListCategory = (typeof MEALPLAN_ANYLIST_CATEGORIES)[number];
-
-interface OutputCliArgs {
-  format: string;
-  output?: string;
-}
 
 interface MealPlanCliArgs extends OutputCliArgs {
   anylist: boolean;
@@ -110,28 +105,12 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
     }) as unknown as Argv<T & MealPlanCliArgs>;
 }
 
-function addOutputOptions<T>(parser: Argv<T>, choices: readonly string[]): Argv<T & OutputCliArgs> {
-  return parser
-    .option('format', {
-      alias: ['f'],
-      type: 'string',
-      choices,
-      default: 'table',
-      describe: 'Output format',
-    })
-    .option('output', {
-      alias: ['o'],
-      type: 'string',
-      describe: 'Write output to this file path',
-    }) as unknown as Argv<T & OutputCliArgs>;
-}
-
 async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Promise<void> {
   const format = parseOutputFormat(args.format);
   if (args.today && args.anylist) {
     throw new Error('--today cannot be combined with --anylist.');
   }
-  if (args.dryRun && !args.today) {
+  if (args.dryRun && (!args.today || format !== 'table' || args.output)) {
     throw new Error('--dry-run only applies to interactive --today mode.');
   }
 
