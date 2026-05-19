@@ -1505,7 +1505,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
     `${chalk.bold(state.day.day)} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
-    `  ${formatMacros(state.day.planned)} ${chalk.gray('| target')} ${formatMacros(state.day.targets)}`,
+    `  ${formatMacroBalance(state.day)}`,
     '',
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
@@ -1534,6 +1534,26 @@ function renderMealPlanFrame(state: InteractiveState): string {
     lines.push(chalk.gray(message));
   }
   return lines.join('\n');
+}
+
+function formatMacroBalance(day: EraFitMealPlanDay): string {
+  return [
+    formatMacroBalanceValue(day.targets.calories, day.planned.calories, 'calories'),
+    formatMacroBalanceValue(day.targets.protein, day.planned.protein, 'protein'),
+    formatMacroBalanceValue(day.targets.net_carbs, day.planned.net_carbs, 'net carbs'),
+    formatMacroBalanceValue(day.targets.fat, day.planned.fat, 'fat'),
+  ].join(chalk.gray(' | '));
+}
+
+function formatMacroBalanceValue(target: number | null, planned: number | null, label: string): string {
+  if (target == null || planned == null) {
+    return chalk.gray(`${label} unknown`);
+  }
+  const difference = roundNumber(target - planned);
+  const amount = formatNumber(Math.abs(difference));
+  return difference >= 0
+    ? chalk.green(`${amount} ${label} left`)
+    : chalk.red(`${amount} ${label} over`);
 }
 
 function renderFoodSearchLines(search: FoodSearchState): string[] {
