@@ -47,7 +47,7 @@ type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search';
 type LoadingKind = 'checking' | 'unchecking';
 
 const CHECKBOX_EMPTY = '○';
-const CHECKBOX_CHECKED = '⊗';
+const CHECKBOX_CHECKED = '×';
 const CHECKBOX_PARTIAL = '⊝';
 const OUTSIDE_PLAN_CHECKED = '✔';
 const ASSIGN_POINTER = '↣';
@@ -107,6 +107,7 @@ interface InteractiveState {
   completedItemKeys: Set<string>;
   existingItemKeys: Set<string>;
   trackedItemByKey: Map<string, TrackedFoodEntry>;
+  trackedEntries: TrackedFoodEntry[];
   loadingItemKeys: Map<string, LoadingKind>;
   tasks: Set<Promise<void>>;
   multipliers: Map<string, number>;
@@ -127,8 +128,6 @@ type MealPlanPromptAction =
   | { type: 'open-food-search'; mealIndex: number; rowIndex: number; query?: string }
   | { type: 'select-food-search'; index: number }
   | { type: 'cancel-food-search' }
-  | { type: 'start-assign'; mealIndex: number; rowIndex: number }
-  | { type: 'assign-outside'; mealIndex: number; rowIndex: number }
   | { type: 'done' };
 
 export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOptions): Promise<void> {
@@ -147,7 +146,7 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
 
   while (true) {
     clearInteractiveScreen();
-    const action = await promptMealPlanChecklist(options.session, state);
+    const action = await promptMealPlanChecklist(options.session, options.cache, state);
     if (isCancel(action) || !action || action.type === 'done') {
       if (state.tasks.size > 0) {
         process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
@@ -161,11 +160,15 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   }
 }
 
-async function promptMealPlanChecklist(session: EraFitSession, state: InteractiveState): Promise<symbol | MealPlanPromptAction | undefined> {
+async function promptMealPlanChecklist(
+  session: EraFitSession,
+  cache: EraFitCache,
+  state: InteractiveState
+): Promise<symbol | MealPlanPromptAction | undefined> {
   const previousEscape = clackSettings.aliases.get('escape');
   clackSettings.aliases.delete('escape');
   try {
-    return await new MealPlanChecklistPrompt(session, state).prompt();
+    return await new MealPlanChecklistPrompt(session, cache, state).prompt();
   } finally {
     if (previousEscape) {
       clackSettings.aliases.set('escape', previousEscape);
@@ -215,6 +218,7 @@ function createInteractiveState(
     completedItemKeys: matched.completed,
     existingItemKeys: new Set(matched.completed),
     trackedItemByKey: matched.trackedByItemKey,
+    trackedEntries: [...tracked],
     loadingItemKeys: new Map(),
     tasks: new Set(),
     multipliers: new Map(),
@@ -261,18 +265,6 @@ async function handleMealPlanAction(
       startToggleItemsTask(session, cache, dateId, state, [row.item]);
     } else if (row?.type === 'outside') {
       pushMessage(state, 'logged outside plan; press A to assign it');
-    }
-    return;
-  }
-  if (action.type === 'start-assign') {
-    if (row?.type === 'outside') {
-      startAssignMode(state, row.item);
-    }
-    return;
-  }
-  if (action.type === 'assign-outside') {
-    if (row?.type === 'plan' && state.assignSource) {
-      assignOutsideTrackedFood(cache, state, state.assignSource, row.item);
     }
     return;
   }
@@ -511,11 +503,13 @@ async function saveResolvedMealItems(
     state.existingItemKeys.delete(entry.item.key);
     const savedFood = saved[index];
     if (savedFood) {
-      state.trackedItemByKey.set(entry.item.key, {
+      const trackedEntry = {
         meal: entry.item.trackingMeal,
         id: savedFood.id,
         record: savedFood.record,
-      });
+      };
+      state.trackedItemByKey.set(entry.item.key, trackedEntry);
+      state.trackedEntries.push(trackedEntry);
     }
   }
   const label = resolved.length === 1
@@ -601,6 +595,10 @@ async function uncheckMealItems(
     state.completedItemKeys.delete(item.key);
     state.existingItemKeys.delete(item.key);
     state.trackedItemByKey.delete(item.key);
+  }
+  if (!state.dryRun && tracked.length > 0) {
+    const removed = new Set(tracked.map(trackedEntryKey));
+    state.trackedEntries = state.trackedEntries.filter(entry => !removed.has(trackedEntryKey(entry)));
   }
   const label = checked.length === 1
     ? formatItemDisplayName(checked[0].item)
@@ -692,23 +690,70 @@ function assignOutsideTrackedFood(
     pushMessage(state, `cannot cache ${formatTrackedFoodDisplayName(source.entry.record)}`);
     return;
   }
+  const assignedSelection = {
+    ...selection,
+    servingMultiplier: inferAssignedServingMultiplier(source.entry.record, target.item),
+  };
+  const aliases = foodCacheAliases(target);
   if (!state.dryRun) {
-    for (const alias of foodCacheAliases(target)) {
-      rememberFoodSelection(cache, alias, selection);
+    for (const alias of aliases) {
+      rememberFoodSelection(cache, alias, assignedSelection);
     }
+  } else {
+    rememberFoodSelectionInMemory(cache, aliases, assignedSelection);
   }
-  state.completedItemKeys.add(target.key);
-  state.existingItemKeys.add(target.key);
-  state.trackedItemByKey.set(target.key, source.entry);
-  const sourceMeal = state.meals[source.mealIndex];
-  if (sourceMeal) {
-    sourceMeal.outsideItems = sourceMeal.outsideItems.filter(item => item.key !== source.key);
-  }
+  refreshExistingTrackedMatches(cache, state);
   state.assignSource = null;
   state.mode = 'items';
   state.mealCursor = target.mealIndex;
   state.itemCursor = itemRowIndex(state, target);
   pushMessage(state, `${state.dryRun ? 'would assign' : 'assigned'} ${formatTrackedFoodDisplayName(source.entry.record)} to ${formatItemDisplayName(target.item)}`);
+}
+
+function rememberFoodSelectionInMemory(
+  cache: EraFitCache,
+  aliases: string[],
+  selection: Omit<CachedFoodSelection, 'updatedAt'>
+): void {
+  for (const alias of aliases) {
+    const key = normalizeFoodCacheKey(alias);
+    if (!key) {
+      continue;
+    }
+    cache.foods[key] = {
+      ...selection,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+function inferAssignedServingMultiplier(record: TrackedFoodRecord, target: EraFitMealPlanFoodItem): number | undefined {
+  const sourceQuantity = parseNumberLike(record.serving_qtd);
+  const targetQuantity = target.amount != null && target.amount > 0 ? target.amount : 1;
+  if (sourceQuantity == null || sourceQuantity <= 0 || targetQuantity <= 0) {
+    return undefined;
+  }
+  return roundNumber(sourceQuantity / targetQuantity);
+}
+
+function refreshExistingTrackedMatches(cache: EraFitCache, state: InteractiveState): void {
+  const sessionCompleted = new Set(
+    Array.from(state.completedItemKeys).filter(key => !state.existingItemKeys.has(key))
+  );
+  const sessionTracked = Array.from(state.trackedItemByKey.entries())
+    .filter(([key]) => sessionCompleted.has(key));
+  const matched = matchExistingTrackedItems(cache, state.meals, state.trackedEntries);
+  state.completedItemKeys = new Set([...sessionCompleted, ...matched.completed]);
+  state.existingItemKeys = new Set(matched.completed);
+  state.trackedItemByKey = new Map([...sessionTracked, ...matched.trackedByItemKey]);
+  for (const [mealIndex, meal] of state.meals.entries()) {
+    meal.outsideItems = matched.outsideByMeal.get(meal.trackingMeal)?.map((entry, outsideIndex) => ({
+      key: `${meal.trackingMeal}:outside:${entry.id}:${outsideIndex}`,
+      mealIndex,
+      trackingMeal: meal.trackingMeal,
+      entry,
+    })) ?? [];
+  }
 }
 
 function cachedSelectionFromTrackedEntry(entry: TrackedFoodEntry): Omit<CachedFoodSelection, 'updatedAt'> | null {
@@ -884,8 +929,27 @@ function findBestCachedTrackedMatch(
   }
   return candidates.find(entry =>
     !used.has(trackedEntryKey(entry)) &&
-    aliases.some(cached => trackedRecordMatchesCachedSelection(entry.record, cached))
+    aliases.some(cached =>
+      trackedRecordMatchesCachedSelection(entry.record, cached) &&
+      trackedRecordCoversCachedServing(entry.record, cached, item.item)
+    )
   ) ?? null;
+}
+
+function trackedRecordCoversCachedServing(
+  record: TrackedFoodRecord,
+  cached: CachedFoodSelection,
+  item: EraFitMealPlanFoodItem
+): boolean {
+  if (!cached.servingMultiplier) {
+    return true;
+  }
+  const expected = (item.amount != null && item.amount > 0 ? item.amount : 1) * cached.servingMultiplier;
+  const actual = parseNumberLike(record.serving_qtd);
+  if (actual == null) {
+    return false;
+  }
+  return Math.abs(actual - expected) <= Math.max(0.01, expected * 0.02);
 }
 
 function trackedRecordMatchesCachedSelection(record: TrackedFoodRecord, cached: CachedFoodSelection): boolean {
@@ -1073,7 +1137,11 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
   private foodSearchDebounce: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
 
-  constructor(private readonly session: EraFitSession, private readonly view: InteractiveState) {
+  constructor(
+    private readonly session: EraFitSession,
+    private readonly cache: EraFitCache,
+    private readonly view: InteractiveState
+  ) {
     super({
       render() {
         return renderMealPlanFrame(view);
@@ -1114,7 +1182,7 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
         this.cancelAssignMode();
       } else if (action === 'space') {
         if (this.view.mode === 'assign') {
-          this.submitCurrentAssign();
+          this.assignCurrentOutside();
         } else {
           this.submitCurrentToggle();
         }
@@ -1128,13 +1196,13 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
       } else if (key === 'q') {
         this.submitAction({ type: 'done' });
       } else if (key === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
-        this.submitAction({
-          type: 'start-assign',
-          mealIndex: this.view.mealCursor,
-          rowIndex: this.view.itemCursor,
-        });
+        const row = this.currentRow();
+        if (row?.type === 'outside') {
+          startAssignMode(this.view, row.item);
+          this.repaint();
+        }
       } else if (key === 'a' && this.view.mode === 'assign') {
-        this.submitCurrentAssign();
+        this.assignCurrentOutside();
       } else if (key === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
         this.submitAction({
           type: 'open-food-search',
@@ -1337,12 +1405,13 @@ class MealPlanChecklistPrompt extends Prompt<MealPlanPromptAction> {
     });
   }
 
-  private submitCurrentAssign(): void {
-    this.submitAction({
-      type: 'assign-outside',
-      mealIndex: this.view.mealCursor,
-      rowIndex: this.view.itemCursor,
-    });
+  private assignCurrentOutside(): void {
+    const row = this.currentRow();
+    if (row?.type !== 'plan' || !this.view.assignSource) {
+      return;
+    }
+    assignOutsideTrackedFood(this.cache, this.view, this.view.assignSource, row.item);
+    this.repaint();
   }
 
   private submitCurrentFoodSearch(): void {

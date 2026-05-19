@@ -176,24 +176,25 @@ export async function resolveTrackFood(
 ): Promise<TrackResolutionResult> {
   const cached = options.useCache && !item.explicitFoodId ? cache.foods[normalizeFoodCacheKey(item.query)] : null;
   if (cached) {
+    const cachedItem = applyCachedServingMultiplier(item, cached);
     if (cached.servingType === 'saved') {
       const saved = await findSavedFoodFromCache(session, cached);
       if (saved) {
         return {
           status: 'resolved',
-          food: buildSavedResolvedTrackFood(item, saved, time),
+          food: buildSavedResolvedTrackFood(cachedItem, saved, time),
         };
       }
     } else {
       const food = await fetchEraFitFatSecretFood(session, cached.foodId);
-      const requestedServing = item.unit ? resolveAutoServingChoice(food, item) : null;
-      const serving = requestedServing ?? (!item.unit ? servingFromCache(food, cached) : null);
+      const requestedServing = cachedItem.unit ? resolveAutoServingChoice(food, cachedItem) : null;
+      const serving = requestedServing ?? (!cachedItem.unit ? servingFromCache(food, cached) : null);
       if (serving) {
-        const quantity = defaultQuantityForServing(item, serving, food, item.amount);
+        const quantity = defaultQuantityForServing(cachedItem, serving, food, cachedItem.amount);
         return {
           status: 'resolved',
           food: {
-            input: item,
+            input: cachedItem,
             food,
             serving,
             quantity,
@@ -214,6 +215,16 @@ export async function resolveTrackFood(
     return { status: food };
   }
   return finishResolvedTrackFood(cache, item, time, options, food);
+}
+
+function applyCachedServingMultiplier(item: ParsedTrackItem, cached: CachedFoodSelection): ParsedTrackItem {
+  if (!cached.servingMultiplier) {
+    return item;
+  }
+  return {
+    ...item,
+    amount: item.amount * cached.servingMultiplier,
+  };
 }
 
 export async function resolveTrackFoodFromSearchChoice(

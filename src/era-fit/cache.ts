@@ -27,6 +27,7 @@ const CachedFoodSelectionSchema = z.object({
   savedId: z.string().optional(),
   customFoodId: z.string().optional(),
   servingQuantity: z.number().optional(),
+  servingMultiplier: z.number().positive().optional(),
   updatedAt: z.string(),
 });
 
