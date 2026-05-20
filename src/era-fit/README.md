@@ -22,7 +22,7 @@ The top summary shows two aligned macro rows:
 - `left:` is the remaining daily target after subtracting all matched/logged foods.
 - `target:` is the day target from the meal plan.
 
-Each meal title shows remaining macros for that meal: the meal-plan section target minus checked plan rows and green outside-plan rows already logged or added to that meal. Daily and meal remaining values use the same colors: green when within 5% of the target, yellow when still under, and red when over. `C` means net carbs everywhere in this mode.
+Each meal title shows remaining macros for that meal: the meal-plan section target minus all foods currently tracked in that meal. Daily and meal remaining values use the same colors: green when within 5% of the target, yellow when still under, and red when over. `C` means net carbs everywhere in this mode.
 
 The mode is meant to be fast:
 
@@ -69,7 +69,7 @@ Item mode:
 
 Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
 
-Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros until you press `O` again or take any other action.
+Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, and the meal title switches from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
 Search mode:
 
