@@ -1,4 +1,4 @@
-import { emitKeypressEvents, type Key } from 'node:readline';
+import { createInterface, emitKeypressEvents, type Interface, type Key } from 'node:readline';
 
 import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
@@ -61,7 +61,9 @@ const EXPAND_COLLAPSED = '⊞';
 const EXPAND_EXPANDED = '⊟';
 const ITEM_ROW_PREFIX_WIDTH = visibleLength(`  > ${EXPAND_COLLAPSED} ${CHECKBOX_EMPTY} `);
 const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
+const KEYPRESS_ESCAPE_TIMEOUT_MS = 25;
 let keypressEventsEnabled = false;
+let keypressInterface: Interface | null = null;
 
 interface InteractiveMealPlanOptions {
   session: EraFitSession;
@@ -137,12 +139,19 @@ interface InteractiveState {
   foodSearch: FoodSearchState | null;
   addFood: AddFoodState | null;
   expandedItemKey: string | null;
+  renderCache: InteractiveRenderCache;
   messages: string[];
 }
 
 interface IngredientLineLayout {
   labelWidth: number;
   macroWidths: MacroColumnWidths;
+}
+
+interface InteractiveRenderCache {
+  ingredientLayout: IngredientLineLayout | null;
+  trackedComponents: Map<string, EraFitMealPlanFoodItem[]>;
+  trackedMacroTotals: Map<string, EraFitMealPlanFoodItem>;
 }
 
 type MealPlanPromptAction =
@@ -243,8 +252,21 @@ function createInteractiveState(
     foodSearch: null,
     addFood: null,
     expandedItemKey: null,
+    renderCache: createRenderCache(),
     messages: [],
   };
+}
+
+function createRenderCache(): InteractiveRenderCache {
+  return {
+    ingredientLayout: null,
+    trackedComponents: new Map(),
+    trackedMacroTotals: new Map(),
+  };
+}
+
+function invalidateRenderCache(state: InteractiveState): void {
+  state.renderCache = createRenderCache();
 }
 
 function resolveTrackingMeal(cache: EraFitCache, meal: EraFitMealPlanMeal): EraFitMealKey {
@@ -263,6 +285,7 @@ async function handleMealPlanAction(
   action: MealPlanPromptAction
 ): Promise<void> {
   state.expandedItemKey = null;
+  invalidateRenderCache(state);
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
     startToggleItemsTask(session, cache, dateId, state, meal.items);
@@ -377,6 +400,7 @@ async function promptServingMultiplier(state: InteractiveState, item: MealPlanIt
   } else {
     state.multipliers.set(item.key, multiplier);
   }
+  invalidateRenderCache(state);
   pushMessage(state, `${formatItemDisplayName(item.item)} multiplier set to ${formatNumber(multiplier)}x`);
   state.mode = 'items';
 }
@@ -536,6 +560,7 @@ async function saveResolvedMealItems(
       state.trackedEntries.push(trackedEntry);
     }
   }
+  invalidateRenderCache(state);
   const label = resolved.length === 1
     ? formatItemDisplayName(resolved[0].item.item)
     : `${resolved.length} items`;
@@ -694,6 +719,7 @@ async function saveAddedFoodToMeal(
   }
   state.trackedEntries.push(entry);
   refreshExistingTrackedMatches(cache, state);
+  invalidateRenderCache(state);
   state.mode = 'add';
   state.mealCursor = mealIndex;
   pushMessage(state, `${state.dryRun ? 'would add' : 'added'} ${formatTrackedFoodDisplayName(entry.record)} to ${meal.meal.meal}`);
@@ -729,6 +755,7 @@ async function uncheckMealItems(
     const removed = new Set(tracked.map(trackedEntryKey));
     state.trackedEntries = state.trackedEntries.filter(entry => !removed.has(trackedEntryKey(entry)));
   }
+  invalidateRenderCache(state);
   const label = checked.length === 1
     ? formatItemDisplayName(checked[0].item)
     : `${checked.length} items`;
@@ -918,6 +945,7 @@ function assignOutsideTrackedFood(
     rememberFoodSelectionInMemory(cache, aliases, assignedSelection);
   }
   refreshExistingTrackedMatches(cache, state);
+  invalidateRenderCache(state);
   state.assignSource = null;
   state.mode = 'items';
   state.mealCursor = target.mealIndex;
@@ -969,6 +997,7 @@ function refreshExistingTrackedMatches(cache: EraFitCache, state: InteractiveSta
       entry,
     })) ?? [];
   }
+  invalidateRenderCache(state);
 }
 
 function cachedSelectionFromTrackedEntry(entry: TrackedFoodEntry): Omit<CachedFoodSelection, 'updatedAt'> | null {
@@ -1373,10 +1402,7 @@ class MealPlanChecklistPrompt {
       this.resolvePrompt = resolve;
       this.disposed = false;
       this.output.write('\x1b[?25l');
-      if (!keypressEventsEnabled) {
-        emitKeypressEvents(this.input);
-        keypressEventsEnabled = true;
-      }
+      ensureKeypressEvents(this.input);
       this.input.resume();
       if (this.input.isTTY) {
         this.input.setRawMode(true);
@@ -1413,7 +1439,7 @@ class MealPlanChecklistPrompt {
     if (this.disposed) {
       return;
     }
-    clearInteractiveScreen();
+    clearInteractiveScreen(this.output);
     this.output.write(renderMealPlanFrame(this.view));
   }
 
@@ -1911,6 +1937,18 @@ class MealPlanChecklistPrompt {
   }
 }
 
+function ensureKeypressEvents(input: NodeJS.ReadableStream): void {
+  if (keypressEventsEnabled) {
+    return;
+  }
+  keypressInterface = createInterface({
+    input,
+    escapeCodeTimeout: KEYPRESS_ESCAPE_TIMEOUT_MS,
+  });
+  emitKeypressEvents(input, keypressInterface);
+  keypressEventsEnabled = true;
+}
+
 function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
@@ -1955,7 +1993,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
 }
 
 function formatMacroBalance(state: InteractiveState): string {
-  const logged = sumTrackedMacros(state.trackedEntries);
+  const logged = sumTrackedMacros(state, state.trackedEntries);
   return [
     formatMacroBalanceValue(targetCalories(state.day), logged.calories, 'calories'),
     formatMacroBalanceValue(state.day.targets.protein, logged.protein, 'protein'),
@@ -1968,9 +2006,9 @@ function targetCalories(day: EraFitMealPlanDay): number | null {
   return day.targets.goal_calories ?? day.targets.calories;
 }
 
-function sumTrackedMacros(entries: TrackedFoodEntry[]): EraFitMacroTotals {
+function sumTrackedMacros(state: InteractiveState, entries: TrackedFoodEntry[]): EraFitMacroTotals {
   return entries.reduce<EraFitMacroTotals>((sum, entry) => {
-    const macros = trackedMacroTotals(entry.record);
+    const macros = trackedEntryMacroTotals(state, entry);
     return {
       calories: (sum.calories ?? 0) + (macros.calories ?? 0),
       protein: (sum.protein ?? 0) + (macros.protein ?? 0),
@@ -1991,10 +2029,10 @@ function mealRemainingMacros(state: InteractiveState, mealIndex: number): EraFit
       continue;
     }
     const tracked = state.trackedItemByKey.get(item.key);
-    addMacros(consumed, tracked ? trackedMacroTotals(tracked.record) : scaledMealPlanItemMacros(state, item));
+    addMacros(consumed, tracked ? trackedEntryMacroTotals(state, tracked) : scaledMealPlanItemMacros(state, item));
   }
   for (const item of meal.outsideItems) {
-    addMacros(consumed, trackedMacroTotals(item.entry.record));
+    addMacros(consumed, trackedEntryMacroTotals(state, item.entry));
   }
   return subtractMacros(meal.meal.macros, consumed);
 }
@@ -2140,7 +2178,7 @@ function renderOutsidePlanItemLine(
   const styledLabel = chalk.green(label);
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
   const row = { type: 'outside' as const, item };
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${chalk.green(OUTSIDE_PLAN_CHECKED)} ${paddedLabel}  ${chalk.green(formatMacroColumns(trackedMacroTotals(item.entry.record), layout.macroWidths))}`;
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${chalk.green(OUTSIDE_PLAN_CHECKED)} ${paddedLabel}  ${chalk.green(formatMacroColumns(trackedEntryMacroTotals(state, item.entry), layout.macroWidths))}`;
   return line;
 }
 
@@ -2153,15 +2191,18 @@ function renderExpandedComponentLines(components: EraFitMealPlanFoodItem[], layo
 }
 
 function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout {
+  if (state.renderCache.ingredientLayout) {
+    return state.renderCache.ingredientLayout;
+  }
   const items = state.meals.flatMap(meal => meal.items);
   const outsideItems = state.meals.flatMap(meal => meal.outsideItems);
   const components = [
     ...items.flatMap(item => mealPlanItemComponents(state, item)),
-    ...outsideItems.flatMap(item => trackedFoodComponents(item.entry.record)),
+    ...outsideItems.flatMap(item => trackedEntryComponents(state, item.entry)),
   ];
   const macroWidths = getMacroColumnWidths([
     ...items.map(item => item.item),
-    ...outsideItems.map(item => trackedMacroTotals(item.entry.record)),
+    ...outsideItems.map(item => trackedEntryMacroTotals(state, item.entry)),
     ...components,
   ]);
   const naturalLabelWidth = [
@@ -2174,10 +2215,11 @@ function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout 
   const availableLabelWidth = process.stdout.columns
     ? Math.max(18, process.stdout.columns - ITEM_ROW_PREFIX_WIDTH - 2 - macroWidth - trackedWidth)
     : naturalLabelWidth;
-  return {
+  state.renderCache.ingredientLayout = {
     labelWidth: Math.min(naturalLabelWidth, availableLabelWidth),
     macroWidths,
   };
+  return state.renderCache.ingredientLayout;
 }
 
 function formatExpansionMarker(state: InteractiveState, row: MealPlanRowRef): string {
@@ -2192,7 +2234,7 @@ function formatExpansionMarker(state: InteractiveState, row: MealPlanRowRef): st
 function rowComponents(state: InteractiveState, row: MealPlanRowRef): EraFitMealPlanFoodItem[] {
   return row.type === 'plan'
     ? mealPlanItemComponents(state, row.item)
-    : trackedFoodComponents(row.item.entry.record);
+    : trackedEntryComponents(state, row.item.entry);
 }
 
 function rowExpansionKey(row: MealPlanRowRef): string {
@@ -2201,8 +2243,19 @@ function rowExpansionKey(row: MealPlanRowRef): string {
 
 function mealPlanItemComponents(state: InteractiveState, item: MealPlanItemRef): EraFitMealPlanFoodItem[] {
   const tracked = state.trackedItemByKey.get(item.key);
-  const trackedComponents = tracked ? trackedFoodComponents(tracked.record) : [];
+  const trackedComponents = tracked ? trackedEntryComponents(state, tracked) : [];
   return trackedComponents.length > 1 ? trackedComponents : item.item.components ?? trackedComponents;
+}
+
+function trackedEntryComponents(state: InteractiveState, entry: TrackedFoodEntry): EraFitMealPlanFoodItem[] {
+  const key = trackedEntryKey(entry);
+  const cached = state.renderCache.trackedComponents.get(key);
+  if (cached) {
+    return cached;
+  }
+  const components = trackedFoodComponents(entry.record);
+  state.renderCache.trackedComponents.set(key, components);
+  return components;
 }
 
 function trackedFoodComponents(record: TrackedFoodRecord): EraFitMealPlanFoodItem[] {
@@ -2215,6 +2268,17 @@ function trackedFoodComponents(record: TrackedFoodRecord): EraFitMealPlanFoodIte
   return records
     .map(component => trackedFoodComponent(component, multiplier))
     .filter((component): component is EraFitMealPlanFoodItem => component != null);
+}
+
+function trackedEntryMacroTotals(state: InteractiveState, entry: TrackedFoodEntry): EraFitMealPlanFoodItem {
+  const key = trackedEntryKey(entry);
+  const cached = state.renderCache.trackedMacroTotals.get(key);
+  if (cached) {
+    return cached;
+  }
+  const totals = trackedMacroTotals(entry.record);
+  state.renderCache.trackedMacroTotals.set(key, totals);
+  return totals;
 }
 
 function trackedFoodComponent(value: unknown, multiplier: number): EraFitMealPlanFoodItem | null {
@@ -2347,8 +2411,8 @@ function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
   return item.description?.trim() || item.name;
 }
 
-function clearInteractiveScreen(): void {
-  process.stdout.write('\x1b[2J\x1b[H');
+function clearInteractiveScreen(output: NodeJS.WritableStream = process.stdout): void {
+  output.write('\x1b[H\x1b[J');
 }
 
 function pushMessage(state: InteractiveState, message: string): void {
