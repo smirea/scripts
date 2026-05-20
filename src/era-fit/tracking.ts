@@ -23,6 +23,7 @@ import {
   type EraFitMealKey,
   type EraFitSession,
 } from './core';
+import { formatMacroNumber } from './macroFormat';
 import { findSavedFoodFromCache, savedFoodSourceLabel, searchSavedFoods, type SavedFoodSearchItem } from './savedFoods';
 
 const STANDARD_UNITS = ['g', 'oz', 'ml', 'fl_oz'] as const;
@@ -574,7 +575,7 @@ function formatSearchServing(result: FoodSearchChoice): string {
 }
 
 function formatSearchMacro(value: number | null, suffix: string): string {
-  return value == null ? `-${suffix}` : `${formatNumber(roundNumber(value))}${suffix}`;
+  return value == null ? `-${suffix}` : `${formatMacroNumber(value)}${suffix}`;
 }
 
 async function resolveServingChoice(

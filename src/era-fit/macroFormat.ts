@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 
 import { padVisibleStart, visibleLength } from '../utils/tabular';
-import { formatNumber, roundNumber, type EraFitMacroTotals } from './core';
+import { type EraFitMacroTotals } from './core';
 
 export interface MacroColumnWidths {
   calories: number;
@@ -57,5 +57,14 @@ function formatFatMacro(value: EraFitMacroTotals, width: number): string {
 }
 
 function formatNullableNumber(value: number | null): string {
-  return value == null ? '-' : formatNumber(roundNumber(value));
+  return value == null ? '-' : formatMacroNumber(value);
+}
+
+export function formatMacroNumber(value: number): string {
+  if (Math.abs(value) > 0 && Math.abs(value) < 1) {
+    const rounded = Number(value.toFixed(1));
+    return Object.is(rounded, -0) ? '0.0' : rounded.toFixed(1);
+  }
+  const rounded = Math.round(value);
+  return Object.is(rounded, -0) ? '0' : String(rounded);
 }

@@ -27,7 +27,7 @@ import {
   type EraFitMealPlanMeal,
   type EraFitSession,
 } from './core';
-import { formatMacroColumns, formatMacros, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
+import { formatMacroColumns, formatMacroNumber, formatMacros, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
 import {
   deleteTrackedFoods,
   fetchTrackedFoodsForDate,
@@ -2043,16 +2043,10 @@ function formatMacroBalanceValue(target: number | null, current: number | null, 
     return chalk.gray(`${label} unknown`);
   }
   const difference = roundNumber(target - current);
-  const amount = formatMacroBalanceAmount(Math.abs(difference), label);
+  const amount = formatMacroNumber(Math.abs(difference));
   return difference >= 0
     ? chalk.green(`${amount} ${label} left`)
     : chalk.red(`${amount} ${label} over`);
-}
-
-function formatMacroBalanceAmount(value: number, label: string): string {
-  return label === 'calories'
-    ? formatNumber(Math.round(value))
-    : formatNumber(roundNumber(Number(value.toFixed(1))));
 }
 
 function renderAddFoodLines(state: InteractiveState): string[] {
