@@ -539,25 +539,19 @@ async function saveResolvedMealItems(
   state: InteractiveState,
   resolved: Array<{ item: MealPlanItemRef; food: ResolvedTrackFood }>
 ): Promise<void> {
-  let saved: SavedTrackFood[] = [];
-  if (!state.dryRun) {
-    saved = await saveTrackedFoods(session, {
+  const trackedEntries = state.dryRun
+    ? resolved.map(entry => buildDryRunTrackedEntry(dateId, entry.item.trackingMeal, entry.food))
+    : (await saveTrackedFoods(session, {
       dateId,
       meal: resolved[0].item.trackingMeal,
       foods: resolved.map(entry => entry.food),
-    });
-  }
+    })).map(saved => trackedEntryFromSavedFood(resolved[0].item.trackingMeal, saved));
 
   for (const [index, entry] of resolved.entries()) {
     state.completedItemKeys.add(entry.item.key);
     state.existingItemKeys.delete(entry.item.key);
-    const savedFood = saved[index];
-    if (savedFood) {
-      const trackedEntry = {
-        meal: entry.item.trackingMeal,
-        id: savedFood.id,
-        record: savedFood.record,
-      };
+    const trackedEntry = trackedEntries[index];
+    if (trackedEntry) {
       state.trackedItemByKey.set(entry.item.key, trackedEntry);
       state.trackedEntries.push(trackedEntry);
     }
@@ -567,6 +561,27 @@ async function saveResolvedMealItems(
     ? formatItemDisplayName(resolved[0].item.item)
     : `${resolved.length} items`;
   pushMessage(state, `${state.dryRun ? 'would log' : 'logged'} ${label}`);
+}
+
+function trackedEntryFromSavedFood(meal: EraFitMealKey, saved: SavedTrackFood): TrackedFoodEntry {
+  return {
+    meal,
+    id: saved.id,
+    record: saved.record,
+  };
+}
+
+function buildDryRunTrackedEntry(dateId: string, meal: EraFitMealKey, food: ResolvedTrackFood): TrackedFoodEntry {
+  const id = `dry-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return {
+    meal,
+    id,
+    record: {
+      ...food.record,
+      id,
+      meal_tracking_food_log: `${dateId}_${meal}_${id}`,
+    },
+  };
 }
 
 async function logSelectedFoodSearchChoice(
@@ -592,6 +607,7 @@ async function logSelectedFoodSearchChoice(
       useCache: false,
       writeCache: !state.dryRun,
       interactive: false,
+      forceServingPrompt: false,
       aliases: foodCacheAliases(search.item),
       log: message => pushMessage(state, message),
     }
@@ -694,16 +710,7 @@ async function saveAddedFoodToMeal(
   }
   let entry: TrackedFoodEntry;
   if (state.dryRun) {
-    const id = `dry-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    entry = {
-      meal: meal.trackingMeal,
-      id,
-      record: {
-        ...food.record,
-        id,
-        meal_tracking_food_log: `${dateId}_${meal.trackingMeal}_${id}`,
-      },
-    };
+    entry = buildDryRunTrackedEntry(dateId, meal.trackingMeal, food);
   } else {
     const [saved] = await saveTrackedFoods(session, {
       dateId,
@@ -713,11 +720,7 @@ async function saveAddedFoodToMeal(
     if (!saved) {
       return;
     }
-    entry = {
-      meal: meal.trackingMeal,
-      id: saved.id,
-      record: saved.record,
-    };
+    entry = trackedEntryFromSavedFood(meal.trackingMeal, saved);
   }
   state.trackedEntries.push(entry);
   refreshExistingTrackedMatches(cache, state);

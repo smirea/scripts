@@ -120,6 +120,8 @@ export interface TrackResolveOptions {
   useCache: boolean;
   writeCache: boolean;
   interactive?: boolean;
+  forceServingPrompt?: boolean;
+  preferredServingDescription?: string;
   aliases?: string[];
   log?: (message: string) => void;
   lookupStart?: (query: string) => void;
@@ -242,7 +244,12 @@ export async function resolveTrackFoodFromSearchChoice(
   options: TrackResolveOptions
 ): Promise<TrackResolutionResult> {
   const food = await resolveFoodSearchChoice(session, choice);
-  return finishResolvedTrackFood(cache, item, time, options, food);
+  return finishResolvedTrackFood(cache, item, time, {
+    ...options,
+    preferredServingDescription: options.preferredServingDescription ?? (
+      choice.type === 'fatsecret' ? parseSearchServing(choice.food.food_description) : undefined
+    ),
+  }, food);
 }
 
 async function finishResolvedTrackFood(
@@ -266,8 +273,10 @@ async function finishResolvedTrackFood(
     };
   }
   const interactive = options.interactive ?? true;
-  const forceServingPrompt = !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query);
-  const serving = await resolveServingChoice(food, item, forceServingPrompt, interactive);
+  const forceServingPrompt = options.forceServingPrompt ?? (
+    !item.explicitFoodId && !isBarcodeQuery(item.query) && !isExactFoodMatch(food, item.query)
+  );
+  const serving = await resolveServingChoice(food, item, forceServingPrompt, interactive, options.preferredServingDescription);
   if (!serving) {
     return { status: interactive ? 'cancel' : 'needs-selection' };
   }
@@ -588,9 +597,10 @@ async function resolveServingChoice(
   food: EraFitFatSecretFood,
   item: ParsedTrackItem,
   forcePrompt: boolean,
-  interactive: boolean
+  interactive: boolean,
+  preferredServingDescription?: string
 ): Promise<ServingChoice | null> {
-  const auto = resolveAutoServingChoice(food, item);
+  const auto = resolveAutoServingChoice(food, item) ?? resolvePreferredServingChoice(food, preferredServingDescription);
   if (auto && !forcePrompt) {
     return auto;
   }
@@ -613,6 +623,41 @@ async function resolveServingChoice(
     return null;
   }
   return choices[Number(selected)];
+}
+
+function resolvePreferredServingChoice(
+  food: EraFitFatSecretFood,
+  preferredServingDescription: string | undefined
+): ServingChoice | null {
+  const normalized = normalizeServingDescription(preferredServingDescription);
+  if (!normalized) {
+    return null;
+  }
+  const match = Object.values(food.servings).find(serving => {
+    const servingDescription = normalizeServingDescription(serving.serving_description);
+    return servingDescription === normalized ||
+      servingDescription.includes(normalized) ||
+      normalized.includes(servingDescription);
+  });
+  if (!match) {
+    return null;
+  }
+  return {
+    type: 'fatsecret',
+    servingId: match.serving_id,
+    label: match.serving_description,
+    description: match.serving_description,
+  };
+}
+
+function normalizeServingDescription(value: string | undefined): string {
+  return value
+    ?.toLowerCase()
+    .replace(/^per\s+/i, '')
+    .replace(/(\d)\s+(g|oz|ml|tbsp|tsp|cup|cups|serving|servings)\b/g, '$1$2')
+    .replace(/[^a-z0-9%.]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ') ?? '';
 }
 
 async function promptForQuantity(
