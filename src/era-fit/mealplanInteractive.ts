@@ -1877,7 +1877,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
     const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
-    const mealLine = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')} ${formatMacros(meal.meal.macros)}`;
+    const mealLine = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')} ${formatMacros(mealRemainingMacros(state, mealIndex))}`;
     lines.push(activeMeal ? chalk.cyan(mealLine) : mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
       const activeItem = (state.mode === 'items' || state.mode === 'assign') && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
@@ -1929,6 +1929,64 @@ function sumTrackedMacros(entries: TrackedFoodEntry[]): EraFitMacroTotals {
       fat: (sum.fat ?? 0) + (macros.fat ?? 0),
     };
   }, { calories: 0, protein: 0, net_carbs: 0, fat: 0 });
+}
+
+function mealRemainingMacros(state: InteractiveState, mealIndex: number): EraFitMacroTotals {
+  const meal = state.meals[mealIndex];
+  if (!meal) {
+    return { calories: null, protein: null, net_carbs: null, fat: null };
+  }
+  const consumed = { calories: 0, protein: 0, net_carbs: 0, fat: 0 } satisfies EraFitMacroTotals;
+  for (const item of meal.items) {
+    if (!state.completedItemKeys.has(item.key)) {
+      continue;
+    }
+    const tracked = state.trackedItemByKey.get(item.key);
+    addMacros(consumed, tracked ? trackedMacroTotals(tracked.record) : scaledMealPlanItemMacros(state, item));
+  }
+  for (const item of meal.outsideItems) {
+    addMacros(consumed, trackedMacroTotals(item.entry.record));
+  }
+  return subtractMacros(meal.meal.macros, consumed);
+}
+
+function scaledMealPlanItemMacros(state: InteractiveState, item: MealPlanItemRef): EraFitMacroTotals {
+  const multiplier = state.multipliers.get(item.key) ?? 1;
+  return {
+    calories: scaleMacroValue(item.item.calories, multiplier),
+    protein: scaleMacroValue(item.item.protein, multiplier),
+    net_carbs: scaleMacroValue(item.item.net_carbs, multiplier),
+    fat: scaleMacroValue(item.item.fat, multiplier),
+  };
+}
+
+function scaleMacroValue(value: number | null, multiplier: number): number | null {
+  return value == null ? null : roundNumber(value * multiplier);
+}
+
+function addMacros(target: EraFitMacroTotals, value: EraFitMacroTotals): void {
+  target.calories = (target.calories ?? 0) + (value.calories ?? 0);
+  target.protein = (target.protein ?? 0) + (value.protein ?? 0);
+  target.net_carbs = (target.net_carbs ?? 0) + (value.net_carbs ?? 0);
+  target.fat = (target.fat ?? 0) + (value.fat ?? 0);
+}
+
+function subtractMacros(target: EraFitMacroTotals, consumed: EraFitMacroTotals): EraFitMacroTotals {
+  return {
+    calories: subtractMacroValue(target.calories, consumed.calories),
+    protein: subtractMacroValue(target.protein, consumed.protein),
+    net_carbs: subtractMacroValue(target.net_carbs, consumed.net_carbs),
+    fat: subtractMacroValue(target.fat, consumed.fat),
+  };
+}
+
+function subtractMacroValue(target: number | null, consumed: number | null): number | null {
+  return target == null ? null : roundRemainingMacroValue(target - (consumed ?? 0));
+}
+
+function roundRemainingMacroValue(value: number): number {
+  const rounded = Number(value.toFixed(1));
+  return Object.is(rounded, -0) ? 0 : rounded;
 }
 
 function formatMacroBalanceValue(target: number | null, current: number | null, label: string): string {
