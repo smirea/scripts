@@ -17,7 +17,12 @@ Local Bun CLI for reading and writing Era Fit nutrition data.
 
 `era-fit mealplan -t` fetches today's suggested meal plan, fetches foods already tracked for today, and renders a terminal checklist grouped by meal.
 
-The top row shows remaining daily macros against the day target. Each meal title shows remaining macros for that meal: the meal-plan section target minus checked plan rows and green outside-plan rows already logged or added to that meal. `C` means net carbs everywhere in this mode.
+The top summary shows two aligned macro rows:
+
+- `left:` is the remaining daily target after subtracting all matched/logged foods.
+- `target:` is the day target from the meal plan.
+
+Each meal title shows remaining macros for that meal: the meal-plan section target minus checked plan rows and green outside-plan rows already logged or added to that meal. Daily and meal remaining values use the same colors: green when within 5% of the target, yellow when still under, and red when over. `C` means net carbs everywhere in this mode.
 
 The mode is meant to be fast:
 
@@ -38,7 +43,7 @@ The mode is meant to be fast:
 - `◐`, `◓`, `◑`, `◒` are loading states while a log/unlog/search request is pending.
 - `tracked` next to a checked item means the item was already present in Era Fit when the screen loaded or after cache rematching.
 
-Checked meal-plan rows are crossed out. Outside-plan rows stay green so they are visually distinct from planned items.
+Checked meal-plan rows are crossed out when the logged food matches the plan row. Replacement rows show the actual logged food, serving, and macros in green so the replacement stays visible in the meal list. Outside-plan rows stay green so they are visually distinct from planned items.
 
 ## Navigation
 
@@ -69,9 +74,11 @@ Search mode:
 - Results render below the meal-plan table; the table stays visible.
 - Typing updates the query and reloads results after a short debounce.
 - `↑` / `↓` moves through search results.
-- `Enter` logs the selected result for the planned item.
+- `Enter` selects the highlighted result, then prompts for serving and amount.
 - `Esc` returns to item mode.
 - `Ctrl-C` exits.
+
+After a replacement is logged, the original planned row stays checked but renders as the actual logged food with its serving and macros. For example, replacing `1 cup Greek Yogurt Plain` with a nonfat yogurt shows the nonfat yogurt row instead of hiding the replacement as an outside-plan item.
 
 Add mode:
 
@@ -81,7 +88,7 @@ Add mode:
 - `Search` queries global Era Fit foods. `Faves`, `Meals`, and `Food` show saved favorite foods, saved meals, and custom foods.
 - Typing searches or filters the active tab.
 - `↑` / `↓` moves through results.
-- `Enter` adds the selected result to the current meal.
+- `Enter` selects the highlighted result, prompts for serving and amount when needed, and adds it to the current meal.
 - `Esc` returns to meal mode.
 - `Ctrl-C` exits.
 
@@ -122,6 +129,7 @@ Normal check-off flow:
 - If a planned item has a cache entry, the cached food/serving is used directly.
 - If there is no cache hit, checking an item opens search so you can choose the correct Era Fit food.
 - Successful selections write all useful aliases for the planned item back to `cache.json`.
+- Replacement selections also write aliases for the planned item, so future runs can match the replacement back to the plan row.
 
 Assignment flow:
 
@@ -140,7 +148,7 @@ Unchecking a checked item deletes the matching Era Fit tracked food when the ite
 
 ## Alternatives and Serving Multipliers
 
-`S` is for choosing a different food than the plan text. It searches saved/custom foods and standard Era Fit food results; saved matches are shown at the top and marked with `★` when available.
+`S` is for choosing a different food than the plan text. It searches saved/custom foods and standard Era Fit food results; saved matches are shown at the top and marked with `★` when available. After selecting a result, choose the serving and enter the amount. The checked row then displays the actual logged food, serving, and macros.
 
 `R` sets a multiplier before logging or searching. Use it for cases like half a planned serving or a larger portion. The multiplier affects the amount sent to search/logging and is shown next to the item label until changed back to `1`.
 
