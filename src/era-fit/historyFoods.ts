@@ -27,7 +27,7 @@ export function searchPastTrackedFoods(foods: PastFoodSearchItem[], query: strin
     .filter(entry => !normalizedQuery || entry.score > 0)
     .sort((a, b) => b.score - a.score || b.food.sortKey.localeCompare(a.food.sortKey) || a.food.name.localeCompare(b.food.name))
     .map(entry => entry.food)
-    .slice(0, 10);
+    .slice(0, 20);
 }
 
 function parsePastFood(key: string, raw: Record<string, unknown> | null): PastFoodSearchItem | null {
