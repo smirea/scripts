@@ -342,6 +342,7 @@ export interface EraFitMealPlanFoodItem {
   protein: number | null;
   net_carbs: number | null;
   fat: number | null;
+  components?: EraFitMealPlanFoodItem[];
 }
 
 export interface EraFitShoppingListItem {
@@ -1387,6 +1388,7 @@ function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
     parseNumberLike(raw.amount_g) != null
       ? 'g'
       : parseString(raw.unit) ?? parseString(raw.serving_unit) ?? parseString(raw.metric_serving_unit);
+  const components = parseMealPlanFoodComponents(raw);
   return {
     name,
     description,
@@ -1397,7 +1399,33 @@ function parseMealPlanFoodItem(value: unknown): EraFitMealPlanFoodItem | null {
     protein: parseNumberLike(raw.protein_g) ?? parseNumberLike(raw.protein),
     net_carbs: parseNetCarbsValue(raw.net_carbs, parseNumberLike(raw.carbs_g) ?? raw.carbs),
     fat: parseNumberLike(raw.fat_g) ?? parseNumberLike(raw.fat),
+    ...(components.length > 0 ? { components } : {}),
   };
+}
+
+function parseMealPlanFoodComponents(raw: Record<string, unknown>): EraFitMealPlanFoodItem[] {
+  for (const value of [raw.foods, raw.ingredients, raw.components, raw.recipe_items]) {
+    const components = mealPlanFoodComponentValues(value)
+      .map(component => parseMealPlanFoodItem(component))
+      .filter((component): component is EraFitMealPlanFoodItem => component != null);
+    if (components.length > 0) {
+      return components;
+    }
+  }
+  return [];
+}
+
+function mealPlanFoodComponentValues(value: unknown): unknown[] {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  const record = asRecord(value);
+  if (!record) {
+    return [];
+  }
+  return Object.entries(record)
+    .filter(([key]) => key !== 'meal_macros_sum' && key !== 'total_meal_macros' && key !== 'meal_recipe' && key !== 'total')
+    .map(([, component]) => component);
 }
 
 function parseFoodNameFromDescription(value: string | null): string | null {

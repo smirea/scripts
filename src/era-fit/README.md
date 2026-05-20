@@ -33,6 +33,8 @@ The mode is meant to be fast:
 - `×` means a meal-plan item is checked or already matched to an Era Fit log.
 - `✔` means a green item was logged in Era Fit but is outside the meal plan.
 - `↣` marks the assign target while assigning an outside-plan item.
+- `⊞` means the row has multiple ingredients, such as a saved meal or recipe.
+- `⊟` means the ingredient breakdown is expanded.
 - `◐`, `◓`, `◑`, `◒` are loading states while a log/unlog/search request is pending.
 - `tracked` next to a checked item means the item was already present in Era Fit when the screen loaded or after cache rematching.
 
@@ -55,8 +57,11 @@ Item mode:
 - `␣` toggles the selected meal-plan item.
 - `R` sets a serving multiplier for the selected meal-plan item.
 - `S` opens alternative search for the selected meal-plan item.
+- `E` expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
 - `A` starts assign mode when the selected row is a green outside-plan item.
 - `q` exits.
+
+Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
 
 Search mode:
 

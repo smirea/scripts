@@ -57,6 +57,9 @@ const CHECKBOX_CHECKED = '×';
 const CHECKBOX_PARTIAL = '⊝';
 const OUTSIDE_PLAN_CHECKED = '✔';
 const ASSIGN_POINTER = '↣';
+const EXPAND_COLLAPSED = '⊞';
+const EXPAND_EXPANDED = '⊟';
+const ITEM_ROW_PREFIX_WIDTH = visibleLength(`  > ${EXPAND_COLLAPSED} ${CHECKBOX_EMPTY} `);
 const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
 let keypressEventsEnabled = false;
 
@@ -133,6 +136,7 @@ interface InteractiveState {
   pendingSearchItems: MealPlanItemRef[];
   foodSearch: FoodSearchState | null;
   addFood: AddFoodState | null;
+  expandedItemKey: string | null;
   messages: string[];
 }
 
@@ -238,6 +242,7 @@ function createInteractiveState(
     pendingSearchItems: [],
     foodSearch: null,
     addFood: null,
+    expandedItemKey: null,
     messages: [],
   };
 }
@@ -257,6 +262,7 @@ async function handleMealPlanAction(
   state: InteractiveState,
   action: MealPlanPromptAction
 ): Promise<void> {
+  state.expandedItemKey = null;
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
     startToggleItemsTask(session, cache, dateId, state, meal.items);
@@ -1341,6 +1347,10 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
 class MealPlanChecklistPrompt {
   private readonly input = process.stdin;
   private readonly output = process.stdout;
@@ -1433,42 +1443,55 @@ class MealPlanChecklistPrompt {
 
   private handleKeypress(key: string | undefined, info: Key): void {
     if (this.view.mode === 'food-search') {
+      this.clearExpandedItem();
       this.handleFoodSearchKey(key, info);
       return;
     }
     if (this.view.mode === 'add') {
+      this.clearExpandedItem();
       this.handleAddFoodKey(key, info);
       return;
     }
+    const command = key?.toLowerCase();
+    if (command === 'e' && this.view.mode === 'items' && this.toggleCurrentExpansion()) {
+      return;
+    }
     if (info.ctrl && info.name === 'c') {
+      this.clearExpandedItem();
       this.submitAction({ type: 'done' });
       return;
     }
     if (info.name === 'up' || info.name === 'down') {
+      this.clearExpandedItem();
       this.moveCursor(info.name === 'up' ? -1 : 1);
       this.repaint();
       return;
     }
     if (info.name === 'right' && this.view.mode === 'meals') {
+      this.clearExpandedItem();
       this.view.mode = 'items';
       this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
       this.repaint();
       return;
     }
     if (info.name === 'left' && this.view.mode === 'items') {
+      this.clearExpandedItem();
       this.view.mode = 'meals';
       this.repaint();
       return;
     }
     if (info.name === 'left' && this.view.mode === 'assign') {
+      this.clearExpandedItem();
       this.cancelAssignMode();
       return;
     }
     if (info.name === 'escape') {
+      this.clearExpandedItem();
       this.goBack();
       return;
     }
     if (info.name === 'space' || key === ' ') {
+      this.clearExpandedItem();
       if (this.view.mode === 'assign') {
         this.assignCurrentOutside();
       } else {
@@ -1477,26 +1500,31 @@ class MealPlanChecklistPrompt {
       return;
     }
 
-    const command = key?.toLowerCase();
     if (command === 'q') {
+      this.clearExpandedItem();
       this.submitAction({ type: 'done' });
     } else if (command === 'a' && this.view.mode === 'meals') {
+      this.clearExpandedItem();
       this.openCurrentAddMode();
     } else if (command === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
+      this.clearExpandedItem();
       const row = this.currentRow();
       if (row?.type === 'outside') {
         startAssignMode(this.view, row.item);
         this.repaint();
       }
     } else if (command === 'a' && this.view.mode === 'assign') {
+      this.clearExpandedItem();
       this.assignCurrentOutside();
     } else if (command === 's' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
+      this.clearExpandedItem();
       this.submitAction({
         type: 'open-food-search',
         mealIndex: this.view.mealCursor,
         rowIndex: this.view.itemCursor,
       });
     } else if (command === 'r' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
+      this.clearExpandedItem();
       this.submitAction({
         type: 'set-serving',
         mealIndex: this.view.mealCursor,
@@ -1653,6 +1681,21 @@ class MealPlanChecklistPrompt {
       pushMessage(this.view, error instanceof Error ? error.message : String(error));
     }
     this.repaint();
+  }
+
+  private toggleCurrentExpansion(): boolean {
+    const row = this.currentRow();
+    if (!row || rowComponents(this.view, row).length <= 1) {
+      return false;
+    }
+    const key = rowExpansionKey(row);
+    this.view.expandedItemKey = this.view.expandedItemKey === key ? null : key;
+    this.repaint();
+    return true;
+  }
+
+  private clearExpandedItem(): void {
+    this.view.expandedItemKey = null;
   }
 
   private openCurrentAddMode(): void {
@@ -1882,11 +1925,17 @@ function renderMealPlanFrame(state: InteractiveState): string {
     for (const [itemIndex, item] of meal.items.entries()) {
       const activeItem = (state.mode === 'items' || state.mode === 'assign') && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
       lines.push(renderItemLine(state, item, activeItem, ingredientLayout));
+      if (state.expandedItemKey === rowExpansionKey({ type: 'plan', item })) {
+        lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'plan', item }), ingredientLayout));
+      }
     }
     for (const [outsideIndex, item] of meal.outsideItems.entries()) {
       const rowIndex = meal.items.length + outsideIndex;
       const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === rowIndex;
       lines.push(renderOutsidePlanItemLine(state, item, activeItem, ingredientLayout));
+      if (state.expandedItemKey === rowExpansionKey({ type: 'outside', item })) {
+        lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'outside', item }), ingredientLayout));
+      }
     }
   }
   lines.push('');
@@ -2082,7 +2131,8 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
   const styledLabel = completed ? chalk.strikethrough(chalk.gray(label)) : label;
   const existingText = existing ? chalk.gray(' tracked') : '';
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(item.item, layout.macroWidths)}${existingText}`;
+  const row = { type: 'plan' as const, item };
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(item.item, layout.macroWidths)}${existingText}`;
   return active ? chalk.cyan(line) : line;
 }
 
@@ -2095,30 +2145,124 @@ function renderOutsidePlanItemLine(
   const label = truncateVisibleEnd(formatOutsidePlanItemLabel(item), layout.labelWidth);
   const styledLabel = chalk.green(label);
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${chalk.green(OUTSIDE_PLAN_CHECKED)} ${paddedLabel}  ${chalk.green(formatMacroColumns(trackedMacroTotals(item.entry.record), layout.macroWidths))}`;
+  const row = { type: 'outside' as const, item };
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${chalk.green(OUTSIDE_PLAN_CHECKED)} ${paddedLabel}  ${chalk.green(formatMacroColumns(trackedMacroTotals(item.entry.record), layout.macroWidths))}`;
   return line;
+}
+
+function renderExpandedComponentLines(components: EraFitMealPlanFoodItem[], layout: IngredientLineLayout): string[] {
+  return components.map(component => {
+    const label = truncateVisibleEnd(formatComponentItemLabel(component), layout.labelWidth);
+    const paddedLabel = padVisibleEnd(chalk.gray(label), layout.labelWidth);
+    return `${' '.repeat(ITEM_ROW_PREFIX_WIDTH)}${paddedLabel}  ${formatMacroColumns(component, layout.macroWidths)}`;
+  });
 }
 
 function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout {
   const items = state.meals.flatMap(meal => meal.items);
   const outsideItems = state.meals.flatMap(meal => meal.outsideItems);
+  const components = [
+    ...items.flatMap(item => mealPlanItemComponents(state, item)),
+    ...outsideItems.flatMap(item => trackedFoodComponents(item.entry.record)),
+  ];
   const macroWidths = getMacroColumnWidths([
     ...items.map(item => item.item),
     ...outsideItems.map(item => trackedMacroTotals(item.entry.record)),
+    ...components,
   ]);
   const naturalLabelWidth = [
     ...items.map(item => formatInteractiveItemLabel(state, item)),
     ...outsideItems.map(item => formatOutsidePlanItemLabel(item)),
+    ...components.map(component => formatComponentItemLabel(component)),
   ].reduce((width, label) => Math.max(width, visibleLength(label)), 0);
   const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
   const trackedWidth = items.some(item => state.existingItemKeys.has(item.key)) ? visibleLength(' tracked') : 0;
   const availableLabelWidth = process.stdout.columns
-    ? Math.max(18, process.stdout.columns - 6 - 2 - macroWidth - trackedWidth)
+    ? Math.max(18, process.stdout.columns - ITEM_ROW_PREFIX_WIDTH - 2 - macroWidth - trackedWidth)
     : naturalLabelWidth;
   return {
     labelWidth: Math.min(naturalLabelWidth, availableLabelWidth),
     macroWidths,
   };
+}
+
+function formatExpansionMarker(state: InteractiveState, row: MealPlanRowRef): string {
+  if (rowComponents(state, row).length <= 1) {
+    return ' ';
+  }
+  return state.expandedItemKey === rowExpansionKey(row)
+    ? chalk.cyan(EXPAND_EXPANDED)
+    : chalk.gray(EXPAND_COLLAPSED);
+}
+
+function rowComponents(state: InteractiveState, row: MealPlanRowRef): EraFitMealPlanFoodItem[] {
+  return row.type === 'plan'
+    ? mealPlanItemComponents(state, row.item)
+    : trackedFoodComponents(row.item.entry.record);
+}
+
+function rowExpansionKey(row: MealPlanRowRef): string {
+  return `${row.type}:${row.item.key}`;
+}
+
+function mealPlanItemComponents(state: InteractiveState, item: MealPlanItemRef): EraFitMealPlanFoodItem[] {
+  const tracked = state.trackedItemByKey.get(item.key);
+  const trackedComponents = tracked ? trackedFoodComponents(tracked.record) : [];
+  return trackedComponents.length > 1 ? trackedComponents : item.item.components ?? trackedComponents;
+}
+
+function trackedFoodComponents(record: TrackedFoodRecord): EraFitMealPlanFoodItem[] {
+  const raw = record as unknown as Record<string, unknown>;
+  const foods = raw.foods;
+  const records = Array.isArray(foods)
+    ? foods
+    : Object.values(asRecord(foods) ?? {});
+  const multiplier = parseNumberLike(raw.serving_qtd) ?? 1;
+  return records
+    .map(component => trackedFoodComponent(component, multiplier))
+    .filter((component): component is EraFitMealPlanFoodItem => component != null);
+}
+
+function trackedFoodComponent(value: unknown, multiplier: number): EraFitMealPlanFoodItem | null {
+  const raw = asRecord(value);
+  if (!raw) {
+    return null;
+  }
+  const name = nonEmptyString(raw.food_name) ?? nonEmptyString(raw.title) ?? nonEmptyString(raw.name);
+  if (!name) {
+    return null;
+  }
+  const serving = nonEmptyString(raw.serving_description) ?? buildComponentServing(raw);
+  const amount =
+    parseNumberLike(raw.metric_serving_amount) ??
+    parseNumberLike(raw.serving_qtd) ??
+    parseNumberLike(raw.amount_g) ??
+    parseNumberLike(raw.amount);
+  const unit =
+    nonEmptyString(raw.metric_serving_unit) ??
+    nonEmptyString(raw.serving_unit) ??
+    (parseNumberLike(raw.amount_g) != null ? 'g' : null);
+  return {
+    name,
+    description: serving ? `${serving} ${name}` : name,
+    amount: amount == null ? null : roundNumber(amount * multiplier),
+    unit,
+    serving,
+    calories: scaleMacroValue(parseNumberLike(raw.energy) ?? parseNumberLike(raw.calories), multiplier),
+    protein: scaleMacroValue(parseNumberLike(raw.protein), multiplier),
+    net_carbs: scaleMacroValue(parseNetCarbsValue(raw.net_carbs, raw.carbohydrate), multiplier),
+    fat: scaleMacroValue(parseNumberLike(raw.fat), multiplier),
+  };
+}
+
+function buildComponentServing(raw: Record<string, unknown>): string | null {
+  const quantity = parseNumberLike(raw.serving_qtd);
+  const unit = nonEmptyString(raw.serving_unit) ?? nonEmptyString(raw.unit);
+  return [quantity == null ? null : formatNumber(quantity), unit].filter(Boolean).join(' ') || null;
+}
+
+function formatComponentItemLabel(component: EraFitMealPlanFoodItem): string {
+  return component.description?.trim() || component.name;
 }
 
 function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemRef): string {
@@ -2197,9 +2341,12 @@ function contextHelp(state: InteractiveState): string {
     return '←/→ tabs | type search/filter | ↑/↓ results | Enter add | Esc meals | Ctrl-C exit';
   }
   const row = getMealRow(state, state.mealCursor, state.itemCursor);
+  const expandAction = row && rowComponents(state, row).length > 1
+    ? ` | E ${state.expandedItemKey === rowExpansionKey(row) ? 'collapse' : 'expand'}`
+    : '';
   return row?.type === 'outside'
-    ? '↑/↓ items | ←/Esc meals | A assign | q exit'
-    : '↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative | q exit';
+    ? `↑/↓ items | ←/Esc meals | A assign${expandAction} | q exit`
+    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction} | q exit`;
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
