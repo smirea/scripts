@@ -8,6 +8,98 @@
       "servingId": "19134",
       "servingDescription": "1 medium (7\" to 7-7/8\" long)",
       "updatedAt": "2026-05-19T17:46:25.118Z"
+    },
+    "salmon": {
+      "foodId": "2057",
+      "foodName": "Salmon",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T22:52:31.230Z"
+    },
+    "7oz salmon fillet grilled 200g": {
+      "foodId": "2057",
+      "foodName": "Salmon",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T22:52:31.230Z"
+    },
+    "broccoli": {
+      "foodId": "36291",
+      "foodName": "Broccoli",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T22:54:01.097Z"
+    },
+    "1 25 cups broccoli steamed 100g": {
+      "foodId": "36291",
+      "foodName": "Broccoli",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T22:54:01.097Z"
+    },
+    "whey protein": {
+      "foodId": "-Ot0_zc_nl2uGT3VIK6a",
+      "foodName": "Boba Tea Protein",
+      "brandName": "Custom",
+      "servingType": "saved",
+      "servingUnit": "servings",
+      "servingDescription": "2 servings",
+      "savedSource": "custom_food",
+      "savedId": "-Ot0_zc_nl2uGT3VIK6a",
+      "customFoodId": "-Ot0_zc_nl2uGT3VIK6a",
+      "servingQuantity": 2,
+      "servingMultiplier": 0.045,
+      "updatedAt": "2026-05-19T23:08:30.549Z"
+    },
+    "2 scoops whey protein 44g": {
+      "foodId": "-Ot0_zc_nl2uGT3VIK6a",
+      "foodName": "Boba Tea Protein",
+      "brandName": "Custom",
+      "servingType": "saved",
+      "servingUnit": "servings",
+      "servingDescription": "2 servings",
+      "savedSource": "custom_food",
+      "savedId": "-Ot0_zc_nl2uGT3VIK6a",
+      "customFoodId": "-Ot0_zc_nl2uGT3VIK6a",
+      "servingQuantity": 2,
+      "servingMultiplier": 0.045,
+      "updatedAt": "2026-05-19T23:08:30.550Z"
+    },
+    "extra virgin olive oil": {
+      "foodId": "283520",
+      "foodName": "Extra Virgin Olive Oil",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T23:09:21.814Z"
+    },
+    "1 tbsp extra virgin olive oil 15g": {
+      "foodId": "283520",
+      "foodName": "Extra Virgin Olive Oil",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T23:09:21.814Z"
+    },
+    "sweet potato": {
+      "foodId": "36617",
+      "foodName": "Sweet Potato",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T23:09:31.500Z"
+    },
+    "1 8 cups sweet potato roasted 300g": {
+      "foodId": "36617",
+      "foodName": "Sweet Potato",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-19T23:09:31.500Z"
     }
   },
   "mealPlanMealMap": {
