@@ -31,7 +31,10 @@ import { formatMacroColumns, formatMacroNumber, formatMacros, getMacroColumnWidt
 import {
   deleteTrackedFoods,
   fetchTrackedFoodsForDate,
+  foodSearchChoiceMacroTotals,
   formatEraFitTime,
+  formatFoodSearchChoiceName,
+  formatFoodSearchChoiceServing,
   parseTrackItem,
   formatFoodSearchOptionLabels,
   resolveTrackFood,
@@ -108,7 +111,6 @@ interface AddFoodState {
   tab: AddFoodTab;
   query: string;
   choices: FoodSearchChoice[];
-  labels: string[];
   cursor: number;
   loading: boolean;
   requestId: number;
@@ -788,7 +790,6 @@ function openAddMode(state: InteractiveState, mealIndex: number): void {
     tab: 'search',
     query: '',
     choices: [],
-    labels: [],
     cursor: 0,
     loading: false,
     requestId: 0,
@@ -1737,7 +1738,6 @@ class MealPlanChecklistPrompt {
     const index = ADD_FOOD_TABS.indexOf(add.tab);
     add.tab = ADD_FOOD_TABS[wrap(index + delta, ADD_FOOD_TABS.length)];
     add.choices = [];
-    add.labels = [];
     add.cursor = 0;
     add.loading = true;
     add.requestId += 1;
@@ -1753,7 +1753,6 @@ class MealPlanChecklistPrompt {
     }
     add.query = query;
     add.choices = [];
-    add.labels = [];
     add.cursor = 0;
     add.loading = true;
     add.requestId += 1;
@@ -1783,7 +1782,6 @@ class MealPlanChecklistPrompt {
         return;
       }
       current.choices = choices;
-      current.labels = formatFoodSearchOptionLabels(choices);
       current.cursor = 0;
       current.loading = false;
     } catch (error) {
@@ -2110,13 +2108,46 @@ function renderAddFoodLines(state: InteractiveState): string[] {
     lines.push(`  ${chalk.gray('no results')}`);
     return lines;
   }
-  for (const [index, label] of add.labels.entries()) {
-    const active = index === add.cursor;
-    const marker = active ? chalk.green('●') : chalk.gray('○');
-    const line = `  ${marker} ${label}`;
-    lines.push(active ? chalk.bold(line) : chalk.gray(line));
+  const layout = getAddFoodLineLayout(state, add);
+  for (const [index, choice] of add.choices.entries()) {
+    lines.push(renderAddFoodChoiceLine(choice, index === add.cursor, layout));
   }
   return lines;
+}
+
+function renderAddFoodChoiceLine(choice: FoodSearchChoice, active: boolean, layout: IngredientLineLayout): string {
+  const label = truncateVisibleEnd(formatAddFoodChoiceLabel(choice), layout.labelWidth);
+  const paddedLabel = padVisibleEnd(label, layout.labelWidth);
+  const marker = active ? chalk.green('●') : chalk.gray('○');
+  const line = `  ${active ? chalk.cyan('>') : ' '}   ${marker} ${paddedLabel}  ${formatMacroColumns(foodSearchChoiceMacroTotals(choice), layout.macroWidths)}`;
+  return active ? chalk.cyan(line) : line;
+}
+
+function formatAddFoodChoiceLabel(choice: FoodSearchChoice): string {
+  return `${formatFoodSearchChoiceName(choice)} ${chalk.gray(`per ${formatFoodSearchChoiceServing(choice)}`)}`;
+}
+
+function getAddFoodLineLayout(state: InteractiveState, add: AddFoodState): IngredientLineLayout {
+  const sectionLayout = getIngredientLineLayout(state);
+  const choiceWidths = getMacroColumnWidths(add.choices.map(foodSearchChoiceMacroTotals));
+  const macroWidths = maxMacroColumnWidths(sectionLayout.macroWidths, choiceWidths);
+  const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
+  const availableLabelWidth = process.stdout.columns
+    ? Math.max(18, process.stdout.columns - ITEM_ROW_PREFIX_WIDTH - 2 - macroWidth)
+    : sectionLayout.labelWidth;
+  return {
+    labelWidth: Math.min(sectionLayout.labelWidth, availableLabelWidth),
+    macroWidths,
+  };
+}
+
+function maxMacroColumnWidths(a: MacroColumnWidths, b: MacroColumnWidths): MacroColumnWidths {
+  return {
+    calories: Math.max(a.calories, b.calories),
+    protein: Math.max(a.protein, b.protein),
+    netCarbs: Math.max(a.netCarbs, b.netCarbs),
+    fat: Math.max(a.fat, b.fat),
+  };
 }
 
 function renderAddFoodTabs(activeTab: AddFoodTab): string {

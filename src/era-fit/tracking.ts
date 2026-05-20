@@ -20,6 +20,7 @@ import {
   type EraFitFatSecretFood,
   type EraFitFatSecretSearchFood,
   type EraFitFatSecretServing,
+  type EraFitMacroTotals,
   type EraFitMealKey,
   type EraFitSession,
 } from './core';
@@ -530,20 +531,13 @@ export function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): strin
   const servingWidth = availableWidth < 92 ? 14 : 18;
   const nameWidth = Math.max(24, Math.min(44, availableWidth - servingWidth - 32));
   return formatTabularRows(results.map(result => {
-    const macros = result.type === 'saved'
-      ? {
-        calories: result.saved.calories,
-        protein: result.saved.protein,
-        netCarbs: result.saved.carbohydrate,
-        fat: result.saved.fat,
-      }
-      : parseSearchMacros(result.food.food_description);
+    const macros = foodSearchChoiceMacroTotals(result);
     return [
-      formatFoodSearchName(result),
-      `per ${formatSearchServing(result)}`,
+      formatFoodSearchChoiceName(result),
+      `per ${formatFoodSearchChoiceServing(result)}`,
       formatSearchMacro(macros.calories, 'cal'),
       formatSearchMacro(macros.protein, 'p'),
-      formatSearchMacro(macros.netCarbs, 'c'),
+      formatSearchMacro(macros.net_carbs, 'c'),
       formatSearchMacro(macros.fat, 'f'),
     ];
   }), {
@@ -559,7 +553,7 @@ export function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): strin
   });
 }
 
-function formatFoodSearchName(result: FoodSearchChoice): string {
+export function formatFoodSearchChoiceName(result: FoodSearchChoice): string {
   if (result.type === 'saved') {
     const suffix = result.saved.brandName ? ` by ${result.saved.brandName}` : ` [${savedFoodSourceLabel(result.saved.source)}]`;
     return `${chalk.yellow('★')} ${result.saved.name}${suffix}`;
@@ -567,11 +561,23 @@ function formatFoodSearchName(result: FoodSearchChoice): string {
   return result.food.brand_name ? `${result.food.food_name} by ${result.food.brand_name}` : result.food.food_name;
 }
 
-function formatSearchServing(result: FoodSearchChoice): string {
+export function formatFoodSearchChoiceServing(result: FoodSearchChoice): string {
   const value = result.type === 'saved'
     ? result.saved.servingDescription
     : parseSearchServing(result.food.food_description);
   return value.replace(/^Per\s+/i, '').trim();
+}
+
+export function foodSearchChoiceMacroTotals(result: FoodSearchChoice): EraFitMacroTotals {
+  if (result.type === 'saved') {
+    return {
+      calories: result.saved.calories,
+      protein: result.saved.protein,
+      net_carbs: result.saved.carbohydrate,
+      fat: result.saved.fat,
+    };
+  }
+  return parseSearchMacros(result.food.food_description);
 }
 
 function formatSearchMacro(value: number | null, suffix: string): string {
@@ -1178,13 +1184,13 @@ function parseSearchServing(description: string): string {
   return description.split('-')[0]?.trim() ?? description;
 }
 
-function parseSearchMacros(description: string): { calories: number | null; protein: number | null; netCarbs: number | null; fat: number | null } {
+function parseSearchMacros(description: string): EraFitMacroTotals {
   const carbs = parseNumberLike(description.match(/Carbs:\s*([\d.]+)/i)?.[1]);
   const fiber = parseNumberLike(description.match(/Fiber:\s*([\d.]+)/i)?.[1]);
   return {
     calories: parseNumberLike(description.match(/Calories:\s*([\d.]+)/i)?.[1]),
     protein: parseNumberLike(description.match(/Protein:\s*([\d.]+)/i)?.[1]),
-    netCarbs: calculateNetCarbsFromTotalCarbs(carbs, fiber),
+    net_carbs: calculateNetCarbsFromTotalCarbs(carbs, fiber),
     fat: parseNumberLike(description.match(/Fat:\s*([\d.]+)/i)?.[1]),
   };
 }
