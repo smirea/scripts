@@ -17,6 +17,7 @@ import {
   parseNumberLike,
   parseNetCarbsValue,
   roundNumber,
+  searchEraFitFatSecretFoods,
   startOfLocalDay,
   uniqueStrings,
   type EraFitMacroTotals,
@@ -45,9 +46,11 @@ import {
   type TrackedFoodEntry,
   type TrackedFoodRecord,
 } from './tracking';
+import { listSavedFoods, type SavedFoodSearchItem, type SavedFoodSource } from './savedFoods';
 
-type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search';
+type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search' | 'add';
 type LoadingKind = 'checking' | 'unchecking';
+type AddFoodTab = 'search' | 'faves' | 'meals' | 'food';
 
 const CHECKBOX_EMPTY = '○';
 const CHECKBOX_CHECKED = '×';
@@ -95,6 +98,18 @@ interface FoodSearchState {
   requestId: number;
 }
 
+interface AddFoodState {
+  mealIndex: number;
+  tab: AddFoodTab;
+  query: string;
+  choices: FoodSearchChoice[];
+  labels: string[];
+  cursor: number;
+  loading: boolean;
+  requestId: number;
+  savedFoods: SavedFoodSearchItem[] | null;
+}
+
 interface InteractiveState {
   day: EraFitMealPlanDay;
   meals: Array<{
@@ -117,6 +132,7 @@ interface InteractiveState {
   multipliers: Map<string, number>;
   pendingSearchItems: MealPlanItemRef[];
   foodSearch: FoodSearchState | null;
+  addFood: AddFoodState | null;
   messages: string[];
 }
 
@@ -132,6 +148,7 @@ type MealPlanPromptAction =
   | { type: 'open-food-search'; mealIndex: number; rowIndex: number; query?: string }
   | { type: 'select-food-search'; index: number }
   | { type: 'cancel-food-search' }
+  | { type: 'select-add-food'; index: number }
   | { type: 'done' };
 
 export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOptions): Promise<void> {
@@ -220,6 +237,7 @@ function createInteractiveState(
     multipliers: new Map(),
     pendingSearchItems: [],
     foodSearch: null,
+    addFood: null,
     messages: [],
   };
 }
@@ -253,6 +271,10 @@ async function handleMealPlanAction(
   }
   if (action.type === 'select-food-search') {
     await logSelectedFoodSearchChoice(session, cache, dateId, state, action.index);
+    return;
+  }
+  if (action.type === 'select-add-food') {
+    await logSelectedAddFoodChoice(session, cache, dateId, state, action.index);
     return;
   }
   const row = getMealRow(state, action.mealIndex, action.rowIndex);
@@ -566,6 +588,111 @@ async function logSelectedFoodSearchChoice(
   closeFoodSearch(state);
 }
 
+async function logSelectedAddFoodChoice(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  index: number
+): Promise<void> {
+  const add = state.addFood;
+  const choice = add?.choices[index];
+  const meal = add ? state.meals[add.mealIndex] : null;
+  if (!add || !choice || !meal) {
+    return;
+  }
+
+  const trackItem = buildAddTrackItem(choice, add.query);
+  const result = await resolveTrackFoodFromSearchChoice(
+    session,
+    cache,
+    trackItem,
+    formatEraFitTime(new Date()),
+    choice,
+    {
+      useCache: false,
+      writeCache: !state.dryRun,
+      interactive: true,
+      log: message => pushMessage(state, message),
+    }
+  ).catch(error => {
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+    return null;
+  });
+
+  if (!result) {
+    return;
+  }
+  if (result.status === 'needs-selection') {
+    pushMessage(state, `serving selection needed for ${trackItem.query}`);
+    return;
+  }
+  if (result.status === 'cancel') {
+    pushMessage(state, 'add cancelled');
+    return;
+  }
+  if (result.status === 'skip') {
+    pushMessage(state, `skipped ${trackItem.query}`);
+    return;
+  }
+
+  await saveAddedFoodToMeal(session, cache, dateId, state, add.mealIndex, result.food);
+}
+
+function buildAddTrackItem(choice: FoodSearchChoice, query: string): ParsedTrackItem {
+  if (choice.type === 'saved') {
+    return parseTrackItem(`1 ${choice.saved.name}`);
+  }
+  const label = query.trim() || choice.food.food_name;
+  return parseTrackItem(`1 ${label}|${choice.food.food_id}`);
+}
+
+async function saveAddedFoodToMeal(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  mealIndex: number,
+  food: ResolvedTrackFood
+): Promise<void> {
+  const meal = state.meals[mealIndex];
+  if (!meal) {
+    return;
+  }
+  let entry: TrackedFoodEntry;
+  if (state.dryRun) {
+    const id = `dry-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    entry = {
+      meal: meal.trackingMeal,
+      id,
+      record: {
+        ...food.record,
+        id,
+        meal_tracking_food_log: `${dateId}_${meal.trackingMeal}_${id}`,
+      },
+    };
+  } else {
+    const [saved] = await saveTrackedFoods(session, {
+      dateId,
+      meal: meal.trackingMeal,
+      foods: [food],
+    });
+    if (!saved) {
+      return;
+    }
+    entry = {
+      meal: meal.trackingMeal,
+      id: saved.id,
+      record: saved.record,
+    };
+  }
+  state.trackedEntries.push(entry);
+  refreshExistingTrackedMatches(cache, state);
+  state.mode = 'add';
+  state.mealCursor = mealIndex;
+  pushMessage(state, `${state.dryRun ? 'would add' : 'added'} ${formatTrackedFoodDisplayName(entry.record)} to ${meal.meal.meal}`);
+}
+
 async function uncheckMealItems(
   session: EraFitSession,
   dateId: string,
@@ -612,6 +739,92 @@ function foodCacheAliases(item: MealPlanItemRef): string[] {
 function closeFoodSearch(state: InteractiveState): void {
   state.foodSearch = null;
   state.mode = 'items';
+}
+
+const ADD_FOOD_TABS = ['search', 'faves', 'meals', 'food'] as const satisfies readonly AddFoodTab[];
+
+function openAddMode(state: InteractiveState, mealIndex: number): void {
+  const meal = state.meals[mealIndex];
+  if (!meal) {
+    return;
+  }
+  state.mode = 'add';
+  state.mealCursor = mealIndex;
+  state.addFood = {
+    mealIndex,
+    tab: 'search',
+    query: '',
+    choices: [],
+    labels: [],
+    cursor: 0,
+    loading: false,
+    requestId: 0,
+    savedFoods: null,
+  };
+}
+
+function closeAddMode(state: InteractiveState): void {
+  state.addFood = null;
+  state.mode = 'meals';
+}
+
+async function loadAddFoodChoices(session: EraFitSession, add: AddFoodState): Promise<FoodSearchChoice[]> {
+  const query = add.query.trim();
+  if (add.tab === 'search') {
+    if (!query) {
+      return [];
+    }
+    return (await searchEraFitFatSecretFoods(session, query))
+      .slice(0, 10)
+      .map(food => ({ type: 'fatsecret' as const, food }));
+  }
+
+  if (!add.savedFoods) {
+    add.savedFoods = await listSavedFoods(session);
+  }
+  return selectSavedAddFoods(add.savedFoods, add.tab, query)
+    .map(saved => ({ type: 'saved' as const, saved }));
+}
+
+function selectSavedAddFoods(foods: SavedFoodSearchItem[], tab: AddFoodTab, query: string): SavedFoodSearchItem[] {
+  const source = savedSourceForAddTab(tab);
+  if (!source) {
+    return [];
+  }
+  const normalizedQuery = normalizeFoodCacheKey(query);
+  return foods
+    .filter(food => food.source === source)
+    .map(food => ({ food, score: scoreAddFoodMatch(food, normalizedQuery) }))
+    .filter(entry => !normalizedQuery || entry.score > 0)
+    .sort((a, b) => b.score - a.score || b.food.timestamp - a.food.timestamp || a.food.name.localeCompare(b.food.name))
+    .map(entry => entry.food)
+    .slice(0, 10);
+}
+
+function savedSourceForAddTab(tab: AddFoodTab): SavedFoodSource | null {
+  if (tab === 'faves') return 'favorite';
+  if (tab === 'meals') return 'my_meal';
+  if (tab === 'food') return 'custom_food';
+  return null;
+}
+
+function scoreAddFoodMatch(food: SavedFoodSearchItem, normalizedQuery: string): number {
+  if (!normalizedQuery) {
+    return 1;
+  }
+  const searchable = normalizeFoodCacheKey([food.name, food.brandName].filter(Boolean).join(' '));
+  if (searchable === normalizedQuery) {
+    return 100;
+  }
+  if (searchable.includes(normalizedQuery)) {
+    return 80;
+  }
+  const tokens = normalizedQuery.split(' ').filter(token => token.length > 2);
+  if (tokens.length === 0) {
+    return 0;
+  }
+  const overlap = tokens.filter(token => searchable.includes(token)).length;
+  return overlap === 0 ? 0 : (overlap / tokens.length) * 60;
 }
 
 function getMealRows(state: InteractiveState, mealIndex: number): MealPlanRowRef[] {
@@ -1133,6 +1346,7 @@ class MealPlanChecklistPrompt {
   private readonly output = process.stdout;
   private repaintTimer: ReturnType<typeof setInterval> | null = null;
   private foodSearchDebounce: ReturnType<typeof setTimeout> | null = null;
+  private addFoodDebounce: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private hadAnimatedState = false;
   private resolvePrompt: ((action: MealPlanPromptAction | undefined) => void) | null = null;
@@ -1178,8 +1392,9 @@ class MealPlanChecklistPrompt {
     }
 
     const hasAnimatedState = this.view.loadingItemKeys.size > 0 || this.view.foodSearch?.loading === true;
-    if (hasAnimatedState || this.hadAnimatedState) {
-      this.hadAnimatedState = hasAnimatedState;
+    const hasAddAnimatedState = this.view.addFood?.loading === true;
+    if (hasAnimatedState || hasAddAnimatedState || this.hadAnimatedState) {
+      this.hadAnimatedState = hasAnimatedState || hasAddAnimatedState;
       this.repaint();
     }
   }
@@ -1205,6 +1420,10 @@ class MealPlanChecklistPrompt {
       clearTimeout(this.foodSearchDebounce);
       this.foodSearchDebounce = null;
     }
+    if (this.addFoodDebounce) {
+      clearTimeout(this.addFoodDebounce);
+      this.addFoodDebounce = null;
+    }
     this.input.off('keypress', this.keypressHandler);
     if (this.input.isTTY) {
       this.input.setRawMode(false);
@@ -1215,6 +1434,10 @@ class MealPlanChecklistPrompt {
   private handleKeypress(key: string | undefined, info: Key): void {
     if (this.view.mode === 'food-search') {
       this.handleFoodSearchKey(key, info);
+      return;
+    }
+    if (this.view.mode === 'add') {
+      this.handleAddFoodKey(key, info);
       return;
     }
     if (info.ctrl && info.name === 'c') {
@@ -1257,6 +1480,8 @@ class MealPlanChecklistPrompt {
     const command = key?.toLowerCase();
     if (command === 'q') {
       this.submitAction({ type: 'done' });
+    } else if (command === 'a' && this.view.mode === 'meals') {
+      this.openCurrentAddMode();
     } else if (command === 'a' && this.view.mode === 'items' && this.currentRow()?.type === 'outside') {
       const row = this.currentRow();
       if (row?.type === 'outside') {
@@ -1277,6 +1502,46 @@ class MealPlanChecklistPrompt {
         mealIndex: this.view.mealCursor,
         rowIndex: this.view.itemCursor,
       });
+    }
+  }
+
+  private handleAddFoodKey(
+    key: string | undefined,
+    info: { name?: string; ctrl?: boolean; meta?: boolean }
+  ): void {
+    if (info.ctrl && info.name === 'c') {
+      this.submitAction({ type: 'done' });
+      return;
+    }
+    if (info.name === 'escape') {
+      this.goBack();
+      return;
+    }
+    if (info.name === 'return') {
+      this.submitCurrentAddFood();
+      return;
+    }
+    if (info.name === 'left' || info.name === 'right') {
+      this.switchAddFoodTab(info.name === 'left' ? -1 : 1);
+      return;
+    }
+    if (info.name === 'up' || info.name === 'down') {
+      this.moveAddFoodCursor(info.name === 'up' ? -1 : 1);
+      this.repaint();
+      return;
+    }
+    if (info.name === 'backspace' || info.name === 'delete') {
+      const add = this.view.addFood;
+      if (add?.query) {
+        this.updateAddFoodQuery(add.query.slice(0, -1));
+      }
+      return;
+    }
+    if (key && key.length === 1 && !info.ctrl && !info.meta) {
+      const add = this.view.addFood;
+      if (add) {
+        this.updateAddFoodQuery(`${add.query}${key}`);
+      }
     }
   }
 
@@ -1390,9 +1655,90 @@ class MealPlanChecklistPrompt {
     this.repaint();
   }
 
+  private openCurrentAddMode(): void {
+    openAddMode(this.view, this.view.mealCursor);
+    this.repaint();
+  }
+
+  private switchAddFoodTab(delta: number): void {
+    const add = this.view.addFood;
+    if (!add) {
+      return;
+    }
+    const index = ADD_FOOD_TABS.indexOf(add.tab);
+    add.tab = ADD_FOOD_TABS[wrap(index + delta, ADD_FOOD_TABS.length)];
+    add.choices = [];
+    add.labels = [];
+    add.cursor = 0;
+    add.loading = true;
+    add.requestId += 1;
+    const requestId = add.requestId;
+    this.repaint();
+    void this.refreshAddFood(requestId);
+  }
+
+  private updateAddFoodQuery(query: string): void {
+    const add = this.view.addFood;
+    if (!add) {
+      return;
+    }
+    add.query = query;
+    add.choices = [];
+    add.labels = [];
+    add.cursor = 0;
+    add.loading = true;
+    add.requestId += 1;
+    const requestId = add.requestId;
+    if (this.addFoodDebounce) {
+      clearTimeout(this.addFoodDebounce);
+    }
+    this.repaint();
+    this.addFoodDebounce = setTimeout(() => void this.refreshAddFood(requestId), 250);
+  }
+
+  private async refreshAddFood(requestId: number): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const add = this.view.addFood;
+    if (!add || add.requestId !== requestId) {
+      return;
+    }
+    try {
+      const choices = await loadAddFoodChoices(this.session, add);
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.addFood;
+      if (!current || current.requestId !== requestId) {
+        return;
+      }
+      current.choices = choices;
+      current.labels = formatFoodSearchOptionLabels(choices);
+      current.cursor = 0;
+      current.loading = false;
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.addFood;
+      if (!current || current.requestId !== requestId) {
+        return;
+      }
+      current.loading = false;
+      pushMessage(this.view, error instanceof Error ? error.message : String(error));
+    }
+    this.repaint();
+  }
+
   private goBack(): void {
     if (this.view.mode === 'food-search') {
       this.submitAction({ type: 'cancel-food-search' });
+      return;
+    }
+    if (this.view.mode === 'add') {
+      closeAddMode(this.view);
+      this.repaint();
       return;
     }
     if (this.view.mode === 'assign') {
@@ -1441,6 +1787,14 @@ class MealPlanChecklistPrompt {
     search.cursor = wrap(search.cursor + delta, search.choices.length);
   }
 
+  private moveAddFoodCursor(delta: number): void {
+    const add = this.view.addFood;
+    if (!add || add.choices.length === 0) {
+      return;
+    }
+    add.cursor = wrap(add.cursor + delta, add.choices.length);
+  }
+
   private submitCurrentToggle(): void {
     if (this.view.mode === 'meals') {
       this.submitAction({ type: 'toggle-meal', mealIndex: this.view.mealCursor });
@@ -1470,6 +1824,17 @@ class MealPlanChecklistPrompt {
     this.submitAction({
       type: 'select-food-search',
       index: search.cursor,
+    });
+  }
+
+  private submitCurrentAddFood(): void {
+    const add = this.view.addFood;
+    if (!add || add.loading || add.choices.length === 0) {
+      return;
+    }
+    this.submitAction({
+      type: 'select-add-food',
+      index: add.cursor,
     });
   }
 
@@ -1511,7 +1876,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
     '',
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
-    const activeMeal = state.mode === 'meals' && state.mealCursor === mealIndex;
+    const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
     const mealLine = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')} ${formatMacros(meal.meal.macros)}`;
     lines.push(activeMeal ? chalk.cyan(mealLine) : mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
@@ -1530,6 +1895,8 @@ function renderMealPlanFrame(state: InteractiveState): string {
   }
   if (state.foodSearch) {
     lines.push('', ...renderFoodSearchLines(state.foodSearch));
+  } else if (state.addFood) {
+    lines.push('', ...renderAddFoodLines(state));
   }
   lines.push(chalk.gray(contextHelp(state)));
   for (const message of state.messages.slice(-3)) {
@@ -1579,6 +1946,54 @@ function formatMacroBalanceAmount(value: number, label: string): string {
   return label === 'calories'
     ? formatNumber(Math.round(value))
     : formatNumber(roundNumber(Number(value.toFixed(1))));
+}
+
+function renderAddFoodLines(state: InteractiveState): string[] {
+  const add = state.addFood;
+  const meal = add ? state.meals[add.mealIndex] : null;
+  if (!add || !meal) {
+    return [];
+  }
+  const lines = [
+    `${chalk.cyan('Add')} ${chalk.bold(meal.meal.meal)}`,
+    `  ${renderAddFoodTabs(add.tab)}`,
+    `  ${chalk.cyan(add.tab === 'search' ? 'Search' : 'Filter')} ${chalk.bold(add.query)}${chalk.inverse(' ')}`,
+  ];
+  if (add.loading) {
+    lines.push(`  ${chalk.yellow(formatLoadingSpinner(`${meal.trackingMeal}:${add.tab}`))} loading ${add.tab}`);
+    return lines;
+  }
+  if (add.tab === 'search' && !add.query.trim()) {
+    lines.push(`  ${chalk.gray('type to search global foods')}`);
+    return lines;
+  }
+  if (add.choices.length === 0) {
+    lines.push(`  ${chalk.gray('no results')}`);
+    return lines;
+  }
+  for (const [index, label] of add.labels.entries()) {
+    const active = index === add.cursor;
+    const marker = active ? chalk.green('●') : chalk.gray('○');
+    const line = `  ${marker} ${label}`;
+    lines.push(active ? chalk.bold(line) : chalk.gray(line));
+  }
+  return lines;
+}
+
+function renderAddFoodTabs(activeTab: AddFoodTab): string {
+  return ADD_FOOD_TABS.map(tab => {
+    const label = addFoodTabLabel(tab);
+    return tab === activeTab
+      ? chalk.bgBlue.white.bold(`[${label}]`)
+      : chalk.gray(` ${label} `);
+  }).join(' ');
+}
+
+function addFoodTabLabel(tab: AddFoodTab): string {
+  if (tab === 'faves') return 'Faves';
+  if (tab === 'meals') return 'Meals';
+  if (tab === 'food') return 'Food';
+  return 'Search';
 }
 
 function renderFoodSearchLines(search: FoodSearchState): string[] {
@@ -1712,13 +2127,16 @@ function formatLoadingSpinner(key: string): string {
 
 function contextHelp(state: InteractiveState): string {
   if (state.mode === 'meals') {
-    return '↑/↓ meals | → items | ␣ toggle | Esc/q exit | Ctrl-C cancel';
+    return '↑/↓ meals | → items | ␣ toggle | A add | Esc/q exit | Ctrl-C cancel';
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
   }
   if (state.mode === 'food-search') {
     return 'type search | ↑/↓ results | Enter select | Esc cancel | Ctrl-C exit';
+  }
+  if (state.mode === 'add') {
+    return '←/→ tabs | type search/filter | ↑/↓ results | Enter add | Esc meals | Ctrl-C exit';
   }
   const row = getMealRow(state, state.mealCursor, state.itemCursor);
   return row?.type === 'outside'
