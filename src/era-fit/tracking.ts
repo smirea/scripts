@@ -262,10 +262,7 @@ export async function resolveTrackFoodFromSearchChoice(
   options: TrackResolveOptions
 ): Promise<TrackResolutionResult> {
   if (choice.type === 'past') {
-    return {
-      status: 'resolved',
-      food: buildPastResolvedTrackFood(item, choice.past, time),
-    };
+    return resolvePastTrackFood(session, cache, item, time, choice.past, options);
   }
   const food = await resolveFoodSearchChoice(session, choice);
   return finishResolvedTrackFood(cache, item, time, {
@@ -274,6 +271,40 @@ export async function resolveTrackFoodFromSearchChoice(
       choice.type === 'fatsecret' ? parseSearchServing(choice.food.food_description) : undefined
     ),
   }, food);
+}
+
+async function resolvePastTrackFood(
+  session: EraFitSession,
+  cache: EraFitCache,
+  item: ParsedTrackItem,
+  time: string,
+  past: PastFoodSearchItem,
+  options: TrackResolveOptions
+): Promise<TrackResolutionResult> {
+  const food = await fetchPastFatSecretFood(session, past);
+  if (food) {
+    return finishResolvedTrackFood(cache, item, time, {
+      ...options,
+      forceServingPrompt: true,
+      preferredServingDescription: options.preferredServingDescription ?? past.servingDescription,
+    }, food);
+  }
+  const interactive = options.interactive ?? true;
+  if (!interactive) {
+    return { status: 'needs-selection' };
+  }
+  const serving = await promptForPastServing(past);
+  if (!serving) {
+    return { status: 'cancel' };
+  }
+  const quantity = await promptForPastQuantity(past);
+  if (quantity == null) {
+    return { status: 'cancel' };
+  }
+  return {
+    status: 'resolved',
+    food: buildPastResolvedTrackFood(item, past, time, quantity),
+  };
 }
 
 async function finishResolvedTrackFood(
@@ -536,6 +567,20 @@ async function resolveFoodSearchChoice(
   throw new Error(`Cannot fetch details for ${choice.past.name}.`);
 }
 
+async function fetchPastFatSecretFood(session: EraFitSession, past: PastFoodSearchItem): Promise<EraFitFatSecretFood | null> {
+  const record = past.record as TrackedFoodRecord & { type_item?: string; food_customized_id?: string };
+  if (
+    !record.food_id ||
+    record.food_customized_id ||
+    record.type_item === 'food_customized' ||
+    record.type_item === 'my_meals' ||
+    record.food_type === 'my_meals'
+  ) {
+    return null;
+  }
+  return await fetchEraFitFatSecretFood(session, record.food_id).catch(() => null);
+}
+
 async function resolveFoodFromBarcode(
   session: EraFitSession,
   item: ParsedTrackItem,
@@ -722,6 +767,43 @@ async function promptForQuantity(
   return parseQuantity(value.trim()) ?? Number(initialValue);
 }
 
+async function promptForPastServing(past: PastFoodSearchItem): Promise<ServingChoice | null> {
+  const value = await select({
+    message: `Select serving for ${past.name}`,
+    options: [
+      {
+        value: 'past',
+        label: past.servingDescription,
+      },
+    ],
+    initialValue: 'past',
+  });
+  if (isCancel(value)) {
+    return null;
+  }
+  return {
+    type: 'saved',
+    label: past.servingDescription,
+    description: past.servingDescription,
+  };
+}
+
+async function promptForPastQuantity(past: PastFoodSearchItem): Promise<number | null> {
+  const initialValue = formatNumber(past.servingQuantity > 0 ? past.servingQuantity : 1);
+  const value = await text({
+    message: `Amount for ${past.servingDescription}`,
+    initialValue,
+    validate(input) {
+      const parsed = parseQuantity(input?.trim() ?? '');
+      return parsed != null && parsed > 0 ? undefined : 'Enter a positive number.';
+    },
+  });
+  if (isCancel(value)) {
+    return null;
+  }
+  return parseQuantity(value.trim()) ?? Number(initialValue);
+}
+
 function servingFromCache(food: EraFitFatSecretFood, cached: EraFitCache['foods'][string]): ServingChoice | null {
   if (cached.servingType === 'standard') {
     const unit = parseStandardUnit(cached.servingUnit);
@@ -875,8 +957,12 @@ function buildSavedResolvedTrackFood(item: ParsedTrackItem, saved: SavedFoodSear
   };
 }
 
-function buildPastResolvedTrackFood(item: ParsedTrackItem, past: PastFoodSearchItem, time: string): ResolvedTrackFood {
-  const quantity = (parseNumberLike(past.record.serving_qtd) ?? past.servingQuantity) || item.amount;
+function buildPastResolvedTrackFood(
+  item: ParsedTrackItem,
+  past: PastFoodSearchItem,
+  time: string,
+  quantity: number
+): ResolvedTrackFood {
   return {
     input: item,
     food: null,
@@ -886,12 +972,54 @@ function buildPastResolvedTrackFood(item: ParsedTrackItem, past: PastFoodSearchI
       description: past.servingDescription,
     },
     quantity,
-    record: {
-      ...past.record,
+    record: cleanFoodRecord({
+      ...scalePastFoodRecord(past.record, quantity),
       serving_qtd: quantity,
+      serving_description: formatPastServingDescription(past, quantity),
       time,
-    },
+    } as unknown as TrackedFoodRecord),
   };
+}
+
+function scalePastFoodRecord(record: TrackedFoodRecord, quantity: number): TrackedFoodRecord {
+  const baseQuantity = parseNumberLike(record.serving_qtd) ?? 1;
+  const factor = baseQuantity > 0 ? quantity / baseQuantity : 1;
+  const scaled = { ...record } as Record<string, unknown>;
+  const fields = [
+    'calories',
+    'energy',
+    'protein',
+    'carbohydrate',
+    'net_carbs',
+    'fat',
+    'saturated_fat',
+    'trans_fat',
+    'polyunsaturated_fat',
+    'monounsaturated_fat',
+    'cholesterol',
+    'sodium',
+    'potassium',
+    'fiber',
+    'sugar',
+    'vitamin_a',
+    'vitamin_c',
+    'vitamin_d',
+    'calcium',
+    'iron',
+  ] as const;
+  for (const field of fields) {
+    const value = parseNumberLike(scaled[field]);
+    if (value != null) {
+      scaled[field] = roundNumber(value * factor);
+    }
+  }
+  scaled.ef_version = 1;
+  return scaled as unknown as TrackedFoodRecord;
+}
+
+function formatPastServingDescription(past: PastFoodSearchItem, quantity: number): string {
+  const unit = past.servingUnit === 'fatsecret' ? null : past.servingUnit;
+  return unit ? `${formatNumber(quantity)} ${formatServingUnitForDisplay(unit)}` : past.servingDescription;
 }
 
 function buildSavedMealRecord(saved: SavedFoodSearchItem, quantity: number, time: string): TrackedFoodRecord {

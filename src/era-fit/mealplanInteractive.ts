@@ -703,10 +703,19 @@ function buildAddTrackItem(choice: FoodSearchChoice, query: string): ParsedTrack
     return parseTrackItem(`1 ${choice.saved.name}`);
   }
   if (choice.type === 'past') {
-    return parseTrackItem(`1 ${choice.past.name}`);
+    const amount = choice.past.servingQuantity > 0 ? choice.past.servingQuantity : 1;
+    const unit = formatPastTrackUnit(choice.past.servingUnit);
+    return parseTrackItem(`${formatNumber(amount)}${unit} ${choice.past.name}`);
   }
   const label = query.trim() || choice.food.food_name;
   return parseTrackItem(`1 ${label}|${choice.food.food_id}`);
+}
+
+function formatPastTrackUnit(unit: string): string {
+  const normalized = unit.trim().replace(/\s+/g, '_');
+  return normalized && normalized !== 'fatsecret' && /^[A-Za-z_][A-Za-z_.%/-]*$/.test(normalized)
+    ? normalized
+    : '';
 }
 
 async function saveAddedFoodToMeal(

@@ -95,7 +95,7 @@ Add mode:
 - `Esc` returns to meal mode.
 - `Ctrl-C` exits.
 
-Added foods show as green outside-plan rows under the meal and subtract from that meal title's remaining macros. In `--dry-run`, add mode goes through matching and rendering without writing to Era Fit.
+Past foods always prompt for serving and amount, prefilled from the previous log. Added foods show as green outside-plan rows under the meal and subtract from that meal title's remaining macros. In `--dry-run`, add mode goes through matching and rendering without writing to Era Fit.
 
 Assign mode:
 
