@@ -125,6 +125,34 @@ export interface PastFoodSearchItem {
   record: TrackedFoodRecord;
 }
 
+export function pastFoodSearchItemFromTrackedEntry(entry: TrackedFoodEntry): PastFoodSearchItem | null {
+  const raw = entry.record as TrackedFoodRecord & { title?: string };
+  const name = parseString(raw.food_name) ?? parseString(raw.title);
+  if (!name) {
+    return null;
+  }
+  const servingQuantity = parseNumberLike(raw.serving_qtd) ?? 1;
+  const servingUnit = parseString(raw.serving_unit) ?? 'serving';
+  const servingDescription = parseString(raw.serving_description) ?? `${formatNumber(servingQuantity)} ${servingUnit}`;
+  const logId = raw.meal_tracking_food_log ?? entry.id;
+  return {
+    id: logId,
+    dateId: parseString(logId.match(/^(\d{7})_/)?.[1]),
+    meal: entry.meal,
+    name,
+    brandName: parseString(raw.brand_name) ?? undefined,
+    servingDescription,
+    servingQuantity,
+    servingUnit,
+    calories: parseNumberLike(raw.calories) ?? parseNumberLike(raw.energy) ?? 0,
+    protein: parseNumberLike(raw.protein) ?? 0,
+    netCarbs: parseNetCarbsValue(raw.net_carbs, raw.carbohydrate) ?? 0,
+    fat: parseNumberLike(raw.fat) ?? 0,
+    sortKey: logId,
+    record: entry.record,
+  };
+}
+
 export type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
 
 export type TrackResolutionResult =
@@ -421,6 +449,41 @@ export async function saveTrackedFoods(
   }
   await saveMealTrackingTotals(session, options.dateId);
   return saved;
+}
+
+export async function updateTrackedFood(
+  session: EraFitSession,
+  options: {
+    dateId: string;
+    meal: EraFitMealKey;
+    existing: TrackedFoodEntry;
+    food: ResolvedTrackFood;
+  }
+): Promise<SavedTrackFood> {
+  const id = options.existing.id;
+  const logId = options.existing.record.meal_tracking_food_log || `${options.dateId}_${options.meal}_${id}`;
+  const record = {
+    ...options.food.record,
+    id,
+    meal_tracking_food_log: logId,
+  };
+  await setEraFitFirebasePath(
+    session,
+    `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking/data/${options.dateId}/meals/${options.meal}/foods/${id}`,
+    record
+  );
+  await setEraFitFirebasePath(
+    session,
+    `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking_food_data/${logId}`,
+    record
+  );
+  await saveMealTrackingTotals(session, options.dateId);
+  return {
+    ...options.food,
+    record,
+    id,
+    logId,
+  };
 }
 
 export async function deleteTrackedFoods(

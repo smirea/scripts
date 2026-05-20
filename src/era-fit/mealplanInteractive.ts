@@ -36,6 +36,7 @@ import {
   formatFoodSearchChoiceName,
   formatFoodSearchChoiceServing,
   parseTrackItem,
+  pastFoodSearchItemFromTrackedEntry,
   formatFoodSearchOptionLabels,
   resolveTrackFood,
   resolveTrackFoodFromSearchChoice,
@@ -49,6 +50,7 @@ import {
   type SavedTrackFood,
   type TrackedFoodEntry,
   type TrackedFoodRecord,
+  updateTrackedFood,
 } from './tracking';
 import { listPastTrackedFoods, searchPastTrackedFoods } from './historyFoods';
 import { listSavedFoods, type SavedFoodSearchItem, type SavedFoodSource } from './savedFoods';
@@ -164,6 +166,7 @@ type MealPlanPromptAction =
   | { type: 'toggle-meal'; mealIndex: number }
   | { type: 'toggle-row'; mealIndex: number; rowIndex: number }
   | { type: 'set-serving'; mealIndex: number; rowIndex: number }
+  | { type: 'edit-serving'; mealIndex: number; rowIndex: number }
   | { type: 'open-food-search'; mealIndex: number; rowIndex: number; query?: string }
   | { type: 'select-food-search'; index: number }
   | { type: 'cancel-food-search' }
@@ -320,6 +323,13 @@ async function handleMealPlanAction(
       startToggleItemsTask(session, cache, dateId, state, [row.item]);
     } else if (row?.type === 'outside') {
       pushMessage(state, 'logged outside plan; press A to assign it');
+    }
+    return;
+  }
+  if (action.type === 'edit-serving') {
+    clearInteractiveScreen();
+    if (row) {
+      await editTrackedRowServing(session, cache, dateId, state, row);
     }
     return;
   }
@@ -698,17 +708,84 @@ async function logSelectedAddFoodChoice(
   await saveAddedFoodToMeal(session, cache, dateId, state, add.mealIndex, result.food);
 }
 
+async function editTrackedRowServing(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  row: MealPlanRowRef
+): Promise<void> {
+  const tracked = trackedEntryForRow(state, row);
+  if (!tracked) {
+    pushMessage(state, 'nothing tracked to edit');
+    return;
+  }
+  const past = pastFoodSearchItemFromTrackedEntry(tracked);
+  if (!past) {
+    pushMessage(state, 'cannot edit this tracked food');
+    return;
+  }
+  const trackItem = buildPastTrackItem(past);
+  const result = await resolveTrackFoodFromSearchChoice(
+    session,
+    cache,
+    trackItem,
+    formatEraFitTime(new Date()),
+    { type: 'past', past },
+    {
+      useCache: false,
+      writeCache: false,
+      interactive: true,
+      log: message => pushMessage(state, message),
+    }
+  ).catch(error => {
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+    return null;
+  });
+
+  if (!result) {
+    return;
+  }
+  if (result.status === 'needs-selection') {
+    pushMessage(state, `serving selection needed for ${past.name}`);
+    return;
+  }
+  if (result.status === 'cancel') {
+    pushMessage(state, 'edit cancelled');
+    return;
+  }
+  if (result.status === 'skip') {
+    pushMessage(state, `skipped ${past.name}`);
+    return;
+  }
+
+  const updated = state.dryRun
+    ? editedTrackedEntry(tracked, result.food)
+    : trackedEntryFromSavedFood(tracked.meal, await updateTrackedFood(session, {
+      dateId,
+      meal: tracked.meal,
+      existing: tracked,
+      food: result.food,
+    }));
+  replaceTrackedRow(state, row, tracked, updated);
+  pushMessage(state, `${state.dryRun ? 'would edit' : 'edited'} ${formatTrackedFoodDisplayName(updated.record)}`);
+}
+
 function buildAddTrackItem(choice: FoodSearchChoice, query: string): ParsedTrackItem {
   if (choice.type === 'saved') {
     return parseTrackItem(`1 ${choice.saved.name}`);
   }
   if (choice.type === 'past') {
-    const amount = choice.past.servingQuantity > 0 ? choice.past.servingQuantity : 1;
-    const unit = formatPastTrackUnit(choice.past.servingUnit);
-    return parseTrackItem(`${formatNumber(amount)}${unit} ${choice.past.name}`);
+    return buildPastTrackItem(choice.past);
   }
   const label = query.trim() || choice.food.food_name;
   return parseTrackItem(`1 ${label}|${choice.food.food_id}`);
+}
+
+function buildPastTrackItem(past: PastFoodSearchItem): ParsedTrackItem {
+  const amount = past.servingQuantity > 0 ? past.servingQuantity : 1;
+  const unit = formatPastTrackUnit(past.servingUnit);
+  return parseTrackItem(`${formatNumber(amount)}${unit} ${past.name}`);
 }
 
 function formatPastTrackUnit(unit: string): string {
@@ -716,6 +793,51 @@ function formatPastTrackUnit(unit: string): string {
   return normalized && normalized !== 'fatsecret' && /^[A-Za-z_][A-Za-z_.%/-]*$/.test(normalized)
     ? normalized
     : '';
+}
+
+function editedTrackedEntry(existing: TrackedFoodEntry, food: ResolvedTrackFood): TrackedFoodEntry {
+  return {
+    meal: existing.meal,
+    id: existing.id,
+    record: {
+      ...food.record,
+      id: existing.id,
+      meal_tracking_food_log: existing.record.meal_tracking_food_log,
+    },
+  };
+}
+
+function replaceTrackedRow(
+  state: InteractiveState,
+  row: MealPlanRowRef,
+  previous: TrackedFoodEntry,
+  updated: TrackedFoodEntry
+): void {
+  const previousKey = trackedEntryKey(previous);
+  state.trackedEntries = state.trackedEntries.map(entry => trackedEntryKey(entry) === previousKey ? updated : entry);
+  if (!state.trackedEntries.some(entry => trackedEntryKey(entry) === trackedEntryKey(updated))) {
+    state.trackedEntries.push(updated);
+  }
+  if (row.type === 'plan') {
+    state.trackedItemByKey.set(row.item.key, updated);
+    state.completedItemKeys.add(row.item.key);
+  } else {
+    row.item.entry = updated;
+  }
+  invalidateRenderCache(state);
+}
+
+function trackedEntryForRow(state: InteractiveState, row: MealPlanRowRef): TrackedFoodEntry | null {
+  return row.type === 'plan'
+    ? state.trackedItemByKey.get(row.item.key) ?? null
+    : row.item.entry;
+}
+
+function rowCanEditServing(state: InteractiveState, row: MealPlanRowRef | null): boolean {
+  if (!row) {
+    return false;
+  }
+  return trackedEntryForRow(state, row) != null;
 }
 
 async function saveAddedFoodToMeal(
@@ -1514,8 +1636,10 @@ class MealPlanChecklistPrompt {
       return;
     }
     const command = key?.toLowerCase();
-    if (command === 'e' && this.view.mode === 'items' && this.toggleCurrentExpansion()) {
-      return;
+    if (command === 'e' && this.view.mode === 'items') {
+      if (this.submitCurrentEditServing() || this.toggleCurrentExpansion()) {
+        return;
+      }
     }
     if (command === 'o' && this.view.mode === 'meals' && this.toggleCurrentOriginalSection()) {
       return;
@@ -1952,6 +2076,20 @@ class MealPlanChecklistPrompt {
       type: 'select-add-food',
       index: add.cursor,
     });
+  }
+
+  private submitCurrentEditServing(): boolean {
+    const row = this.currentRow();
+    if (!rowCanEditServing(this.view, row)) {
+      return false;
+    }
+    this.clearExpandedItem();
+    this.submitAction({
+      type: 'edit-serving',
+      mealIndex: this.view.mealCursor,
+      rowIndex: this.view.itemCursor,
+    });
+    return true;
   }
 
   private cancelAssignMode(): void {
@@ -2574,12 +2712,13 @@ function contextHelp(state: InteractiveState): string {
     return '←/→ tabs | type search/filter | ↑/↓ results | Enter add | Esc meals | Ctrl-C exit';
   }
   const row = getMealRow(state, state.mealCursor, state.itemCursor);
-  const expandAction = row && rowComponents(state, row).length > 1
+  const editAction = rowCanEditServing(state, row) ? ' | E edit' : '';
+  const expandAction = !editAction && row && rowComponents(state, row).length > 1
     ? ` | E ${state.expandedItemKey === rowExpansionKey(row) ? 'collapse' : 'expand'}`
     : '';
   return row?.type === 'outside'
-    ? `↑/↓ items | ←/Esc meals | A assign${expandAction} | q exit`
-    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction} | q exit`;
+    ? `↑/↓ items | ←/Esc meals | A assign${editAction}${expandAction} | q exit`
+    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${editAction}${expandAction} | q exit`;
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {

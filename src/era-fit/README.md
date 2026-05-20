@@ -63,11 +63,13 @@ Item mode:
 - `␣` toggles the selected meal-plan item.
 - `R` sets a serving multiplier for the selected meal-plan item.
 - `S` opens alternative search for the selected meal-plan item.
-- `E` expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
+- `E` edits serving and amount for a checked item; on unchecked rows it expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
 - `A` starts assign mode when the selected row is a green outside-plan item.
 - `q` exits.
 
 Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
+
+Serving edits reuse the same serving selector and amount prompt used when adding past foods, prefilled from the tracked item. In `--dry-run`, the edited serving is rendered locally without writing to Era Fit.
 
 Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, and the meal title switches from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
