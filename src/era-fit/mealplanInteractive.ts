@@ -43,17 +43,19 @@ import {
   searchTrackFoodChoices,
   tryParseTrackItem,
   type FoodSearchChoice,
+  type PastFoodSearchItem,
   type ParsedTrackItem,
   type ResolvedTrackFood,
   type SavedTrackFood,
   type TrackedFoodEntry,
   type TrackedFoodRecord,
 } from './tracking';
+import { listPastTrackedFoods, searchPastTrackedFoods } from './historyFoods';
 import { listSavedFoods, type SavedFoodSearchItem, type SavedFoodSource } from './savedFoods';
 
 type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search' | 'add';
 type LoadingKind = 'checking' | 'unchecking';
-type AddFoodTab = 'search' | 'faves' | 'meals' | 'food';
+type AddFoodTab = 'search' | 'past' | 'faves' | 'meals' | 'food';
 
 const CHECKBOX_EMPTY = '○';
 const CHECKBOX_CHECKED = '×';
@@ -114,6 +116,7 @@ interface AddFoodState {
   cursor: number;
   loading: boolean;
   requestId: number;
+  pastFoods: PastFoodSearchItem[] | null;
   savedFoods: SavedFoodSearchItem[] | null;
 }
 
@@ -699,6 +702,9 @@ function buildAddTrackItem(choice: FoodSearchChoice, query: string): ParsedTrack
   if (choice.type === 'saved') {
     return parseTrackItem(`1 ${choice.saved.name}`);
   }
+  if (choice.type === 'past') {
+    return parseTrackItem(`1 ${choice.past.name}`);
+  }
   const label = query.trim() || choice.food.food_name;
   return parseTrackItem(`1 ${label}|${choice.food.food_id}`);
 }
@@ -786,7 +792,7 @@ function closeFoodSearch(state: InteractiveState): void {
   state.mode = 'items';
 }
 
-const ADD_FOOD_TABS = ['search', 'faves', 'meals', 'food'] as const satisfies readonly AddFoodTab[];
+const ADD_FOOD_TABS = ['search', 'past', 'faves', 'meals', 'food'] as const satisfies readonly AddFoodTab[];
 
 function openAddMode(state: InteractiveState, mealIndex: number): void {
   const meal = state.meals[mealIndex];
@@ -803,6 +809,7 @@ function openAddMode(state: InteractiveState, mealIndex: number): void {
     cursor: 0,
     loading: false,
     requestId: 0,
+    pastFoods: null,
     savedFoods: null,
   };
 }
@@ -821,6 +828,14 @@ async function loadAddFoodChoices(session: EraFitSession, add: AddFoodState): Pr
     return (await searchEraFitFatSecretFoods(session, query))
       .slice(0, 10)
       .map(food => ({ type: 'fatsecret' as const, food }));
+  }
+
+  if (add.tab === 'past') {
+    if (!add.pastFoods) {
+      add.pastFoods = await listPastTrackedFoods(session);
+    }
+    return searchPastTrackedFoods(add.pastFoods, query)
+      .map(past => ({ type: 'past' as const, past }));
   }
 
   if (!add.savedFoods) {
@@ -2233,6 +2248,7 @@ function renderAddFoodTabs(activeTab: AddFoodTab): string {
 }
 
 function addFoodTabLabel(tab: AddFoodTab): string {
+  if (tab === 'past') return 'Past';
   if (tab === 'faves') return 'Faves';
   if (tab === 'meals') return 'Meals';
   if (tab === 'food') return 'Food';

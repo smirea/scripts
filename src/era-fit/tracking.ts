@@ -108,6 +108,23 @@ export interface TrackedFoodEntry {
   record: TrackedFoodRecord;
 }
 
+export interface PastFoodSearchItem {
+  id: string;
+  dateId: string | null;
+  meal: EraFitMealKey | null;
+  name: string;
+  brandName?: string;
+  servingDescription: string;
+  servingQuantity: number;
+  servingUnit: string;
+  calories: number;
+  protein: number;
+  netCarbs: number;
+  fat: number;
+  sortKey: string;
+  record: TrackedFoodRecord;
+}
+
 export type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
 
 export type TrackResolutionResult =
@@ -132,6 +149,7 @@ type BarcodeMissAction = 'skip' | 'cancel';
 
 export type FoodSearchChoice =
   | { type: 'saved'; saved: SavedFoodSearchItem }
+  | { type: 'past'; past: PastFoodSearchItem }
   | { type: 'fatsecret'; food: EraFitFatSecretSearchFood };
 
 export function parseTrackItem(raw: string): ParsedTrackItem {
@@ -243,6 +261,12 @@ export async function resolveTrackFoodFromSearchChoice(
   choice: FoodSearchChoice,
   options: TrackResolveOptions
 ): Promise<TrackResolutionResult> {
+  if (choice.type === 'past') {
+    return {
+      status: 'resolved',
+      food: buildPastResolvedTrackFood(item, choice.past, time),
+    };
+  }
   const food = await resolveFoodSearchChoice(session, choice);
   return finishResolvedTrackFood(cache, item, time, {
     ...options,
@@ -503,9 +527,13 @@ async function resolveFoodSearchChoice(
   session: EraFitSession,
   choice: FoodSearchChoice
 ): Promise<EraFitFatSecretFood | SavedFoodSearchItem> {
-  return choice.type === 'saved'
-    ? choice.saved
-    : fetchEraFitFatSecretFood(session, choice.food.food_id);
+  if (choice.type === 'saved') {
+    return choice.saved;
+  }
+  if (choice.type === 'fatsecret') {
+    return fetchEraFitFatSecretFood(session, choice.food.food_id);
+  }
+  throw new Error(`Cannot fetch details for ${choice.past.name}.`);
 }
 
 async function resolveFoodFromBarcode(
@@ -567,13 +595,19 @@ export function formatFoodSearchChoiceName(result: FoodSearchChoice): string {
     const suffix = result.saved.brandName ? ` by ${result.saved.brandName}` : ` [${savedFoodSourceLabel(result.saved.source)}]`;
     return `${chalk.yellow('★')} ${result.saved.name}${suffix}`;
   }
+  if (result.type === 'past') {
+    const suffix = result.past.brandName ? ` by ${result.past.brandName}` : '';
+    return `${chalk.cyan('↺')} ${result.past.name}${suffix}`;
+  }
   return result.food.brand_name ? `${result.food.food_name} by ${result.food.brand_name}` : result.food.food_name;
 }
 
 export function formatFoodSearchChoiceServing(result: FoodSearchChoice): string {
   const value = result.type === 'saved'
     ? result.saved.servingDescription
-    : parseSearchServing(result.food.food_description);
+    : result.type === 'past'
+      ? result.past.servingDescription
+      : parseSearchServing(result.food.food_description);
   return value.replace(/^Per\s+/i, '').trim();
 }
 
@@ -584,6 +618,14 @@ export function foodSearchChoiceMacroTotals(result: FoodSearchChoice): EraFitMac
       protein: result.saved.protein,
       net_carbs: result.saved.carbohydrate,
       fat: result.saved.fat,
+    };
+  }
+  if (result.type === 'past') {
+    return {
+      calories: result.past.calories,
+      protein: result.past.protein,
+      net_carbs: result.past.netCarbs,
+      fat: result.past.fat,
     };
   }
   return parseSearchMacros(result.food.food_description);
@@ -830,6 +872,25 @@ function buildSavedResolvedTrackFood(item: ParsedTrackItem, saved: SavedFoodSear
     record: saved.source === 'my_meal'
       ? buildSavedMealRecord(saved, item.amount, time)
       : buildSavedFoodRecord(saved, item, time),
+  };
+}
+
+function buildPastResolvedTrackFood(item: ParsedTrackItem, past: PastFoodSearchItem, time: string): ResolvedTrackFood {
+  const quantity = (parseNumberLike(past.record.serving_qtd) ?? past.servingQuantity) || item.amount;
+  return {
+    input: item,
+    food: null,
+    serving: {
+      type: 'saved',
+      label: past.servingDescription,
+      description: past.servingDescription,
+    },
+    quantity,
+    record: {
+      ...past.record,
+      serving_qtd: quantity,
+      time,
+    },
   };
 }
 
