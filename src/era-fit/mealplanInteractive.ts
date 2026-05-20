@@ -3,7 +3,7 @@ import { createInterface, emitKeypressEvents, type Interface, type Key } from 'n
 import { isCancel as isPromptCancel, text } from '@clack/prompts';
 import chalk from 'chalk';
 
-import { padVisibleEnd, truncateVisibleEnd, visibleLength } from '../utils/tabular';
+import { padVisibleEnd, padVisibleStart, truncateVisibleEnd, visibleLength } from '../utils/tabular';
 import {
   normalizeFoodCacheKey,
   rememberFoodSelection,
@@ -27,7 +27,7 @@ import {
   type EraFitMealPlanMeal,
   type EraFitSession,
 } from './core';
-import { formatMacroColumns, formatMacroNumber, formatMacros, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
+import { formatMacroColumns, formatMacroNumber, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
 import {
   deleteTrackedFoods,
   fetchTrackedFoodsForDate,
@@ -1956,8 +1956,9 @@ function renderMealPlanFrame(state: InteractiveState): string {
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
     const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
-    const mealLine = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')} ${formatMacros(mealRemainingMacros(state, mealIndex))}`;
-    lines.push(activeMeal ? chalk.cyan(mealLine) : mealLine);
+    const mealPrefix = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')}`;
+    const mealLine = `${activeMeal ? chalk.cyan(mealPrefix) : mealPrefix} ${formatRemainingMacros(meal.meal.macros, mealRemainingMacros(state, mealIndex))}`;
+    lines.push(mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
       const activeItem = (state.mode === 'items' || state.mode === 'assign') && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
       lines.push(renderItemLine(state, item, activeItem, ingredientLayout));
@@ -2083,6 +2084,42 @@ function formatMacroBalanceValue(target: number | null, current: number | null, 
   return difference >= 0
     ? chalk.green(`${amount} ${label} left`)
     : chalk.red(`${amount} ${label} over`);
+}
+
+function formatRemainingMacros(target: EraFitMacroTotals, remaining: EraFitMacroTotals): string {
+  const widths = getMacroColumnWidths([target, remaining]);
+  return [
+    formatRemainingCalories(target.calories, remaining.calories, widths.calories),
+    chalk.gray('|'),
+    formatRemainingMacro('P', target.protein, remaining.protein, widths.protein),
+    chalk.gray('|'),
+    formatRemainingMacro('C', target.net_carbs, remaining.net_carbs, widths.netCarbs),
+    chalk.gray('|'),
+    formatRemainingMacro('F', target.fat, remaining.fat, widths.fat),
+  ].join(' ');
+}
+
+function formatRemainingCalories(target: number | null, remaining: number | null, width: number): string {
+  return colorRemainingMacro(target, remaining)(`${padVisibleStart(formatMacroValue(remaining), width)} cal`);
+}
+
+function formatRemainingMacro(label: string, target: number | null, remaining: number | null, width: number): string {
+  return colorRemainingMacro(target, remaining)(`${label} ${padVisibleStart(formatMacroValue(remaining), width)}`);
+}
+
+function formatMacroValue(value: number | null): string {
+  return value == null ? '-' : formatMacroNumber(value);
+}
+
+function colorRemainingMacro(target: number | null, remaining: number | null): (value: string) => string {
+  if (target == null || remaining == null) {
+    return chalk.gray;
+  }
+  const tolerance = Math.abs(target) * 0.05;
+  if (Math.abs(remaining) <= tolerance) {
+    return chalk.green;
+  }
+  return remaining > 0 ? chalk.yellow : chalk.red;
 }
 
 function renderAddFoodLines(state: InteractiveState): string[] {
