@@ -17,11 +17,14 @@ Local Bun CLI for reading and writing Era Fit nutrition data.
 
 `era-fit mealplan -t` fetches today's suggested meal plan, fetches foods already tracked for today, and renders a terminal checklist grouped by meal.
 
+The top row shows remaining daily macros against the day target. Each meal title shows remaining macros for that meal: the meal-plan section target minus checked plan rows and green outside-plan rows already logged or added to that meal. `C` means net carbs everywhere in this mode.
+
 The mode is meant to be fast:
 
 - Use the meal-plan rows when you are following the plan.
 - Use replacement search when the suggested item is close but not what you actually ate.
 - Use assign when you already logged something manually and want future runs to understand that it covers a planned item.
+- Use add mode when you ate something extra in a meal and want it logged without assigning it to a planned row.
 
 ## Symbols
 
@@ -42,6 +45,7 @@ Meal mode:
 - `↑` / `↓` moves between meals.
 - `→` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
 - `␣` toggles the entire meal.
+- `A` opens add mode for the selected meal.
 - `Esc` or `q` exits.
 
 Item mode:
@@ -63,6 +67,20 @@ Search mode:
 - `Enter` logs the selected result for the planned item.
 - `Esc` returns to item mode.
 - `Ctrl-C` exits.
+
+Add mode:
+
+- `A` on a meal starts add mode for that meal.
+- Results render below the meal-plan table; the table stays visible.
+- `←` / `→` switches between `Search`, `Faves`, `Meals`, and `Food`.
+- `Search` queries global Era Fit foods. `Faves`, `Meals`, and `Food` show saved favorite foods, saved meals, and custom foods.
+- Typing searches or filters the active tab.
+- `↑` / `↓` moves through results.
+- `Enter` adds the selected result to the current meal.
+- `Esc` returns to meal mode.
+- `Ctrl-C` exits.
+
+Added foods show as green outside-plan rows under the meal and subtract from that meal title's remaining macros. In `--dry-run`, add mode goes through matching and rendering without writing to Era Fit.
 
 Assign mode:
 
