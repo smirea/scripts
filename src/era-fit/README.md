@@ -63,10 +63,13 @@ Item mode:
 - `R` sets a serving multiplier for the selected meal-plan item.
 - `S` opens alternative search for the selected meal-plan item.
 - `E` expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
+- `O` temporarily shows the original planned row when a checked row is displaying a replacement.
 - `A` starts assign mode when the selected row is a green outside-plan item.
 - `q` exits.
 
 Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
+
+Original view is reference-only. It is available on checked rows that are showing a replacement food; pressing `O` swaps the row back to the original meal-plan label and macros until you press `O` again or take any other action.
 
 Search mode:
 

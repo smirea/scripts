@@ -141,6 +141,7 @@ interface InteractiveState {
   foodSearch: FoodSearchState | null;
   addFood: AddFoodState | null;
   expandedItemKey: string | null;
+  originalItemKey: string | null;
   renderCache: InteractiveRenderCache;
   messages: string[];
 }
@@ -254,6 +255,7 @@ function createInteractiveState(
     foodSearch: null,
     addFood: null,
     expandedItemKey: null,
+    originalItemKey: null,
     renderCache: createRenderCache(),
     messages: [],
   };
@@ -287,6 +289,7 @@ async function handleMealPlanAction(
   action: MealPlanPromptAction
 ): Promise<void> {
   state.expandedItemKey = null;
+  state.originalItemKey = null;
   invalidateRenderCache(state);
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
@@ -1490,6 +1493,9 @@ class MealPlanChecklistPrompt {
     if (command === 'e' && this.view.mode === 'items' && this.toggleCurrentExpansion()) {
       return;
     }
+    if (command === 'o' && this.view.mode === 'items' && this.toggleCurrentOriginalView()) {
+      return;
+    }
     if (info.ctrl && info.name === 'c') {
       this.clearExpandedItem();
       this.submitAction({ type: 'done' });
@@ -1723,13 +1729,29 @@ class MealPlanChecklistPrompt {
       return false;
     }
     const key = rowExpansionKey(row);
+    this.view.originalItemKey = null;
     this.view.expandedItemKey = this.view.expandedItemKey === key ? null : key;
+    this.repaint();
+    return true;
+  }
+
+  private toggleCurrentOriginalView(): boolean {
+    const row = this.currentRow();
+    if (row?.type !== 'plan') {
+      return false;
+    }
+    if (!canShowOriginalItem(this.view, row.item)) {
+      return false;
+    }
+    this.view.expandedItemKey = null;
+    this.view.originalItemKey = this.view.originalItemKey === row.item.key ? null : row.item.key;
     this.repaint();
     return true;
   }
 
   private clearExpandedItem(): void {
     this.view.expandedItemKey = null;
+    this.view.originalItemKey = null;
   }
 
   private openCurrentAddMode(): void {
@@ -2252,13 +2274,14 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
   const existing = state.existingItemKeys.has(item.key);
   const tracked = state.trackedItemByKey.get(item.key);
   const replacement = tracked && isReplacementTrackedFood(state, item, tracked);
+  const showingOriginal = isShowingOriginalItem(state, item);
   const label = truncateVisibleEnd(formatItemLineLabel(state, item), layout.labelWidth);
   const styledLabel = completed
-    ? replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
+    ? showingOriginal ? chalk.gray(label) : replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
     : label;
   const existingText = existing ? chalk.gray(' tracked') : '';
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
-  const macros = completed && tracked ? trackedEntryMacroTotals(state, tracked) : item.item;
+  const macros = completed && tracked && !showingOriginal ? trackedEntryMacroTotals(state, tracked) : item.item;
   const row = { type: 'plan' as const, item };
   const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(macros, layout.macroWidths)}${existingText}`;
   return active ? chalk.cyan(line) : line;
@@ -2302,7 +2325,7 @@ function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout 
     ...components,
   ]);
   const naturalLabelWidth = [
-    ...items.map(item => formatItemLineLabel(state, item)),
+    ...items.flatMap(item => formatItemLineLabelsForLayout(state, item)),
     ...outsideItems.map(item => formatOutsidePlanItemLabel(item)),
     ...components.map(component => formatComponentItemLabel(component)),
   ].reduce((width, label) => Math.max(width, visibleLength(label)), 0);
@@ -2426,9 +2449,27 @@ function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemR
 
 function formatItemLineLabel(state: InteractiveState, item: MealPlanItemRef): string {
   const tracked = state.trackedItemByKey.get(item.key);
-  return tracked && state.completedItemKeys.has(item.key) && isReplacementTrackedFood(state, item, tracked)
+  return tracked && state.completedItemKeys.has(item.key) && isReplacementTrackedFood(state, item, tracked) && !isShowingOriginalItem(state, item)
     ? formatTrackedPlanItemLabel(tracked.record)
     : formatInteractiveItemLabel(state, item);
+}
+
+function formatItemLineLabelsForLayout(state: InteractiveState, item: MealPlanItemRef): string[] {
+  const labels = [formatInteractiveItemLabel(state, item)];
+  const tracked = state.trackedItemByKey.get(item.key);
+  if (tracked && isReplacementTrackedFood(state, item, tracked)) {
+    labels.push(formatTrackedPlanItemLabel(tracked.record));
+  }
+  return labels;
+}
+
+function isShowingOriginalItem(state: InteractiveState, item: MealPlanItemRef): boolean {
+  return state.originalItemKey === item.key;
+}
+
+function canShowOriginalItem(state: InteractiveState, item: MealPlanItemRef): boolean {
+  const tracked = state.trackedItemByKey.get(item.key);
+  return Boolean(tracked && isReplacementTrackedFood(state, item, tracked));
 }
 
 function formatOutsidePlanItemLabel(item: OutsidePlanItemRef): string {
@@ -2513,9 +2554,12 @@ function contextHelp(state: InteractiveState): string {
   const expandAction = row && rowComponents(state, row).length > 1
     ? ` | E ${state.expandedItemKey === rowExpansionKey(row) ? 'collapse' : 'expand'}`
     : '';
+  const originalAction = row?.type === 'plan' && canShowOriginalItem(state, row.item)
+    ? ` | O ${isShowingOriginalItem(state, row.item) ? 'replacement' : 'original'}`
+    : '';
   return row?.type === 'outside'
     ? `↑/↓ items | ←/Esc meals | A assign${expandAction} | q exit`
-    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction} | q exit`;
+    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction}${originalAction} | q exit`;
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
