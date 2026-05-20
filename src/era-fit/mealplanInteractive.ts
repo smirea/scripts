@@ -558,9 +558,13 @@ async function saveResolvedMealItems(
   }
   invalidateRenderCache(state);
   const label = resolved.length === 1
-    ? formatItemDisplayName(resolved[0].item.item)
+    ? formatSavedMealItemLabel(resolved[0].item, trackedEntries[0])
     : `${resolved.length} items`;
   pushMessage(state, `${state.dryRun ? 'would log' : 'logged'} ${label}`);
+}
+
+function formatSavedMealItemLabel(item: MealPlanItemRef, tracked: TrackedFoodEntry | undefined): string {
+  return tracked ? formatTrackedPlanItemLabel(tracked.record) : formatItemDisplayName(item.item);
 }
 
 function trackedEntryFromSavedFood(meal: EraFitMealKey, saved: SavedTrackFood): TrackedFoodEntry {
@@ -606,8 +610,8 @@ async function logSelectedFoodSearchChoice(
     {
       useCache: false,
       writeCache: !state.dryRun,
-      interactive: false,
-      forceServingPrompt: false,
+      interactive: true,
+      forceServingPrompt: true,
       aliases: foodCacheAliases(search.item),
       log: message => pushMessage(state, message),
     }
@@ -2246,12 +2250,17 @@ function renderFoodSearchLines(search: FoodSearchState): string[] {
 function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean, layout: IngredientLineLayout): string {
   const completed = state.completedItemKeys.has(item.key);
   const existing = state.existingItemKeys.has(item.key);
-  const label = truncateVisibleEnd(formatInteractiveItemLabel(state, item), layout.labelWidth);
-  const styledLabel = completed ? chalk.strikethrough(chalk.gray(label)) : label;
+  const tracked = state.trackedItemByKey.get(item.key);
+  const replacement = tracked && isReplacementTrackedFood(state, item, tracked);
+  const label = truncateVisibleEnd(formatItemLineLabel(state, item), layout.labelWidth);
+  const styledLabel = completed
+    ? replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
+    : label;
   const existingText = existing ? chalk.gray(' tracked') : '';
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
+  const macros = completed && tracked ? trackedEntryMacroTotals(state, tracked) : item.item;
   const row = { type: 'plan' as const, item };
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(item.item, layout.macroWidths)}${existingText}`;
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(macros, layout.macroWidths)}${existingText}`;
   return active ? chalk.cyan(line) : line;
 }
 
@@ -2293,7 +2302,7 @@ function getIngredientLineLayout(state: InteractiveState): IngredientLineLayout 
     ...components,
   ]);
   const naturalLabelWidth = [
-    ...items.map(item => formatInteractiveItemLabel(state, item)),
+    ...items.map(item => formatItemLineLabel(state, item)),
     ...outsideItems.map(item => formatOutsidePlanItemLabel(item)),
     ...components.map(component => formatComponentItemLabel(component)),
   ].reduce((width, label) => Math.max(width, visibleLength(label)), 0);
@@ -2415,11 +2424,26 @@ function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemR
   return `${formatItemDisplayName(item.item)}${multiplier && Math.abs(multiplier - 1) > 0.0001 ? ` x${formatNumber(multiplier)}` : ''}`;
 }
 
+function formatItemLineLabel(state: InteractiveState, item: MealPlanItemRef): string {
+  const tracked = state.trackedItemByKey.get(item.key);
+  return tracked && state.completedItemKeys.has(item.key) && isReplacementTrackedFood(state, item, tracked)
+    ? formatTrackedPlanItemLabel(tracked.record)
+    : formatInteractiveItemLabel(state, item);
+}
+
 function formatOutsidePlanItemLabel(item: OutsidePlanItemRef): string {
-  const record = item.entry.record;
+  return formatTrackedPlanItemLabel(item.entry.record);
+}
+
+function formatTrackedPlanItemLabel(record: TrackedFoodRecord): string {
   const serving = nonEmptyString(record.serving_description);
   const name = formatTrackedFoodDisplayName(record);
   return serving ? `${name} (${serving})` : name;
+}
+
+function isReplacementTrackedFood(state: InteractiveState, item: MealPlanItemRef, tracked: TrackedFoodEntry): boolean {
+  return normalizeFoodCacheKey(formatInteractiveItemLabel(state, item)) !==
+    normalizeFoodCacheKey(formatTrackedPlanItemLabel(tracked.record));
 }
 
 function formatTrackedFoodDisplayName(record: TrackedFoodRecord): string {
