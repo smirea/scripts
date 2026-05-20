@@ -41,7 +41,7 @@ export function getMacroColumnWidths(values: EraFitMacroTotals[]): MacroColumnWi
 }
 
 function formatCaloriesMacro(value: EraFitMacroTotals, width: number): string {
-  return `${padVisibleStart(formatNullableNumber(value.calories), width)} kcal`;
+  return `${padVisibleStart(formatNullableNumber(value.calories), width)} cal`;
 }
 
 function formatProteinMacro(value: EraFitMacroTotals, width: number): string {
