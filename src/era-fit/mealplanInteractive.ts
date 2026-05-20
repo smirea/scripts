@@ -1954,7 +1954,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
     `${chalk.bold(state.day.day)} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
-    `  ${formatMacroBalance(state)}`,
+    ...formatDailyMacroBalanceLines(state).map(line => `  ${line}`),
     '',
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
@@ -1994,14 +1994,25 @@ function renderMealPlanFrame(state: InteractiveState): string {
   return lines.join('\n');
 }
 
-function formatMacroBalance(state: InteractiveState): string {
+function formatDailyMacroBalanceLines(state: InteractiveState): string[] {
   const logged = sumTrackedMacros(state, state.trackedEntries);
+  const target = dayTargetMacros(state.day);
+  const remaining = subtractMacros(target, logged);
+  const widths = getMacroColumnWidths([target, remaining]);
+  const labelWidth = visibleLength('target:');
   return [
-    formatMacroBalanceValue(targetCalories(state.day), logged.calories, 'calories'),
-    formatMacroBalanceValue(state.day.targets.protein, logged.protein, 'protein'),
-    formatMacroBalanceValue(state.day.targets.net_carbs, logged.net_carbs, 'net carbs'),
-    formatMacroBalanceValue(state.day.targets.fat, logged.fat, 'fat'),
-  ].join(chalk.gray(' | '));
+    `${chalk.gray(padVisibleEnd('left:', labelWidth))} ${formatRemainingMacrosWithWidths(target, remaining, widths)}`,
+    `${chalk.gray(padVisibleEnd('target:', labelWidth))} ${formatTargetMacros(target, widths)}`,
+  ];
+}
+
+function dayTargetMacros(day: EraFitMealPlanDay): EraFitMacroTotals {
+  return {
+    calories: targetCalories(day),
+    protein: day.targets.protein,
+    net_carbs: day.targets.net_carbs,
+    fat: day.targets.fat,
+  };
 }
 
 function targetCalories(day: EraFitMealPlanDay): number | null {
@@ -2078,19 +2089,12 @@ function roundRemainingMacroValue(value: number): number {
   return Object.is(rounded, -0) ? 0 : rounded;
 }
 
-function formatMacroBalanceValue(target: number | null, current: number | null, label: string): string {
-  if (target == null || current == null) {
-    return chalk.gray(`${label} unknown`);
-  }
-  const difference = roundNumber(target - current);
-  const amount = formatMacroNumber(Math.abs(difference));
-  return difference >= 0
-    ? chalk.green(`${amount} ${label} left`)
-    : chalk.red(`${amount} ${label} over`);
-}
-
 function formatRemainingMacros(target: EraFitMacroTotals, remaining: EraFitMacroTotals): string {
   const widths = getMacroColumnWidths([target, remaining]);
+  return formatRemainingMacrosWithWidths(target, remaining, widths);
+}
+
+function formatRemainingMacrosWithWidths(target: EraFitMacroTotals, remaining: EraFitMacroTotals, widths: MacroColumnWidths): string {
   return [
     formatRemainingCalories(target.calories, remaining.calories, widths.calories),
     chalk.gray('|'),
@@ -2100,6 +2104,18 @@ function formatRemainingMacros(target: EraFitMacroTotals, remaining: EraFitMacro
     chalk.gray('|'),
     formatRemainingMacro('F', target.fat, remaining.fat, widths.fat),
   ].join(' ');
+}
+
+function formatTargetMacros(target: EraFitMacroTotals, widths: MacroColumnWidths): string {
+  return chalk.gray([
+    `${padVisibleStart(formatMacroValue(target.calories), widths.calories)} cal`,
+    '|',
+    `P ${padVisibleStart(formatMacroValue(target.protein), widths.protein)}`,
+    '|',
+    `C ${padVisibleStart(formatMacroValue(target.net_carbs), widths.netCarbs)}`,
+    '|',
+    `F ${padVisibleStart(formatMacroValue(target.fat), widths.fat)}`,
+  ].join(' '));
 }
 
 function formatRemainingCalories(target: number | null, remaining: number | null, width: number): string {
