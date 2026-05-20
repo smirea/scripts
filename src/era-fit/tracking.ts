@@ -542,7 +542,7 @@ export function formatFoodSearchOptionLabels(results: FoodSearchChoice[]): strin
       `per ${formatSearchServing(result)}`,
       formatSearchMacro(macros.calories, 'cal'),
       formatSearchMacro(macros.protein, 'p'),
-      formatSearchMacro(macros.netCarbs, 'nc'),
+      formatSearchMacro(macros.netCarbs, 'c'),
       formatSearchMacro(macros.fat, 'f'),
     ];
   }), {

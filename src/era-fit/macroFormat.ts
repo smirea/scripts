@@ -11,56 +11,49 @@ export interface MacroColumnWidths {
 }
 
 export function formatMacros(value: EraFitMacroTotals): string {
-  return [
-    chalk.blue(formatCaloriesMacro(value)),
-    chalk.red(formatProteinMacro(value)),
-    chalk.yellow(formatCarbsMacro(value)),
-    chalk.magenta(formatFatMacro(value)),
-  ].join(chalk.gray(' | '));
+  return formatMacroColumns(value, getMacroColumnWidths([value]));
 }
 
 export function formatMacroColumns(value: EraFitMacroTotals, widths: MacroColumnWidths): string {
   return [
-    padVisibleStart(chalk.blue(formatCaloriesMacro(value)), widths.calories),
+    chalk.blue(formatCaloriesMacro(value, widths.calories)),
     chalk.gray('|'),
-    padVisibleStart(chalk.red(formatProteinMacro(value)), widths.protein),
+    chalk.red(formatProteinMacro(value, widths.protein)),
     chalk.gray('|'),
-    padVisibleStart(chalk.yellow(formatCarbsMacro(value)), widths.netCarbs),
+    chalk.yellow(formatCarbsMacro(value, widths.netCarbs)),
     chalk.gray('|'),
-    padVisibleStart(chalk.magenta(formatFatMacro(value)), widths.fat),
+    chalk.magenta(formatFatMacro(value, widths.fat)),
   ].join(' ');
 }
 
 export function getMacroColumnWidths(values: EraFitMacroTotals[]): MacroColumnWidths {
   return values.reduce<MacroColumnWidths>((widths, value) => ({
-    calories: Math.max(widths.calories, visibleLength(formatCaloriesMacro(value))),
-    protein: Math.max(widths.protein, visibleLength(formatProteinMacro(value))),
-    netCarbs: Math.max(widths.netCarbs, visibleLength(formatCarbsMacro(value))),
-    fat: Math.max(widths.fat, visibleLength(formatFatMacro(value))),
+    calories: Math.max(widths.calories, visibleLength(formatNullableNumber(value.calories))),
+    protein: Math.max(widths.protein, visibleLength(formatNullableNumber(value.protein))),
+    netCarbs: Math.max(widths.netCarbs, visibleLength(formatNullableNumber(value.net_carbs))),
+    fat: Math.max(widths.fat, visibleLength(formatNullableNumber(value.fat))),
   }), {
-    calories: visibleLength(formatCaloriesMacro(emptyMacros)),
-    protein: visibleLength(formatProteinMacro(emptyMacros)),
-    netCarbs: visibleLength(formatCarbsMacro(emptyMacros)),
-    fat: visibleLength(formatFatMacro(emptyMacros)),
+    calories: 3,
+    protein: 2,
+    netCarbs: 2,
+    fat: 2,
   });
 }
 
-const emptyMacros = { calories: null, protein: null, net_carbs: null, fat: null } satisfies EraFitMacroTotals;
-
-function formatCaloriesMacro(value: EraFitMacroTotals): string {
-  return `${formatNullableNumber(value.calories)} kcal`;
+function formatCaloriesMacro(value: EraFitMacroTotals, width: number): string {
+  return `${padVisibleStart(formatNullableNumber(value.calories), width)} kcal`;
 }
 
-function formatProteinMacro(value: EraFitMacroTotals): string {
-  return `P ${formatNullableNumber(value.protein)}g`;
+function formatProteinMacro(value: EraFitMacroTotals, width: number): string {
+  return `P ${padVisibleStart(formatNullableNumber(value.protein), width)}`;
 }
 
-function formatCarbsMacro(value: EraFitMacroTotals): string {
-  return `NC ${formatNullableNumber(value.net_carbs)}g`;
+function formatCarbsMacro(value: EraFitMacroTotals, width: number): string {
+  return `C ${padVisibleStart(formatNullableNumber(value.net_carbs), width)}`;
 }
 
-function formatFatMacro(value: EraFitMacroTotals): string {
-  return `F ${formatNullableNumber(value.fat)}g`;
+function formatFatMacro(value: EraFitMacroTotals, width: number): string {
+  return `F ${padVisibleStart(formatNullableNumber(value.fat), width)}`;
 }
 
 function formatNullableNumber(value: number | null): string {
