@@ -22,7 +22,7 @@ export function formatMacroColumns(value: EraFitMacroTotals, widths: MacroColumn
     chalk.gray('|'),
     chalk.yellow(formatCarbsMacro(value, widths.netCarbs)),
     chalk.gray('|'),
-    chalk.magenta(formatFatMacro(value, widths.fat)),
+    chalk.cyan(formatFatMacro(value, widths.fat)),
   ].join(' ');
 }
 
