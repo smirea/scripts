@@ -53,6 +53,7 @@ Meal mode:
 - `→` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
 - `␣` toggles the entire meal.
 - `A` opens add mode for the selected meal.
+- `O` temporarily shows the original planned rows for the selected meal when that meal has replacement foods.
 - `Esc` or `q` exits.
 
 Item mode:
@@ -63,13 +64,12 @@ Item mode:
 - `R` sets a serving multiplier for the selected meal-plan item.
 - `S` opens alternative search for the selected meal-plan item.
 - `E` expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
-- `O` temporarily shows the original planned row when a checked row is displaying a replacement.
 - `A` starts assign mode when the selected row is a green outside-plan item.
 - `q` exits.
 
 Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
 
-Original view is reference-only. It is available on checked rows that are showing a replacement food; pressing `O` swaps the row back to the original meal-plan label and macros until you press `O` again or take any other action.
+Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros until you press `O` again or take any other action.
 
 Search mode:
 

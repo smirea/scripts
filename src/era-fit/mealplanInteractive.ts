@@ -141,7 +141,7 @@ interface InteractiveState {
   foodSearch: FoodSearchState | null;
   addFood: AddFoodState | null;
   expandedItemKey: string | null;
-  originalItemKey: string | null;
+  originalMealIndex: number | null;
   renderCache: InteractiveRenderCache;
   messages: string[];
 }
@@ -255,7 +255,7 @@ function createInteractiveState(
     foodSearch: null,
     addFood: null,
     expandedItemKey: null,
-    originalItemKey: null,
+    originalMealIndex: null,
     renderCache: createRenderCache(),
     messages: [],
   };
@@ -289,7 +289,7 @@ async function handleMealPlanAction(
   action: MealPlanPromptAction
 ): Promise<void> {
   state.expandedItemKey = null;
-  state.originalItemKey = null;
+  state.originalMealIndex = null;
   invalidateRenderCache(state);
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
@@ -1493,7 +1493,7 @@ class MealPlanChecklistPrompt {
     if (command === 'e' && this.view.mode === 'items' && this.toggleCurrentExpansion()) {
       return;
     }
-    if (command === 'o' && this.view.mode === 'items' && this.toggleCurrentOriginalView()) {
+    if (command === 'o' && this.view.mode === 'meals' && this.toggleCurrentOriginalSection()) {
       return;
     }
     if (info.ctrl && info.name === 'c') {
@@ -1729,29 +1729,25 @@ class MealPlanChecklistPrompt {
       return false;
     }
     const key = rowExpansionKey(row);
-    this.view.originalItemKey = null;
+    this.view.originalMealIndex = null;
     this.view.expandedItemKey = this.view.expandedItemKey === key ? null : key;
     this.repaint();
     return true;
   }
 
-  private toggleCurrentOriginalView(): boolean {
-    const row = this.currentRow();
-    if (row?.type !== 'plan') {
-      return false;
-    }
-    if (!canShowOriginalItem(this.view, row.item)) {
+  private toggleCurrentOriginalSection(): boolean {
+    if (!canShowOriginalMeal(this.view, this.view.mealCursor)) {
       return false;
     }
     this.view.expandedItemKey = null;
-    this.view.originalItemKey = this.view.originalItemKey === row.item.key ? null : row.item.key;
+    this.view.originalMealIndex = this.view.originalMealIndex === this.view.mealCursor ? null : this.view.mealCursor;
     this.repaint();
     return true;
   }
 
   private clearExpandedItem(): void {
     this.view.expandedItemKey = null;
-    this.view.originalItemKey = null;
+    this.view.originalMealIndex = null;
   }
 
   private openCurrentAddMode(): void {
@@ -2274,10 +2270,11 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
   const existing = state.existingItemKeys.has(item.key);
   const tracked = state.trackedItemByKey.get(item.key);
   const replacement = tracked && isReplacementTrackedFood(state, item, tracked);
-  const showingOriginal = isShowingOriginalItem(state, item);
+  const showingOriginal = isShowingOriginalMeal(state, item.mealIndex);
   const label = truncateVisibleEnd(formatItemLineLabel(state, item), layout.labelWidth);
-  const styledLabel = completed
-    ? showingOriginal ? chalk.gray(label) : replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
+  const styledLabel = showingOriginal
+    ? chalk.gray(label)
+    : completed ? replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
     : label;
   const existingText = existing ? chalk.gray(' tracked') : '';
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
@@ -2449,7 +2446,7 @@ function formatInteractiveItemLabel(state: InteractiveState, item: MealPlanItemR
 
 function formatItemLineLabel(state: InteractiveState, item: MealPlanItemRef): string {
   const tracked = state.trackedItemByKey.get(item.key);
-  return tracked && state.completedItemKeys.has(item.key) && isReplacementTrackedFood(state, item, tracked) && !isShowingOriginalItem(state, item)
+  return tracked && state.completedItemKeys.has(item.key) && isReplacementTrackedFood(state, item, tracked) && !isShowingOriginalMeal(state, item.mealIndex)
     ? formatTrackedPlanItemLabel(tracked.record)
     : formatInteractiveItemLabel(state, item);
 }
@@ -2463,13 +2460,16 @@ function formatItemLineLabelsForLayout(state: InteractiveState, item: MealPlanIt
   return labels;
 }
 
-function isShowingOriginalItem(state: InteractiveState, item: MealPlanItemRef): boolean {
-  return state.originalItemKey === item.key;
+function isShowingOriginalMeal(state: InteractiveState, mealIndex: number): boolean {
+  return state.originalMealIndex === mealIndex;
 }
 
-function canShowOriginalItem(state: InteractiveState, item: MealPlanItemRef): boolean {
-  const tracked = state.trackedItemByKey.get(item.key);
-  return Boolean(tracked && isReplacementTrackedFood(state, item, tracked));
+function canShowOriginalMeal(state: InteractiveState, mealIndex: number): boolean {
+  const meal = state.meals[mealIndex];
+  return Boolean(meal?.items.some(item => {
+    const tracked = state.trackedItemByKey.get(item.key);
+    return tracked && isReplacementTrackedFood(state, item, tracked);
+  }));
 }
 
 function formatOutsidePlanItemLabel(item: OutsidePlanItemRef): string {
@@ -2539,7 +2539,10 @@ function formatLoadingSpinner(key: string): string {
 
 function contextHelp(state: InteractiveState): string {
   if (state.mode === 'meals') {
-    return '↑/↓ meals | → items | ␣ toggle | A add | Esc/q exit | Ctrl-C cancel';
+    const originalAction = canShowOriginalMeal(state, state.mealCursor)
+      ? ` | O ${isShowingOriginalMeal(state, state.mealCursor) ? 'current' : 'original'}`
+      : '';
+    return `↑/↓ meals | → items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
@@ -2554,12 +2557,9 @@ function contextHelp(state: InteractiveState): string {
   const expandAction = row && rowComponents(state, row).length > 1
     ? ` | E ${state.expandedItemKey === rowExpansionKey(row) ? 'collapse' : 'expand'}`
     : '';
-  const originalAction = row?.type === 'plan' && canShowOriginalItem(state, row.item)
-    ? ` | O ${isShowingOriginalItem(state, row.item) ? 'replacement' : 'original'}`
-    : '';
   return row?.type === 'outside'
     ? `↑/↓ items | ←/Esc meals | A assign${expandAction} | q exit`
-    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction}${originalAction} | q exit`;
+    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${expandAction} | q exit`;
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {
