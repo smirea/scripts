@@ -1365,7 +1365,7 @@ function inferAssignedServingMultiplier(record: TrackedFoodRecord, target: EraFi
   if (sourceQuantity == null || sourceQuantity <= 0 || targetQuantity <= 0) {
     return undefined;
   }
-  return roundNumber(sourceQuantity / targetQuantity);
+  return Number((sourceQuantity / targetQuantity).toFixed(8));
 }
 
 function refreshExistingTrackedMatches(cache: EraFitCache, state: InteractiveState): void {

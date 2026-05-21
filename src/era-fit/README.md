@@ -41,7 +41,7 @@ The mode is meant to be fast:
 - `⊞` means the row has multiple ingredients, such as a saved meal or recipe.
 - `⊟` means the ingredient breakdown is expanded.
 - `◐`, `◓`, `◑`, `◒` are loading states while a log/unlog/search request is pending.
-- `tracked` next to a checked item means the item was already present in Era Fit when the screen loaded or after cache rematching.
+- `tracked` next to a checked item means the item is backed by a current tracked Era Fit log, either from startup or after cache rematching.
 
 Checked meal-plan rows are crossed out when the logged food matches the plan row. Replacement rows show the actual logged food, serving, and macros in green so the replacement stays visible in the meal list. Outside-plan rows stay green so they are visually distinct from planned items.
 
@@ -68,13 +68,13 @@ Item mode:
 - `A` starts assign mode when the selected row is a green outside-plan item.
 - `q` exits.
 
-Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. Pressing `E` again collapses the row; any other action also clears the expansion.
+Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. `E` only expands rows when serving edit is not available; checked/tracked rows use `E` for edit instead. Pressing `E` again collapses an expanded row; any other action also clears the expansion.
 
 Serving edits reuse the same serving selector and amount prompt used when adding past foods, prefilled from the tracked item. In `--dry-run`, the edited serving is rendered locally without writing to Era Fit.
 
 Original section view is reference-only. It is available when the selected meal has checked items, replacements, or added outside-plan foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, hides added outside-plan rows for that meal, and switches the meal title from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
-Switch mode:
+Alternative search:
 
 - Search opens with the planned item name already filled in.
 - Results render below the meal-plan table; the table stays visible.
@@ -140,6 +140,7 @@ Matched logs are consumed once so one tracked food does not satisfy multiple pla
 
 - `mealPlanMealMap`: maps meal-plan meal keys to Era Fit tracking meal keys.
 - `foods`: aliases from meal-plan item labels to a concrete Era Fit food, saved food, custom food, my meal, serving, and optional serving multiplier.
+- `replacements`: previous `R` replacement choices per planned item, kept separate from aliases so they stay opt-in.
 
 The cache is used by both `track` and interactive `mealplan -t`.
 
@@ -148,7 +149,8 @@ Normal check-off flow:
 - If a planned item has a cache entry, the cached food/serving is used directly.
 - If there is no cache hit, checking an item opens search so you can choose the correct Era Fit food.
 - Successful selections write all useful aliases for the planned item back to `cache.json`.
-- Replacement selections also write aliases for the planned item, so future runs can match the replacement back to the plan row.
+- `S` alternative selections also write aliases for the planned item, so future runs can match that alternative back to the plan row.
+- `R` replacement selections are saved separately under `replacements`; they appear as previous replacements but do not become automatic aliases.
 
 Assignment flow:
 
@@ -161,15 +163,15 @@ Assignment flow:
 
 Checking a planned item logs it to Era Fit for today's date and that meal.
 
-Checking a meal logs every unchecked planned item in that meal. While the request is pending, the row or meal shows a spinner and navigation remains usable.
+Checking a meal attempts every unchecked planned item in that meal. Cached items log directly; if an item needs selection, the flow opens search for that item and leaves the rest of the checklist interactive. While requests are pending, the row or meal shows a spinner and navigation remains usable.
 
-Unchecking a checked item deletes the matching Era Fit tracked food when the item is backed by a known tracked record. Session-only dry-run checks are simply removed from the local checklist state.
+Unchecking a checked item deletes the matching Era Fit tracked food when the item is backed by a known tracked record. In `--dry-run`, unchecking only removes the tracked record from the local checklist state so the totals update, and Era Fit is untouched.
 
 ## Alternatives and Serving Multipliers
 
 `S` is for choosing a different food than the plan text. It searches saved/custom foods and standard Era Fit food results; saved matches are shown at the top and marked with `★` when available. After selecting a result, choose the serving and enter the amount. The checked row then displays the actual logged food, serving, and macros.
 
-`R` sets a multiplier before logging or searching. Use it for cases like half a planned serving or a larger portion. The multiplier affects the amount sent to search/logging and is shown next to the item label until changed back to `1`.
+`M` sets a multiplier before logging or searching. Use it for cases like half a planned serving or a larger portion. The multiplier affects the amount sent to search/logging and is shown next to the item label until changed back to `1`.
 
 ## Dry Run
 
