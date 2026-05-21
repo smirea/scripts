@@ -2580,7 +2580,8 @@ function renderMealPlanFrame(state: InteractiveState): string {
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
     const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
-    const mealPrefix = `${activeMeal ? chalk.cyan('>') : ' '} ${formatMealCheckbox(state, meal.items)} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')}`;
+    const mealCheckbox = isShowingOriginalMeal(state, mealIndex) ? CHECKBOX_EMPTY : formatMealCheckbox(state, meal.items);
+    const mealPrefix = `${activeMeal ? chalk.cyan('>') : ' '} ${mealCheckbox} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')}`;
     const mealLine = `${activeMeal ? chalk.cyan(mealPrefix) : mealPrefix} ${formatMealHeaderMacros(state, mealIndex)}`;
     lines.push(mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
@@ -2592,12 +2593,14 @@ function renderMealPlanFrame(state: InteractiveState): string {
         lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'plan', item }), ingredientLayout));
       }
     }
-    for (const [outsideIndex, item] of meal.outsideItems.entries()) {
-      const rowIndex = meal.items.length + outsideIndex;
-      const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === rowIndex;
-      lines.push(renderOutsidePlanItemLine(state, item, activeItem, ingredientLayout));
-      if (state.expandedItemKey === rowExpansionKey({ type: 'outside', item })) {
-        lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'outside', item }), ingredientLayout));
+    if (!isShowingOriginalMeal(state, mealIndex)) {
+      for (const [outsideIndex, item] of meal.outsideItems.entries()) {
+        const rowIndex = meal.items.length + outsideIndex;
+        const activeItem = state.mode === 'items' && state.mealCursor === mealIndex && state.itemCursor === rowIndex;
+        lines.push(renderOutsidePlanItemLine(state, item, activeItem, ingredientLayout));
+        if (state.expandedItemKey === rowExpansionKey({ type: 'outside', item })) {
+          lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'outside', item }), ingredientLayout));
+        }
       }
     }
   }
@@ -2953,11 +2956,12 @@ function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: 
     ? chalk.gray(label)
     : completed ? replacement ? chalk.green(label) : chalk.strikethrough(chalk.gray(label))
     : label;
-  const existingText = existing ? chalk.gray(' tracked') : '';
+  const existingText = existing && !showingOriginal ? chalk.gray(' tracked') : '';
   const paddedLabel = padVisibleEnd(styledLabel, layout.labelWidth);
   const macros = completed && tracked && !showingOriginal ? trackedEntryMacroTotals(state, tracked) : item.item;
   const row = { type: 'plan' as const, item };
-  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${formatItemCheckbox(state, item)} ${paddedLabel}  ${formatMacroColumns(macros, layout.macroWidths)}${existingText}`;
+  const checkbox = showingOriginal ? CHECKBOX_EMPTY : formatItemCheckbox(state, item);
+  const line = `  ${active ? chalk.cyan('>') : ' '} ${formatExpansionMarker(state, row)} ${checkbox} ${paddedLabel}  ${formatMacroColumns(macros, layout.macroWidths)}${existingText}`;
   return active ? chalk.cyan(line) : line;
 }
 
@@ -3143,10 +3147,11 @@ function isShowingOriginalMeal(state: InteractiveState, mealIndex: number): bool
 
 function canShowOriginalMeal(state: InteractiveState, mealIndex: number): boolean {
   const meal = state.meals[mealIndex];
-  return Boolean(meal?.items.some(item => {
-    const tracked = state.trackedItemByKey.get(item.key);
-    return tracked && isReplacementTrackedFood(state, item, tracked);
-  }));
+  if (!meal) {
+    return false;
+  }
+  return meal.outsideItems.length > 0 ||
+    meal.items.some(item => state.completedItemKeys.has(item.key) || state.trackedItemByKey.has(item.key));
 }
 
 function formatOutsidePlanItemLabel(item: OutsidePlanItemRef): string {

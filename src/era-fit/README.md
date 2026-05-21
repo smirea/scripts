@@ -53,7 +53,7 @@ Meal mode:
 - `→` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
 - `␣` toggles the entire meal.
 - `A` opens add mode for the selected meal.
-- `O` temporarily shows the original planned rows for the selected meal when that meal has replacement foods.
+- `O` temporarily shows the original planned rows for the selected meal when that meal has any logged updates.
 - `Esc` or `q` exits.
 
 Item mode:
@@ -72,7 +72,7 @@ Expanded ingredients are reference-only. They render inline under the selected r
 
 Serving edits reuse the same serving selector and amount prompt used when adding past foods, prefilled from the tracked item. In `--dry-run`, the edited serving is rendered locally without writing to Era Fit.
 
-Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, and the meal title switches from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
+Original section view is reference-only. It is available when the selected meal has checked items, replacements, or added outside-plan foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, hides added outside-plan rows for that meal, and switches the meal title from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
 Switch mode:
 
