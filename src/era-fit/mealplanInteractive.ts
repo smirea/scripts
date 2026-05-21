@@ -356,7 +356,7 @@ async function handleMealPlanAction(
     if (row?.type === 'plan') {
       startToggleItemsTask(session, cache, dateId, state, [row.item]);
     } else if (row?.type === 'outside') {
-      pushMessage(state, 'logged outside plan; press A to assign it');
+      await removeOutsidePlanItem(session, cache, dateId, state, row.item);
     }
     return;
   }
@@ -1076,6 +1076,30 @@ async function saveAddedFoodToMeal(
   state.mealCursor = mealIndex;
   state.itemCursor = trackedEntryRowIndex(state, mealIndex, entry);
   pushMessage(state, `${state.dryRun ? 'would add' : 'added'} ${formatTrackedFoodDisplayName(entry.record)} to ${meal.meal.meal}`);
+}
+
+async function removeOutsidePlanItem(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  item: OutsidePlanItemRef
+): Promise<void> {
+  const rowIndex = outsideItemRowIndex(state, item);
+  if (!state.dryRun) {
+    await deleteTrackedFoods(session, {
+      dateId,
+      foods: [item.entry],
+    });
+  }
+  const key = trackedEntryKey(item.entry);
+  state.trackedEntries = state.trackedEntries.filter(entry => trackedEntryKey(entry) !== key);
+  refreshExistingTrackedMatches(cache, state);
+  state.mode = 'items';
+  state.mealCursor = item.mealIndex;
+  state.itemCursor = clamp(rowIndex, 0, Math.max(0, getMealRows(state, item.mealIndex).length - 1));
+  invalidateRenderCache(state);
+  pushMessage(state, `${state.dryRun ? 'would remove' : 'removed'} ${formatTrackedFoodDisplayName(item.entry.record)} from ${state.meals[item.mealIndex]?.meal.meal ?? 'meal'}`);
 }
 
 async function uncheckMealItems(
@@ -3244,7 +3268,7 @@ function contextHelp(state: InteractiveState): string {
     ? ` | E ${state.expandedItemKey === rowExpansionKey(row) ? 'collapse' : 'expand'}`
     : '';
   return row?.type === 'outside'
-    ? `↑/↓ items | ←/Esc meals | A assign${editAction}${expandAction} | q exit`
+    ? `↑/↓ items | ←/Esc meals | ␣ remove | A assign${editAction}${expandAction} | q exit`
     : `↑/↓ items | ←/Esc meals | ␣ toggle | M serving | R replace | S alternative${editAction}${expandAction} | q exit`;
 }
 
