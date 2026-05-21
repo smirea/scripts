@@ -135,6 +135,7 @@ export function pastFoodSearchItemFromTrackedEntry(entry: TrackedFoodEntry): Pas
   const servingUnit = parseString(raw.serving_unit) ?? 'serving';
   const servingDescription = parseString(raw.serving_description) ?? `${formatNumber(servingQuantity)} ${servingUnit}`;
   const logId = raw.meal_tracking_food_log ?? entry.id;
+  const macros = trackedFoodRecordMacroTotals(entry.record);
   return {
     id: logId,
     dateId: parseString(logId.match(/^(\d{7})_/)?.[1]),
@@ -144,13 +145,34 @@ export function pastFoodSearchItemFromTrackedEntry(entry: TrackedFoodEntry): Pas
     servingDescription,
     servingQuantity,
     servingUnit,
-    calories: parseNumberLike(raw.calories) ?? parseNumberLike(raw.energy) ?? 0,
-    protein: parseNumberLike(raw.protein) ?? 0,
-    netCarbs: parseNetCarbsValue(raw.net_carbs, raw.carbohydrate) ?? 0,
-    fat: parseNumberLike(raw.fat) ?? 0,
+    calories: macros.calories ?? 0,
+    protein: macros.protein ?? 0,
+    netCarbs: macros.net_carbs ?? 0,
+    fat: macros.fat ?? 0,
     sortKey: logId,
     record: entry.record,
   };
+}
+
+export function trackedFoodRecordMacroTotals(record: TrackedFoodRecord): EraFitMacroTotals {
+  const raw = record as TrackedFoodRecord & { total?: unknown };
+  const total = asRecord(raw.total);
+  const servingQuantity = parseNumberLike(raw.serving_qtd) ?? 1;
+  return {
+    calories: parseMacroWithTotal(raw.calories ?? raw.energy, total?.energy ?? total?.calories, servingQuantity),
+    protein: parseMacroWithTotal(raw.protein, total?.protein, servingQuantity),
+    net_carbs: parseMacroWithTotal(parseNetCarbsValue(raw.net_carbs, raw.carbohydrate), parseNetCarbsValue(total?.net_carbs, total?.carbohydrate), servingQuantity),
+    fat: parseMacroWithTotal(raw.fat, total?.fat, servingQuantity),
+  };
+}
+
+function parseMacroWithTotal(value: unknown, totalValue: unknown, servingQuantity: number): number {
+  const parsed = parseNumberLike(value);
+  if (parsed != null) {
+    return parsed;
+  }
+  const parsedTotal = parseNumberLike(totalValue);
+  return parsedTotal == null ? 0 : parsedTotal * servingQuantity;
 }
 
 export type TrackResultFood = ResolvedTrackFood | SavedTrackFood;
@@ -1048,6 +1070,20 @@ function scalePastFoodRecord(record: TrackedFoodRecord, quantity: number): Track
   const baseQuantity = parseNumberLike(record.serving_qtd) ?? 1;
   const factor = baseQuantity > 0 ? quantity / baseQuantity : 1;
   const scaled = { ...record } as Record<string, unknown>;
+  const macros = trackedFoodRecordMacroTotals(record);
+  if (parseNumberLike(scaled.calories) == null && parseNumberLike(scaled.energy) == null) {
+    scaled.calories = macros.calories;
+  }
+  if (parseNumberLike(scaled.protein) == null) {
+    scaled.protein = macros.protein;
+  }
+  if (parseNetCarbsValue(scaled.net_carbs, scaled.carbohydrate) == null) {
+    scaled.net_carbs = macros.net_carbs;
+    scaled.carbohydrate = macros.net_carbs;
+  }
+  if (parseNumberLike(scaled.fat) == null) {
+    scaled.fat = macros.fat;
+  }
   const fields = [
     'calories',
     'energy',

@@ -1,13 +1,12 @@
 import { normalizeFoodCacheKey } from './cache';
 import {
   isEraFitMealKey,
-  parseNetCarbsValue,
   parseNumberLike,
   readEraFitFirebasePath,
   type EraFitMealKey,
   type EraFitSession,
 } from './core';
-import type { PastFoodSearchItem, TrackedFoodRecord } from './tracking';
+import { trackedFoodRecordMacroTotals, type PastFoodSearchItem, type TrackedFoodRecord } from './tracking';
 
 export async function listPastTrackedFoods(session: EraFitSession): Promise<PastFoodSearchItem[]> {
   const basePath = `db_app/sys_clients/${session.app.id_app}/cl_app_data/cl_progress/meal_tracking_food_data`;
@@ -42,6 +41,8 @@ function parsePastFood(key: string, raw: Record<string, unknown> | null): PastFo
   const servingQuantity = parseNumberLike(raw.serving_qtd) ?? parseNumberLike(raw.quantity) ?? 1;
   const servingUnit = parseString(raw.serving_unit) ?? 'serving';
   const servingDescription = parseString(raw.serving_description) ?? `${servingQuantity} ${servingUnit}`;
+  const record = raw as unknown as TrackedFoodRecord;
+  const macros = trackedFoodRecordMacroTotals(record);
   return {
     id: key,
     dateId: keyParts.dateId,
@@ -51,12 +52,12 @@ function parsePastFood(key: string, raw: Record<string, unknown> | null): PastFo
     servingDescription,
     servingQuantity,
     servingUnit,
-    calories: parseNumberLike(raw.calories) ?? parseNumberLike(raw.energy) ?? 0,
-    protein: parseNumberLike(raw.protein) ?? 0,
-    netCarbs: parseNetCarbsValue(raw.net_carbs, raw.carbohydrate) ?? 0,
-    fat: parseNumberLike(raw.fat) ?? 0,
+    calories: macros.calories ?? 0,
+    protein: macros.protein ?? 0,
+    netCarbs: macros.net_carbs ?? 0,
+    fat: macros.fat ?? 0,
     sortKey: key,
-    record: raw as unknown as TrackedFoodRecord,
+    record,
   };
 }
 
@@ -84,9 +85,7 @@ function dedupePastFoods(foods: PastFoodSearchItem[]): PastFoodSearchItem[] {
 }
 
 function pastFoodDedupeKey(food: PastFoodSearchItem): string {
-  const record = food.record as TrackedFoodRecord & { type_item?: string };
   return normalizeFoodCacheKey([
-    record.type_item,
     food.name,
     food.brandName,
   ].filter(value => value != null && String(value).trim()).join('|'));
