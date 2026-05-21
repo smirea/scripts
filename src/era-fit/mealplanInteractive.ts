@@ -41,7 +41,6 @@ import {
   formatFoodSearchChoiceServing,
   parseTrackItem,
   pastFoodSearchItemFromTrackedEntry,
-  formatFoodSearchOptionLabels,
   resolveTrackFood,
   resolveTrackFoodFromSearchChoice,
   saveTrackedFoods,
@@ -109,7 +108,6 @@ interface FoodSearchState {
   trackItem: ParsedTrackItem;
   query: string;
   choices: FoodSearchChoice[];
-  labels: string[];
   cursor: number;
   loading: boolean;
   requestId: number;
@@ -259,14 +257,7 @@ function createInteractiveState(
     };
   });
   const matched = matchExistingTrackedItems(cache, meals, tracked);
-  for (const [mealIndex, meal] of meals.entries()) {
-    meal.outsideItems = matched.outsideByMeal.get(meal.trackingMeal)?.map((entry, outsideIndex) => ({
-      key: `${meal.trackingMeal}:outside:${entry.id}:${outsideIndex}`,
-      mealIndex,
-      trackingMeal: meal.trackingMeal,
-      entry,
-    })) ?? [];
-  }
+  refreshOutsideItems(meals, matched.outsideByMeal);
   return {
     day,
     meals,
@@ -481,7 +472,6 @@ async function openFoodSearch(
     trackItem,
     query: trackItem.query,
     choices: [],
-    labels: [],
     cursor: 0,
     loading: true,
     requestId: 0,
@@ -504,7 +494,6 @@ async function openFoodSearch(
       trackItem,
       query: trackItem.query,
       choices,
-      labels: formatFoodSearchOptionLabels(choices),
       cursor: 0,
       loading: false,
       requestId: 0,
@@ -1128,7 +1117,7 @@ async function uncheckMealItems(
     state.existingItemKeys.delete(item.key);
     state.trackedItemByKey.delete(item.key);
   }
-  if (!state.dryRun && tracked.length > 0) {
+  if (tracked.length > 0) {
     const removed = new Set(tracked.map(trackedEntryKey));
     state.trackedEntries = state.trackedEntries.filter(entry => !removed.has(trackedEntryKey(entry)));
   }
@@ -1389,15 +1378,30 @@ function refreshExistingTrackedMatches(cache: EraFitCache, state: InteractiveSta
   state.completedItemKeys = new Set([...sessionCompleted, ...matched.completed]);
   state.existingItemKeys = new Set(matched.completed);
   state.trackedItemByKey = new Map([...sessionTracked, ...matched.trackedByItemKey]);
-  for (const [mealIndex, meal] of state.meals.entries()) {
-    meal.outsideItems = matched.outsideByMeal.get(meal.trackingMeal)?.map((entry, outsideIndex) => ({
-      key: `${meal.trackingMeal}:outside:${entry.id}:${outsideIndex}`,
-      mealIndex,
-      trackingMeal: meal.trackingMeal,
-      entry,
-    })) ?? [];
-  }
+  refreshOutsideItems(state.meals, matched.outsideByMeal);
   invalidateRenderCache(state);
+}
+
+function refreshOutsideItems(
+  meals: InteractiveState['meals'],
+  outsideByMeal: Map<EraFitMealKey, TrackedFoodEntry[]>
+): void {
+  for (const [mealIndex, meal] of meals.entries()) {
+    meal.outsideItems = outsideItemsForMeal(meal.trackingMeal, mealIndex, outsideByMeal.get(meal.trackingMeal) ?? []);
+  }
+}
+
+function outsideItemsForMeal(
+  trackingMeal: EraFitMealKey,
+  mealIndex: number,
+  entries: TrackedFoodEntry[]
+): OutsidePlanItemRef[] {
+  return entries.map((entry, outsideIndex) => ({
+    key: `${trackingMeal}:outside:${entry.id}:${outsideIndex}`,
+    mealIndex,
+    trackingMeal,
+    entry,
+  }));
 }
 
 function cachedSelectionFromTrackedEntry(entry: TrackedFoodEntry): Omit<CachedFoodSelection, 'updatedAt'> | null {
@@ -1727,13 +1731,14 @@ function macroProximityDistance(item: EraFitMealPlanFoodItem, record: TrackedFoo
 }
 
 function macroPairs(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): Array<[number, number]> | null {
+  const trackedNetCarbs = parseNetCarbsValue(record.net_carbs, record.carbohydrate);
   const pairs = [
     [item.calories, record.calories],
     [item.protein, record.protein],
-    [item.net_carbs, record.carbohydrate],
+    [item.net_carbs, trackedNetCarbs],
     [item.fat, record.fat],
   ];
-  if (pairs.some(([planned, tracked]) => planned == null || !Number.isFinite(tracked))) {
+  if (pairs.some(([planned, tracked]) => planned == null || tracked == null || !Number.isFinite(planned) || !Number.isFinite(tracked))) {
     return null;
   }
   return pairs as Array<[number, number]>;
@@ -2142,7 +2147,6 @@ class MealPlanChecklistPrompt {
     }
     search.query = query;
     search.choices = [];
-    search.labels = [];
     search.cursor = 0;
     search.loading = true;
     search.requestId += 1;
@@ -2189,7 +2193,6 @@ class MealPlanChecklistPrompt {
       }
       current.trackItem = trackItem;
       current.choices = choices;
-      current.labels = formatFoodSearchOptionLabels(choices);
       current.cursor = 0;
       current.loading = false;
     } catch (error) {
@@ -2633,7 +2636,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
     lines.push(`${chalk.green(OUTSIDE_PLAN_CHECKED)} ${chalk.gray('logged outside plan')}`);
   }
   if (state.foodSearch) {
-    lines.push('', ...renderFoodSearchLines(state.foodSearch));
+    lines.push('', ...renderFoodSearchLines(state));
   } else if (state.replacementSearch) {
     lines.push('', ...renderReplacementSearchLines(state));
   } else if (state.addFood) {
@@ -2811,18 +2814,24 @@ function renderAddFoodLines(state: InteractiveState): string[] {
     lines.push(`  ${chalk.gray('no results')}`);
     return lines;
   }
-  const layout = getAddFoodLineLayout(state, add);
+  const layout = getChoiceLineLayout(state, add.choices, foodSearchChoiceMacroTotals);
   for (const [index, choice] of add.choices.entries()) {
-    lines.push(renderAddFoodChoiceLine(choice, index === add.cursor, layout));
+    lines.push(renderChoiceLine(choice, index === add.cursor, layout, formatAddFoodChoiceLabel, foodSearchChoiceMacroTotals));
   }
   return lines;
 }
 
-function renderAddFoodChoiceLine(choice: FoodSearchChoice, active: boolean, layout: IngredientLineLayout): string {
-  const label = truncateVisibleEnd(formatAddFoodChoiceLabel(choice), layout.labelWidth);
+function renderChoiceLine<T>(
+  choice: T,
+  active: boolean,
+  layout: IngredientLineLayout,
+  formatLabel: (choice: T) => string,
+  macroTotals: (choice: T) => EraFitMacroTotals
+): string {
+  const label = truncateVisibleEnd(formatLabel(choice), layout.labelWidth);
   const paddedLabel = padVisibleEnd(label, layout.labelWidth);
   const marker = active ? chalk.green('●') : chalk.gray('○');
-  const line = `  ${active ? chalk.cyan('>') : ' '}   ${marker} ${paddedLabel}  ${formatMacroColumns(foodSearchChoiceMacroTotals(choice), layout.macroWidths)}`;
+  const line = `  ${active ? chalk.cyan('>') : ' '}   ${marker} ${paddedLabel}  ${formatMacroColumns(macroTotals(choice), layout.macroWidths)}`;
   return active ? chalk.cyan(line) : line;
 }
 
@@ -2830,9 +2839,13 @@ function formatAddFoodChoiceLabel(choice: FoodSearchChoice): string {
   return `${formatFoodSearchChoiceName(choice)} ${chalk.gray(`per ${formatFoodSearchChoiceServing(choice)}`)}`;
 }
 
-function getAddFoodLineLayout(state: InteractiveState, add: AddFoodState): IngredientLineLayout {
+function getChoiceLineLayout<T>(
+  state: InteractiveState,
+  choices: T[],
+  macroTotals: (choice: T) => EraFitMacroTotals
+): IngredientLineLayout {
   const sectionLayout = getIngredientLineLayout(state);
-  const choiceWidths = getMacroColumnWidths(add.choices.map(foodSearchChoiceMacroTotals));
+  const choiceWidths = getMacroColumnWidths(choices.map(macroTotals));
   const macroWidths = maxMacroColumnWidths(sectionLayout.macroWidths, choiceWidths);
   const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
   const availableLabelWidth = process.stdout.columns
@@ -2870,7 +2883,11 @@ function addFoodTabLabel(tab: AddFoodTab): string {
   return 'Search';
 }
 
-function renderFoodSearchLines(search: FoodSearchState): string[] {
+function renderFoodSearchLines(state: InteractiveState): string[] {
+  const search = state.foodSearch;
+  if (!search) {
+    return [];
+  }
   const lines = [
     `${chalk.cyan('Search')} ${chalk.bold(search.query)}${chalk.inverse(' ')}`,
   ];
@@ -2882,11 +2899,9 @@ function renderFoodSearchLines(search: FoodSearchState): string[] {
     lines.push(`  ${chalk.gray('no results')}`);
     return lines;
   }
-  for (const [index, label] of search.labels.entries()) {
-    const active = index === search.cursor;
-    const marker = active ? chalk.green('●') : chalk.gray('○');
-    const line = `  ${marker} ${label}`;
-    lines.push(active ? chalk.bold(line) : chalk.gray(line));
+  const layout = getChoiceLineLayout(state, search.choices, foodSearchChoiceMacroTotals);
+  for (const [index, choice] of search.choices.entries()) {
+    lines.push(renderChoiceLine(choice, index === search.cursor, layout, formatAddFoodChoiceLabel, foodSearchChoiceMacroTotals));
   }
   return lines;
 }
@@ -2911,9 +2926,9 @@ function renderReplacementSearchLines(state: InteractiveState): string[] {
     lines.push(`  ${chalk.gray(search.tab === 'previous' ? 'no previous replacements' : 'no results')}`);
     return lines;
   }
-  const layout = getReplacementSearchLineLayout(state, search);
+  const layout = getChoiceLineLayout(state, search.choices, replacementSearchChoiceMacroTotals);
   for (const [index, choice] of search.choices.entries()) {
-    lines.push(renderReplacementSearchChoiceLine(choice, index === search.cursor, layout));
+    lines.push(renderChoiceLine(choice, index === search.cursor, layout, formatReplacementSearchChoiceLabel, replacementSearchChoiceMacroTotals));
   }
   return lines;
 }
@@ -2925,14 +2940,6 @@ function formatReplacementSearchTabs(activeTab: ReplacementSearchTab): string {
       ? chalk.bgBlue.white.bold(`[${label}]`)
       : chalk.gray(` ${label} `);
   }).join(' ');
-}
-
-function renderReplacementSearchChoiceLine(choice: ReplacementSearchChoice, active: boolean, layout: IngredientLineLayout): string {
-  const label = truncateVisibleEnd(formatReplacementSearchChoiceLabel(choice), layout.labelWidth);
-  const paddedLabel = padVisibleEnd(label, layout.labelWidth);
-  const marker = active ? chalk.green('●') : chalk.gray('○');
-  const line = `  ${active ? chalk.cyan('>') : ' '}   ${marker} ${paddedLabel}  ${formatMacroColumns(replacementSearchChoiceMacroTotals(choice), layout.macroWidths)}`;
-  return active ? chalk.cyan(line) : line;
 }
 
 function formatReplacementSearchChoiceLabel(choice: ReplacementSearchChoice): string {
@@ -2953,20 +2960,6 @@ function replacementSearchChoiceMacroTotals(choice: ReplacementSearchChoice): Er
     };
   }
   return foodSearchChoiceMacroTotals(choice);
-}
-
-function getReplacementSearchLineLayout(state: InteractiveState, search: ReplacementSearchState): IngredientLineLayout {
-  const sectionLayout = getIngredientLineLayout(state);
-  const choiceWidths = getMacroColumnWidths(search.choices.map(replacementSearchChoiceMacroTotals));
-  const macroWidths = maxMacroColumnWidths(sectionLayout.macroWidths, choiceWidths);
-  const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
-  const availableLabelWidth = process.stdout.columns
-    ? Math.max(18, process.stdout.columns - ITEM_ROW_PREFIX_WIDTH - 2 - macroWidth)
-    : sectionLayout.labelWidth;
-  return {
-    labelWidth: Math.min(sectionLayout.labelWidth, availableLabelWidth),
-    macroWidths,
-  };
 }
 
 function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean, layout: IngredientLineLayout): string {
