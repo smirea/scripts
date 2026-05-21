@@ -93,7 +93,7 @@ Add mode:
 - `Search` queries global Era Fit foods. `Past` shows recent previously logged foods from Era Fit history. `Faves`, `Meals`, and `Food` show saved favorite foods, saved meals, and custom foods.
 - Typing searches or filters the active tab.
 - `↑` / `↓` moves through results.
-- `Enter` selects the highlighted result, prompts for serving and amount when needed, and adds it to the current meal.
+- `Enter` selects the highlighted result, prompts for serving and amount when needed, adds it to the current meal, then returns to item mode with the added row selected.
 - `Esc` returns to meal mode.
 - `Ctrl-C` exits.
 

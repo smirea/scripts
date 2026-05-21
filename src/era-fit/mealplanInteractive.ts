@@ -869,8 +869,10 @@ async function saveAddedFoodToMeal(
   state.trackedEntries.push(entry);
   refreshExistingTrackedMatches(cache, state);
   invalidateRenderCache(state);
-  state.mode = 'add';
+  state.addFood = null;
+  state.mode = 'items';
   state.mealCursor = mealIndex;
+  state.itemCursor = trackedEntryRowIndex(state, mealIndex, entry);
   pushMessage(state, `${state.dryRun ? 'would add' : 'added'} ${formatTrackedFoodDisplayName(entry.record)} to ${meal.meal.meal}`);
 }
 
@@ -1058,6 +1060,15 @@ function outsideItemRowIndex(state: InteractiveState, item: OutsidePlanItemRef):
   }
   const outsideIndex = meal.outsideItems.findIndex(candidate => candidate.key === item.key);
   return meal.items.length + Math.max(0, outsideIndex);
+}
+
+function trackedEntryRowIndex(state: InteractiveState, mealIndex: number, entry: TrackedFoodEntry): number {
+  const key = trackedEntryKey(entry);
+  const index = getMealRows(state, mealIndex).findIndex(row => {
+    const rowEntry = trackedEntryForRow(state, row);
+    return rowEntry ? trackedEntryKey(rowEntry) === key : false;
+  });
+  return Math.max(0, index);
 }
 
 function startAssignMode(state: InteractiveState, source: OutsidePlanItemRef): void {
