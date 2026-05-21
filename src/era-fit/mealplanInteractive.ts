@@ -5,8 +5,12 @@ import chalk from 'chalk';
 
 import { padVisibleEnd, padVisibleStart, truncateVisibleEnd, visibleLength } from '../utils/tabular';
 import {
+  getFoodReplacements,
   normalizeFoodCacheKey,
+  rememberFoodReplacement,
+  rememberFoodReplacementInCache,
   rememberFoodSelection,
+  type CachedFoodReplacement,
   type CachedFoodSelection,
   type EraFitCache,
 } from './cache';
@@ -55,9 +59,10 @@ import {
 import { listPastTrackedFoods, searchPastTrackedFoods } from './historyFoods';
 import { listSavedFoods, type SavedFoodSearchItem, type SavedFoodSource } from './savedFoods';
 
-type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search' | 'add';
+type NavigationMode = 'meals' | 'items' | 'assign' | 'food-search' | 'replacement-search' | 'add';
 type LoadingKind = 'checking' | 'unchecking';
 type AddFoodTab = 'search' | 'past' | 'faves' | 'meals' | 'food';
+type ReplacementSearchTab = 'previous' | 'search';
 
 const CHECKBOX_EMPTY = '○';
 const CHECKBOX_CHECKED = '×';
@@ -110,6 +115,22 @@ interface FoodSearchState {
   requestId: number;
 }
 
+type ReplacementSearchChoice =
+  | { type: 'replacement'; replacement: CachedFoodReplacement }
+  | FoodSearchChoice;
+
+interface ReplacementSearchState {
+  item: MealPlanItemRef;
+  trackItem: ParsedTrackItem;
+  query: string;
+  tab: ReplacementSearchTab;
+  choices: ReplacementSearchChoice[];
+  cursor: number;
+  loading: boolean;
+  requestId: number;
+  replacements: CachedFoodReplacement[];
+}
+
 interface AddFoodState {
   mealIndex: number;
   tab: AddFoodTab;
@@ -144,6 +165,7 @@ interface InteractiveState {
   multipliers: Map<string, number>;
   pendingSearchItems: MealPlanItemRef[];
   foodSearch: FoodSearchState | null;
+  replacementSearch: ReplacementSearchState | null;
   addFood: AddFoodState | null;
   expandedItemKey: string | null;
   originalMealIndex: number | null;
@@ -170,6 +192,9 @@ type MealPlanPromptAction =
   | { type: 'open-food-search'; mealIndex: number; rowIndex: number; query?: string }
   | { type: 'select-food-search'; index: number }
   | { type: 'cancel-food-search' }
+  | { type: 'open-replacement-search'; mealIndex: number; rowIndex: number }
+  | { type: 'select-replacement-search'; index: number }
+  | { type: 'cancel-replacement-search' }
   | { type: 'select-add-food'; index: number }
   | { type: 'done' };
 
@@ -259,6 +284,7 @@ function createInteractiveState(
     multipliers: new Map(),
     pendingSearchItems: [],
     foodSearch: null,
+    replacementSearch: null,
     addFood: null,
     expandedItemKey: null,
     originalMealIndex: null,
@@ -309,8 +335,16 @@ async function handleMealPlanAction(
     closeFoodSearch(state);
     return;
   }
+  if (action.type === 'cancel-replacement-search') {
+    closeReplacementSearch(state);
+    return;
+  }
   if (action.type === 'select-food-search') {
     await logSelectedFoodSearchChoice(session, cache, dateId, state, action.index);
+    return;
+  }
+  if (action.type === 'select-replacement-search') {
+    await logSelectedReplacementSearchChoice(session, cache, dateId, state, action.index);
     return;
   }
   if (action.type === 'select-add-food') {
@@ -339,6 +373,10 @@ async function handleMealPlanAction(
   clearInteractiveScreen();
   if (action.type === 'open-food-search') {
     await openFoodSearch(session, state, row.item, action.query ?? row.item.item.name);
+    return;
+  }
+  if (action.type === 'open-replacement-search') {
+    await openReplacementSearch(session, cache, state, row.item);
     return;
   }
   if (action.type === 'set-serving') {
@@ -481,6 +519,67 @@ async function openFoodSearch(
   }
 }
 
+async function openReplacementSearch(
+  session: EraFitSession,
+  cache: EraFitCache,
+  state: InteractiveState,
+  item: MealPlanItemRef
+): Promise<void> {
+  if (state.completedItemKeys.has(item.key)) {
+    pushMessage(state, `${formatItemDisplayName(item.item)} is already checked`);
+    return;
+  }
+  const replacements = getFoodReplacements(cache, foodCacheAliases(item));
+  const tab: ReplacementSearchTab = replacements.length > 0 ? 'previous' : 'search';
+  const trackItem = buildReplacementTrackItem(item, item.item.name, state.multipliers.get(item.key) ?? 1);
+  state.mode = 'replacement-search';
+  state.mealCursor = item.mealIndex;
+  state.itemCursor = itemRowIndex(state, item);
+  state.replacementSearch = {
+    item,
+    trackItem,
+    query: trackItem.query,
+    tab,
+    choices: tab === 'previous'
+      ? replacements.map(replacement => ({ type: 'replacement' as const, replacement }))
+      : [],
+    cursor: 0,
+    loading: tab === 'search',
+    requestId: 0,
+    replacements,
+  };
+  if (tab === 'search') {
+    await loadInitialReplacementSearch(session, state);
+  }
+}
+
+async function loadInitialReplacementSearch(session: EraFitSession, state: InteractiveState): Promise<void> {
+  const search = state.replacementSearch;
+  if (!search) {
+    return;
+  }
+  state.loadingItemKeys.set(search.item.key, 'checking');
+  const repaint = () => {
+    clearInteractiveScreen();
+    process.stdout.write(renderMealPlanFrame(state));
+  };
+  repaint();
+  const timer = setInterval(repaint, 120);
+  try {
+    const choices = await searchTrackFoodChoices(session, search.trackItem);
+    search.choices = choices;
+    search.cursor = 0;
+    search.loading = false;
+  } catch (error) {
+    closeReplacementSearch(state);
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+  } finally {
+    clearInterval(timer);
+    state.loadingItemKeys.delete(search.item.key);
+    clearInteractiveScreen();
+  }
+}
+
 async function logMealItems(
   session: EraFitSession,
   cache: EraFitCache,
@@ -554,7 +653,7 @@ async function saveResolvedMealItems(
   dateId: string,
   state: InteractiveState,
   resolved: Array<{ item: MealPlanItemRef; food: ResolvedTrackFood }>
-): Promise<void> {
+): Promise<TrackedFoodEntry[]> {
   const trackedEntries = state.dryRun
     ? resolved.map(entry => buildDryRunTrackedEntry(dateId, entry.item.trackingMeal, entry.food))
     : (await saveTrackedFoods(session, {
@@ -577,6 +676,7 @@ async function saveResolvedMealItems(
     ? formatSavedMealItemLabel(resolved[0].item, trackedEntries[0])
     : `${resolved.length} items`;
   pushMessage(state, `${state.dryRun ? 'would log' : 'logged'} ${label}`);
+  return trackedEntries;
 }
 
 function formatSavedMealItemLabel(item: MealPlanItemRef, tracked: TrackedFoodEntry | undefined): string {
@@ -657,6 +757,65 @@ async function logSelectedFoodSearchChoice(
   closeFoodSearch(state);
 }
 
+async function logSelectedReplacementSearchChoice(
+  session: EraFitSession,
+  cache: EraFitCache,
+  dateId: string,
+  state: InteractiveState,
+  index: number
+): Promise<void> {
+  const search = state.replacementSearch;
+  const choice = search?.choices[index];
+  if (!search || !choice) {
+    closeReplacementSearch(state);
+    return;
+  }
+  const result = choice.type === 'replacement'
+    ? await resolveCachedReplacement(session, cache, state, choice.replacement)
+    : await resolveTrackFoodFromSearchChoice(
+      session,
+      cache,
+      search.trackItem,
+      formatEraFitTime(new Date()),
+      choice,
+      {
+        useCache: false,
+        writeCache: false,
+        interactive: true,
+        forceServingPrompt: true,
+        log: message => pushMessage(state, message),
+      }
+    ).catch(error => {
+      pushMessage(state, error instanceof Error ? error.message : String(error));
+      return null;
+    });
+
+  if (!result) {
+    closeReplacementSearch(state);
+    return;
+  }
+  if (result.status === 'needs-selection') {
+    pushMessage(state, `serving selection needed for ${formatItemDisplayName(search.item.item)}`);
+    closeReplacementSearch(state);
+    return;
+  }
+  if (result.status === 'cancel') {
+    closeReplacementSearch(state);
+    return;
+  }
+  if (result.status === 'skip') {
+    pushMessage(state, `skipped ${formatItemDisplayName(search.item.item)}`);
+    closeReplacementSearch(state);
+    return;
+  }
+
+  const [tracked] = await saveResolvedMealItems(session, dateId, state, [{ item: search.item, food: result.food }]);
+  if (tracked) {
+    rememberReplacementFromTrackedEntry(cache, state, search.item, tracked);
+  }
+  closeReplacementSearch(state);
+}
+
 async function logSelectedAddFoodChoice(
   session: EraFitSession,
   cache: EraFitCache,
@@ -706,6 +865,49 @@ async function logSelectedAddFoodChoice(
   }
 
   await saveAddedFoodToMeal(session, cache, dateId, state, add.mealIndex, result.food);
+}
+
+async function resolveCachedReplacement(
+  session: EraFitSession,
+  cache: EraFitCache,
+  state: InteractiveState,
+  replacement: CachedFoodReplacement
+): Promise<Awaited<ReturnType<typeof resolveTrackFood>> | null> {
+  const trackItem = buildReplacementCachedTrackItem(replacement);
+  const lookupCache = {
+    ...cache,
+    foods: {
+      ...cache.foods,
+      [normalizeFoodCacheKey(trackItem.query)]: replacement.selection,
+    },
+  };
+  return await resolveTrackFood(
+    session,
+    lookupCache,
+    trackItem,
+    formatEraFitTime(new Date()),
+    {
+      useCache: true,
+      writeCache: false,
+      interactive: true,
+      log: message => pushMessage(state, message),
+    }
+  ).catch(error => {
+    pushMessage(state, error instanceof Error ? error.message : String(error));
+    return null;
+  });
+}
+
+function buildReplacementCachedTrackItem(replacement: CachedFoodReplacement): ParsedTrackItem {
+  const selection = replacement.selection;
+  const amount = selection.servingQuantity != null && selection.servingQuantity > 0
+    ? selection.servingQuantity
+    : 1;
+  const unit = selection.servingUnit && selection.servingUnit !== 'fatsecret' && /^[A-Za-z_][A-Za-z_.%/-]*$/.test(selection.servingUnit)
+    ? selection.servingUnit
+    : '';
+  const query = selection.foodName || replacement.label;
+  return parseTrackItem(`${formatNumber(amount)}${unit} ${query}`);
 }
 
 async function editTrackedRowServing(
@@ -925,7 +1127,13 @@ function closeFoodSearch(state: InteractiveState): void {
   state.mode = 'items';
 }
 
+function closeReplacementSearch(state: InteractiveState): void {
+  state.replacementSearch = null;
+  state.mode = 'items';
+}
+
 const ADD_FOOD_TABS = ['search', 'past', 'faves', 'meals', 'food'] as const satisfies readonly AddFoodTab[];
+const REPLACEMENT_SEARCH_TABS = ['previous', 'search'] as const satisfies readonly ReplacementSearchTab[];
 
 function openAddMode(state: InteractiveState, mealIndex: number): void {
   const meal = state.meals[mealIndex];
@@ -1243,6 +1451,35 @@ function cachedSelectionFromTrackedEntry(entry: TrackedFoodEntry): Omit<CachedFo
   return null;
 }
 
+function rememberReplacementFromTrackedEntry(
+  cache: EraFitCache,
+  state: InteractiveState,
+  item: MealPlanItemRef,
+  entry: TrackedFoodEntry
+): void {
+  const selection = cachedSelectionFromTrackedEntry(entry);
+  if (!selection) {
+    pushMessage(state, `cannot cache replacement ${formatTrackedFoodDisplayName(entry.record)}`);
+    return;
+  }
+  const macros = trackedMacroTotals(entry.record);
+  const replacement = {
+    selection,
+    label: formatTrackedFoodDisplayName(entry.record),
+    servingDescription: nonEmptyString(entry.record.serving_description) ?? formatTrackedServing(entry.record),
+    calories: macros.calories,
+    protein: macros.protein,
+    netCarbs: macros.net_carbs,
+    fat: macros.fat,
+  };
+  const aliases = foodCacheAliases(item);
+  if (state.dryRun) {
+    rememberFoodReplacementInCache(cache, aliases, replacement);
+  } else {
+    rememberFoodReplacement(cache, aliases, replacement);
+  }
+}
+
 function buildMealPlanTrackItem(item: MealPlanItemRef, multiplier: number): ParsedTrackItem {
   return parseTrackItem(buildMealPlanTrackInput(item.item, item.item.name, multiplier));
 }
@@ -1553,6 +1790,7 @@ class MealPlanChecklistPrompt {
   private readonly output = process.stdout;
   private repaintTimer: ReturnType<typeof setInterval> | null = null;
   private foodSearchDebounce: ReturnType<typeof setTimeout> | null = null;
+  private replacementSearchDebounce: ReturnType<typeof setTimeout> | null = null;
   private addFoodDebounce: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private hadAnimatedState = false;
@@ -1595,7 +1833,9 @@ class MealPlanChecklistPrompt {
       return;
     }
 
-    const hasAnimatedState = this.view.loadingItemKeys.size > 0 || this.view.foodSearch?.loading === true;
+    const hasAnimatedState = this.view.loadingItemKeys.size > 0 ||
+      this.view.foodSearch?.loading === true ||
+      this.view.replacementSearch?.loading === true;
     const hasAddAnimatedState = this.view.addFood?.loading === true;
     if (hasAnimatedState || hasAddAnimatedState || this.hadAnimatedState) {
       this.hadAnimatedState = hasAnimatedState || hasAddAnimatedState;
@@ -1624,6 +1864,10 @@ class MealPlanChecklistPrompt {
       clearTimeout(this.foodSearchDebounce);
       this.foodSearchDebounce = null;
     }
+    if (this.replacementSearchDebounce) {
+      clearTimeout(this.replacementSearchDebounce);
+      this.replacementSearchDebounce = null;
+    }
     if (this.addFoodDebounce) {
       clearTimeout(this.addFoodDebounce);
       this.addFoodDebounce = null;
@@ -1639,6 +1883,11 @@ class MealPlanChecklistPrompt {
     if (this.view.mode === 'food-search') {
       this.clearExpandedItem();
       this.handleFoodSearchKey(key, info);
+      return;
+    }
+    if (this.view.mode === 'replacement-search') {
+      this.clearExpandedItem();
+      this.handleReplacementSearchKey(key, info);
       return;
     }
     if (this.view.mode === 'add') {
@@ -1725,6 +1974,13 @@ class MealPlanChecklistPrompt {
     } else if (command === 'r' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
       this.clearExpandedItem();
       this.submitAction({
+        type: 'open-replacement-search',
+        mealIndex: this.view.mealCursor,
+        rowIndex: this.view.itemCursor,
+      });
+    } else if (command === 'm' && this.view.mode === 'items' && this.currentRow()?.type === 'plan') {
+      this.clearExpandedItem();
+      this.submitAction({
         type: 'set-serving',
         mealIndex: this.view.mealCursor,
         rowIndex: this.view.itemCursor,
@@ -1808,6 +2064,50 @@ class MealPlanChecklistPrompt {
     }
   }
 
+  private handleReplacementSearchKey(
+    key: string | undefined,
+    info: { name?: string; ctrl?: boolean; meta?: boolean }
+  ): void {
+    if (info.ctrl && info.name === 'c') {
+      this.submitAction({ type: 'done' });
+      return;
+    }
+    if (info.name === 'escape') {
+      this.goBack();
+      return;
+    }
+    if (info.name === 'return') {
+      this.submitCurrentReplacementSearch();
+      return;
+    }
+    if (info.name === 'left' || info.name === 'right') {
+      this.switchReplacementSearchTab(info.name === 'left' ? -1 : 1);
+      return;
+    }
+    if (info.name === 'up' || info.name === 'down') {
+      this.moveReplacementSearchCursor(info.name === 'up' ? -1 : 1);
+      this.repaint();
+      return;
+    }
+    if (info.name === 'backspace' || info.name === 'delete') {
+      const search = this.view.replacementSearch;
+      if (search?.tab === 'search' && search.query) {
+        this.updateReplacementSearchQuery(search.query.slice(0, -1));
+      }
+      return;
+    }
+    if (key && key.length === 1 && !info.ctrl && !info.meta) {
+      const search = this.view.replacementSearch;
+      if (!search) {
+        return;
+      }
+      if (search.tab !== 'search') {
+        this.setReplacementSearchTab('search');
+      }
+      this.updateReplacementSearchQuery(`${this.view.replacementSearch?.query ?? ''}${key}`);
+    }
+  }
+
   private updateFoodSearchQuery(query: string): void {
     if (this.disposed) {
       return;
@@ -1873,6 +2173,109 @@ class MealPlanChecklistPrompt {
         return;
       }
       const current = this.view.foodSearch;
+      if (!current || current.requestId !== requestId) {
+        return;
+      }
+      current.loading = false;
+      pushMessage(this.view, error instanceof Error ? error.message : String(error));
+    }
+    this.repaint();
+  }
+
+  private switchReplacementSearchTab(delta: number): void {
+    const search = this.view.replacementSearch;
+    if (!search) {
+      return;
+    }
+    const index = REPLACEMENT_SEARCH_TABS.indexOf(search.tab);
+    this.setReplacementSearchTab(REPLACEMENT_SEARCH_TABS[wrap(index + delta, REPLACEMENT_SEARCH_TABS.length)]);
+  }
+
+  private setReplacementSearchTab(tab: ReplacementSearchTab): void {
+    const search = this.view.replacementSearch;
+    if (!search || search.tab === tab) {
+      return;
+    }
+    search.tab = tab;
+    search.cursor = 0;
+    search.requestId += 1;
+    const requestId = search.requestId;
+    if (tab === 'previous') {
+      search.choices = search.replacements.map(replacement => ({ type: 'replacement' as const, replacement }));
+      search.loading = false;
+      if (this.replacementSearchDebounce) {
+        clearTimeout(this.replacementSearchDebounce);
+        this.replacementSearchDebounce = null;
+      }
+      this.repaint();
+      return;
+    }
+    search.choices = [];
+    search.loading = true;
+    this.repaint();
+    void this.refreshReplacementSearch(requestId);
+  }
+
+  private updateReplacementSearchQuery(query: string): void {
+    const search = this.view.replacementSearch;
+    if (!search) {
+      return;
+    }
+    search.query = query;
+    search.choices = [];
+    search.cursor = 0;
+    search.loading = true;
+    search.requestId += 1;
+    const requestId = search.requestId;
+    if (query.trim()) {
+      search.trackItem = buildReplacementTrackItem(search.item, query, this.view.multipliers.get(search.item.key) ?? 1);
+    }
+    if (this.replacementSearchDebounce) {
+      clearTimeout(this.replacementSearchDebounce);
+    }
+    this.repaint();
+    this.replacementSearchDebounce = setTimeout(() => void this.refreshReplacementSearch(requestId), 250);
+  }
+
+  private async refreshReplacementSearch(requestId: number): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const search = this.view.replacementSearch;
+    if (!search || search.requestId !== requestId || search.tab !== 'search') {
+      return;
+    }
+    if (!search.query.trim()) {
+      search.loading = false;
+      this.repaint();
+      return;
+    }
+    let trackItem: ParsedTrackItem;
+    try {
+      trackItem = buildReplacementTrackItem(search.item, search.query, this.view.multipliers.get(search.item.key) ?? 1);
+    } catch {
+      search.loading = false;
+      this.repaint();
+      return;
+    }
+    try {
+      const choices = await searchTrackFoodChoices(this.session, trackItem);
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.replacementSearch;
+      if (!current || current.requestId !== requestId || current.tab !== 'search') {
+        return;
+      }
+      current.trackItem = trackItem;
+      current.choices = choices;
+      current.cursor = 0;
+      current.loading = false;
+    } catch (error) {
+      if (this.disposed) {
+        return;
+      }
+      const current = this.view.replacementSearch;
       if (!current || current.requestId !== requestId) {
         return;
       }
@@ -1987,6 +2390,10 @@ class MealPlanChecklistPrompt {
       this.submitAction({ type: 'cancel-food-search' });
       return;
     }
+    if (this.view.mode === 'replacement-search') {
+      this.submitAction({ type: 'cancel-replacement-search' });
+      return;
+    }
     if (this.view.mode === 'add') {
       closeAddMode(this.view);
       this.repaint();
@@ -2038,6 +2445,14 @@ class MealPlanChecklistPrompt {
     search.cursor = wrap(search.cursor + delta, search.choices.length);
   }
 
+  private moveReplacementSearchCursor(delta: number): void {
+    const search = this.view.replacementSearch;
+    if (!search || search.choices.length === 0) {
+      return;
+    }
+    search.cursor = wrap(search.cursor + delta, search.choices.length);
+  }
+
   private moveAddFoodCursor(delta: number): void {
     const add = this.view.addFood;
     if (!add || add.choices.length === 0) {
@@ -2074,6 +2489,17 @@ class MealPlanChecklistPrompt {
     }
     this.submitAction({
       type: 'select-food-search',
+      index: search.cursor,
+    });
+  }
+
+  private submitCurrentReplacementSearch(): void {
+    const search = this.view.replacementSearch;
+    if (!search || search.loading || search.choices.length === 0) {
+      return;
+    }
+    this.submitAction({
+      type: 'select-replacement-search',
       index: search.cursor,
     });
   }
@@ -2158,7 +2584,9 @@ function renderMealPlanFrame(state: InteractiveState): string {
     const mealLine = `${activeMeal ? chalk.cyan(mealPrefix) : mealPrefix} ${formatMealHeaderMacros(state, mealIndex)}`;
     lines.push(mealLine);
     for (const [itemIndex, item] of meal.items.entries()) {
-      const activeItem = (state.mode === 'items' || state.mode === 'assign') && state.mealCursor === mealIndex && state.itemCursor === itemIndex;
+      const activeItem = (state.mode === 'items' || state.mode === 'assign' || state.mode === 'food-search' || state.mode === 'replacement-search') &&
+        state.mealCursor === mealIndex &&
+        state.itemCursor === itemIndex;
       lines.push(renderItemLine(state, item, activeItem, ingredientLayout));
       if (state.expandedItemKey === rowExpansionKey({ type: 'plan', item })) {
         lines.push(...renderExpandedComponentLines(rowComponents(state, { type: 'plan', item }), ingredientLayout));
@@ -2179,6 +2607,8 @@ function renderMealPlanFrame(state: InteractiveState): string {
   }
   if (state.foodSearch) {
     lines.push('', ...renderFoodSearchLines(state.foodSearch));
+  } else if (state.replacementSearch) {
+    lines.push('', ...renderReplacementSearchLines(state));
   } else if (state.addFood) {
     lines.push('', ...renderAddFoodLines(state));
   }
@@ -2432,6 +2862,84 @@ function renderFoodSearchLines(search: FoodSearchState): string[] {
     lines.push(active ? chalk.bold(line) : chalk.gray(line));
   }
   return lines;
+}
+
+function renderReplacementSearchLines(state: InteractiveState): string[] {
+  const search = state.replacementSearch;
+  if (!search) {
+    return [];
+  }
+  const lines = [
+    `${chalk.cyan('Replace')} ${chalk.bold(formatItemDisplayName(search.item.item))}`,
+    `  ${formatReplacementSearchTabs(search.tab)}`,
+  ];
+  if (search.tab === 'search') {
+    lines.push(`  ${chalk.cyan('Search')} ${chalk.bold(search.query)}${chalk.inverse(' ')}`);
+  }
+  if (search.loading) {
+    lines.push(`  ${chalk.yellow(formatLoadingSpinner(search.item.key))} loading results`);
+    return lines;
+  }
+  if (search.choices.length === 0) {
+    lines.push(`  ${chalk.gray(search.tab === 'previous' ? 'no previous replacements' : 'no results')}`);
+    return lines;
+  }
+  const layout = getReplacementSearchLineLayout(state, search);
+  for (const [index, choice] of search.choices.entries()) {
+    lines.push(renderReplacementSearchChoiceLine(choice, index === search.cursor, layout));
+  }
+  return lines;
+}
+
+function formatReplacementSearchTabs(activeTab: ReplacementSearchTab): string {
+  return REPLACEMENT_SEARCH_TABS.map(tab => {
+    const label = tab === 'previous' ? 'Previous' : 'Search';
+    return tab === activeTab
+      ? chalk.bgBlue.white.bold(`[${label}]`)
+      : chalk.gray(` ${label} `);
+  }).join(' ');
+}
+
+function renderReplacementSearchChoiceLine(choice: ReplacementSearchChoice, active: boolean, layout: IngredientLineLayout): string {
+  const label = truncateVisibleEnd(formatReplacementSearchChoiceLabel(choice), layout.labelWidth);
+  const paddedLabel = padVisibleEnd(label, layout.labelWidth);
+  const marker = active ? chalk.green('●') : chalk.gray('○');
+  const line = `  ${active ? chalk.cyan('>') : ' '}   ${marker} ${paddedLabel}  ${formatMacroColumns(replacementSearchChoiceMacroTotals(choice), layout.macroWidths)}`;
+  return active ? chalk.cyan(line) : line;
+}
+
+function formatReplacementSearchChoiceLabel(choice: ReplacementSearchChoice): string {
+  if (choice.type === 'replacement') {
+    const serving = choice.replacement.servingDescription;
+    return `${chalk.magenta('↻')} ${choice.replacement.label} ${chalk.gray(`per ${serving}`)}`;
+  }
+  return formatAddFoodChoiceLabel(choice);
+}
+
+function replacementSearchChoiceMacroTotals(choice: ReplacementSearchChoice): EraFitMacroTotals {
+  if (choice.type === 'replacement') {
+    return {
+      calories: choice.replacement.calories,
+      protein: choice.replacement.protein,
+      net_carbs: choice.replacement.netCarbs,
+      fat: choice.replacement.fat,
+    };
+  }
+  return foodSearchChoiceMacroTotals(choice);
+}
+
+function getReplacementSearchLineLayout(state: InteractiveState, search: ReplacementSearchState): IngredientLineLayout {
+  const sectionLayout = getIngredientLineLayout(state);
+  const choiceWidths = getMacroColumnWidths(search.choices.map(replacementSearchChoiceMacroTotals));
+  const macroWidths = maxMacroColumnWidths(sectionLayout.macroWidths, choiceWidths);
+  const macroWidth = visibleLength(formatMacroColumns({ calories: null, protein: null, net_carbs: null, fat: null }, macroWidths));
+  const availableLabelWidth = process.stdout.columns
+    ? Math.max(18, process.stdout.columns - ITEM_ROW_PREFIX_WIDTH - 2 - macroWidth)
+    : sectionLayout.labelWidth;
+  return {
+    labelWidth: Math.min(sectionLayout.labelWidth, availableLabelWidth),
+    macroWidths,
+  };
 }
 
 function renderItemLine(state: InteractiveState, item: MealPlanItemRef, active: boolean, layout: IngredientLineLayout): string {
@@ -2719,6 +3227,9 @@ function contextHelp(state: InteractiveState): string {
   if (state.mode === 'food-search') {
     return 'type search | ↑/↓ results | Enter select | Esc cancel | Ctrl-C exit';
   }
+  if (state.mode === 'replacement-search') {
+    return '←/→ tabs | type search | ↑/↓ results | Enter replace | Esc cancel | Ctrl-C exit';
+  }
   if (state.mode === 'add') {
     return '←/→ tabs | type search/filter | ↑/↓ results | Enter add | Esc meals | Ctrl-C exit';
   }
@@ -2729,7 +3240,7 @@ function contextHelp(state: InteractiveState): string {
     : '';
   return row?.type === 'outside'
     ? `↑/↓ items | ←/Esc meals | A assign${editAction}${expandAction} | q exit`
-    : `↑/↓ items | ←/Esc meals | ␣ toggle | R serving | S alternative${editAction}${expandAction} | q exit`;
+    : `↑/↓ items | ←/Esc meals | ␣ toggle | M serving | R replace | S alternative${editAction}${expandAction} | q exit`;
 }
 
 function formatItemDisplayName(item: EraFitMealPlanFoodItem): string {

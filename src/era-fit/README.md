@@ -61,7 +61,8 @@ Item mode:
 - `↑` / `↓` moves between items in the selected meal.
 - `←` or `Esc` returns to meal mode.
 - `␣` toggles the selected meal-plan item.
-- `R` sets a serving multiplier for the selected meal-plan item.
+- `M` sets a serving multiplier for the selected meal-plan item.
+- `R` opens replacement mode for the selected meal-plan item.
 - `S` opens alternative search for the selected meal-plan item.
 - `E` edits serving and amount for a checked item; on unchecked rows it expands or collapses ingredient components when the row starts with `⊞` or `⊟`.
 - `A` starts assign mode when the selected row is a green outside-plan item.
@@ -73,7 +74,7 @@ Serving edits reuse the same serving selector and amount prompt used when adding
 
 Original section view is reference-only. It is available when the selected meal has replacement foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, and the meal title switches from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
-Search mode:
+Switch mode:
 
 - Search opens with the planned item name already filled in.
 - Results render below the meal-plan table; the table stays visible.
@@ -84,6 +85,19 @@ Search mode:
 - `Ctrl-C` exits.
 
 After a replacement is logged, the original planned row stays checked but renders as the actual logged food with its serving and macros. For example, replacing `1 cup Greek Yogurt Plain` with a nonfat yogurt shows the nonfat yogurt row instead of hiding the replacement as an outside-plan item.
+
+Replacement mode:
+
+- `R` on a meal-plan item opens replacement mode.
+- `Previous` shows cached replacements for that planned item. Picking one reuses the last serving stored for that replacement.
+- `Search` lets you find a new replacement, then prompts for serving and amount before logging.
+- New replacement choices are saved under `replacements` in `cache.json`, separate from alias mappings, so they do not auto-match future instances of the planned item.
+- `←` / `→` switches between `Previous` and `Search`.
+- Typing in `Previous` switches to `Search`.
+- `↑` / `↓` moves through results.
+- `Enter` logs the highlighted replacement and returns to item mode.
+- `Esc` returns to item mode.
+- `Ctrl-C` exits.
 
 Add mode:
 
