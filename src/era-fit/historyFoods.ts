@@ -84,16 +84,11 @@ function dedupePastFoods(foods: PastFoodSearchItem[]): PastFoodSearchItem[] {
 }
 
 function pastFoodDedupeKey(food: PastFoodSearchItem): string {
-  const record = food.record as TrackedFoodRecord & { food_customized_id?: string; type_item?: string };
+  const record = food.record as TrackedFoodRecord & { type_item?: string };
   return normalizeFoodCacheKey([
     record.type_item,
-    record.food_customized_id,
-    record.food_id,
     food.name,
     food.brandName,
-    food.servingDescription,
-    food.servingQuantity,
-    food.servingUnit,
   ].filter(value => value != null && String(value).trim()).join('|'));
 }
 
