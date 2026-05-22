@@ -127,8 +127,8 @@ export interface PastFoodSearchItem {
 
 export function pastFoodSearchItemFromTrackedEntry(entry: TrackedFoodEntry): PastFoodSearchItem | null {
   const raw = entry.record as TrackedFoodRecord & { title?: string };
-  const name = parseString(raw.food_name) ?? parseString(raw.title);
-  if (!name) {
+  const name = trackedFoodRecordDisplayName(entry.record);
+  if (name === 'Logged food') {
     return null;
   }
   const servingQuantity = parseNumberLike(raw.serving_qtd) ?? 1;
@@ -154,6 +154,16 @@ export function pastFoodSearchItemFromTrackedEntry(entry: TrackedFoodEntry): Pas
   };
 }
 
+export function trackedFoodRecordDisplayName(record: TrackedFoodRecord): string {
+  const raw = record as TrackedFoodRecord & { name?: string; title?: string; type_item?: string };
+  const title = optionalFoodString(raw.title);
+  const foodName = optionalFoodString(raw.food_name);
+  const name = optionalFoodString(raw.name);
+  return raw.type_item === 'my_meals'
+    ? title ?? foodName ?? name ?? 'Logged food'
+    : foodName ?? title ?? name ?? 'Logged food';
+}
+
 export function trackedFoodRecordMacroTotals(record: TrackedFoodRecord): EraFitMacroTotals {
   const raw = record as TrackedFoodRecord & { total?: unknown };
   const total = asRecord(raw.total);
@@ -164,6 +174,10 @@ export function trackedFoodRecordMacroTotals(record: TrackedFoodRecord): EraFitM
     net_carbs: parseMacroWithTotal(parseNetCarbsValue(raw.net_carbs, raw.carbohydrate), parseNetCarbsValue(total?.net_carbs, total?.carbohydrate), servingQuantity),
     fat: parseMacroWithTotal(raw.fat, total?.fat, servingQuantity),
   };
+}
+
+function optionalFoodString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
 function parseMacroWithTotal(value: unknown, totalValue: unknown, servingQuantity: number): number {

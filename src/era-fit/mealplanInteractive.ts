@@ -18,6 +18,8 @@ import {
   formatDateKey,
   formatEraFitDateId,
   formatNumber,
+  MEAL_KEYS,
+  MEAL_LABELS,
   parseNumberLike,
   parseNetCarbsValue,
   roundNumber,
@@ -46,6 +48,8 @@ import {
   saveTrackedFoods,
   searchTrackFoodChoices,
   tryParseTrackItem,
+  trackedFoodRecordDisplayName,
+  trackedFoodRecordMacroTotals,
   type FoodSearchChoice,
   type PastFoodSearchItem,
   type ParsedTrackItem,
@@ -148,6 +152,7 @@ interface InteractiveState {
     trackingMeal: EraFitMealKey;
     items: MealPlanItemRef[];
     outsideItems: OutsidePlanItemRef[];
+    outsideOnly: boolean;
   }>;
   dryRun: boolean;
   mode: NavigationMode;
@@ -254,9 +259,13 @@ function createInteractiveState(
         item,
       })),
       outsideItems: [],
+      outsideOnly: false,
     };
   });
   const matched = matchExistingTrackedItems(cache, meals, tracked);
+  appendOutsideOnlyMeals(meals, matched.outsideByMeal);
+  sortMealsByTrackingOrder(meals);
+  reindexMealRefs(meals);
   refreshOutsideItems(meals, matched.outsideByMeal);
   return {
     day,
@@ -282,6 +291,59 @@ function createInteractiveState(
     renderCache: createRenderCache(),
     messages: [],
   };
+}
+
+function sortMealsByTrackingOrder(meals: InteractiveState['meals']): void {
+  meals.sort((a, b) => MEAL_KEYS.indexOf(a.trackingMeal) - MEAL_KEYS.indexOf(b.trackingMeal));
+}
+
+function reindexMealRefs(meals: InteractiveState['meals']): void {
+  for (const [mealIndex, meal] of meals.entries()) {
+    for (const [itemIndex, item] of meal.items.entries()) {
+      item.mealIndex = mealIndex;
+      item.itemIndex = itemIndex;
+    }
+  }
+}
+
+function appendOutsideOnlyMeals(
+  meals: InteractiveState['meals'],
+  outsideByMeal: Map<EraFitMealKey, TrackedFoodEntry[]>
+): void {
+  const visibleMeals = new Set(meals.map(meal => meal.trackingMeal));
+  for (const mealKey of MEAL_KEYS) {
+    const entries = outsideByMeal.get(mealKey) ?? [];
+    if (visibleMeals.has(mealKey) || entries.length === 0) {
+      continue;
+    }
+    meals.push({
+      meal: {
+        meal: MEAL_LABELS[mealKey],
+        meal_key: mealKey,
+        time: null,
+        recipe: null,
+        macros: sumTrackedRecordMacros(entries),
+        items: [],
+      },
+      trackingMeal: mealKey,
+      items: [],
+      outsideItems: [],
+      outsideOnly: true,
+    });
+    visibleMeals.add(mealKey);
+  }
+}
+
+function sumTrackedRecordMacros(entries: TrackedFoodEntry[]): EraFitMacroTotals {
+  return entries.reduce<EraFitMacroTotals>((sum, entry) => {
+    const macros = trackedFoodRecordMacroTotals(entry.record);
+    return {
+      calories: (sum.calories ?? 0) + sumCaloriesMacro(macros.calories),
+      protein: (sum.protein ?? 0) + (macros.protein ?? 0),
+      net_carbs: (sum.net_carbs ?? 0) + (macros.net_carbs ?? 0),
+      fat: (sum.fat ?? 0) + (macros.fat ?? 0),
+    };
+  }, { calories: 0, protein: 0, net_carbs: 0, fat: 0 });
 }
 
 function createRenderCache(): InteractiveRenderCache {
@@ -1644,7 +1706,7 @@ function trackedRecordMatchesCachedSelection(record: TrackedFoodRecord, cached: 
       return raw.type_item === 'my_meals' &&
         (record.food_id === cached.savedId || record.food_id === cached.foodId || raw.title === cached.foodName);
     }
-    return record.food_id === cached.foodId || normalizeMatchText(record.food_name ?? '') === normalizeMatchText(cached.foodName);
+    return record.food_id === cached.foodId || normalizeMatchText(trackedFoodRecordDisplayName(record)) === normalizeMatchText(cached.foodName);
   }
   if (record.food_id !== cached.foodId) {
     return false;
@@ -1693,7 +1755,8 @@ function trackedEntryKey(entry: TrackedFoodEntry): string {
 
 function scoreTrackedTextMatch(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): number {
   const itemTokens = tokenize(`${item.name} ${item.description ?? ''}`);
-  const recordTokens = tokenize(record.food_name ?? '');
+  const recordName = trackedFoodRecordDisplayName(record);
+  const recordTokens = tokenize(recordName);
   const overlap = itemTokens.filter(token => recordTokens.includes(token)).length;
   if (overlap === 0) {
     return 0;
@@ -1701,8 +1764,8 @@ function scoreTrackedTextMatch(item: EraFitMealPlanFoodItem, record: TrackedFood
   const tokenRatio = overlap / Math.max(1, Math.min(itemTokens.length, recordTokens.length));
   let score = tokenRatio * 4;
   const itemName = normalizeMatchText(item.name);
-  const recordName = normalizeMatchText(record.food_name ?? '');
-  if (itemName.includes(recordName) || recordName.includes(itemName)) {
+  const normalizedRecordName = normalizeMatchText(recordName);
+  if (itemName.includes(normalizedRecordName) || normalizedRecordName.includes(itemName)) {
     score += 2;
   }
 
@@ -1731,12 +1794,12 @@ function macroProximityDistance(item: EraFitMealPlanFoodItem, record: TrackedFoo
 }
 
 function macroPairs(item: EraFitMealPlanFoodItem, record: TrackedFoodRecord): Array<[number, number]> | null {
-  const trackedNetCarbs = parseNetCarbsValue(record.net_carbs, record.carbohydrate);
+  const tracked = trackedFoodRecordMacroTotals(record);
   const pairs = [
-    [item.calories, record.calories],
-    [item.protein, record.protein],
-    [item.net_carbs, trackedNetCarbs],
-    [item.fat, record.fat],
+    [item.calories, tracked.calories],
+    [item.protein, tracked.protein],
+    [item.net_carbs, tracked.net_carbs],
+    [item.fat, tracked.fat],
   ];
   if (pairs.some(([planned, tracked]) => planned == null || tracked == null || !Number.isFinite(planned) || !Number.isFinite(tracked))) {
     return null;
@@ -2607,7 +2670,9 @@ function renderMealPlanFrame(state: InteractiveState): string {
   ];
   for (const [mealIndex, meal] of state.meals.entries()) {
     const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
-    const mealCheckbox = isShowingOriginalMeal(state, mealIndex) ? CHECKBOX_EMPTY : formatMealCheckbox(state, meal.items);
+    const mealCheckbox = meal.outsideOnly
+      ? chalk.green(OUTSIDE_PLAN_CHECKED)
+      : isShowingOriginalMeal(state, mealIndex) ? CHECKBOX_EMPTY : formatMealCheckbox(state, meal.items);
     const mealPrefix = `${activeMeal ? chalk.cyan('>') : ' '} ${mealCheckbox} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')}`;
     const mealLine = `${activeMeal ? chalk.cyan(mealPrefix) : mealPrefix} ${formatMealHeaderMacros(state, mealIndex)}`;
     lines.push(mealLine);
@@ -2678,7 +2743,7 @@ function sumTrackedMacros(state: InteractiveState, entries: TrackedFoodEntry[]):
   return entries.reduce<EraFitMacroTotals>((sum, entry) => {
     const macros = trackedEntryMacroTotals(state, entry);
     return {
-      calories: (sum.calories ?? 0) + (macros.calories ?? 0),
+      calories: (sum.calories ?? 0) + sumCaloriesMacro(macros.calories),
       protein: (sum.protein ?? 0) + (macros.protein ?? 0),
       net_carbs: (sum.net_carbs ?? 0) + (macros.net_carbs ?? 0),
       fat: (sum.fat ?? 0) + (macros.fat ?? 0),
@@ -2702,6 +2767,10 @@ function formatMealHeaderMacros(state: InteractiveState, mealIndex: number): str
       { calories: null, protein: null, net_carbs: null, fat: null }
     );
   }
+  if (meal.outsideOnly) {
+    const macros = mealTrackedMacros(state, mealIndex);
+    return `${chalk.gray('logged:')} ${formatMacroColumns(macros, getMacroColumnWidths([macros]))}`;
+  }
   if (isShowingOriginalMeal(state, mealIndex)) {
     const widths = getMacroColumnWidths([meal.meal.macros]);
     return `${chalk.gray('target:')} ${formatTargetMacros(meal.meal.macros, widths)}`;
@@ -2715,6 +2784,10 @@ function mealTrackedMacros(state: InteractiveState, mealIndex: number): EraFitMa
     return { calories: 0, protein: 0, net_carbs: 0, fat: 0 };
   }
   return sumTrackedMacros(state, state.trackedEntries.filter(entry => entry.meal === meal.trackingMeal));
+}
+
+function sumCaloriesMacro(value: number | null): number {
+  return value == null ? 0 : Math.round(value);
 }
 
 function scaleMacroValue(value: number | null, multiplier: number): number | null {
@@ -3167,6 +3240,9 @@ function canShowOriginalMeal(state: InteractiveState, mealIndex: number): boolea
   if (!meal) {
     return false;
   }
+  if (meal.outsideOnly) {
+    return false;
+  }
   return meal.outsideItems.length > 0 ||
     meal.items.some(item => state.completedItemKeys.has(item.key) || state.trackedItemByKey.has(item.key));
 }
@@ -3187,20 +3263,21 @@ function isReplacementTrackedFood(state: InteractiveState, item: MealPlanItemRef
 }
 
 function formatTrackedFoodDisplayName(record: TrackedFoodRecord): string {
-  return nonEmptyString(record.food_name) ?? 'Logged food';
+  return trackedFoodRecordDisplayName(record);
 }
 
 function trackedMacroTotals(record: TrackedFoodRecord): EraFitMealPlanFoodItem {
+  const totals = trackedFoodRecordMacroTotals(record);
   return {
     name: formatTrackedFoodDisplayName(record),
     description: null,
     amount: null,
     unit: null,
     serving: null,
-    calories: parseNumberLike(record.energy) ?? parseNumberLike(record.calories),
-    protein: parseNumberLike(record.protein),
-    net_carbs: parseNetCarbsValue(record.net_carbs, record.carbohydrate),
-    fat: parseNumberLike(record.fat),
+    calories: totals.calories,
+    protein: totals.protein,
+    net_carbs: totals.net_carbs,
+    fat: totals.fat,
   };
 }
 
