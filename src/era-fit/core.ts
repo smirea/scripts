@@ -16,6 +16,7 @@ const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '..', '.env.local');
 const SESSION_ENV_KEY = 'ERA_FIT_SESSION_COOKIE';
 const CREDENTIALS_ENV_KEY = 'ERA_FIT_CREDENTIALS';
 const FIREBASE_API_KEY_ENV = 'ERA_FIT_FIREBASE_API_KEY';
+const FIREBASE_ID_TOKEN_ENV = 'ERA_FIT_FIREBASE_ID_TOKEN';
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 export const MEAL_KEYS = ['breakfast', 'snack_am', 'lunch', 'snack_pm', 'dinner', 'snack_evening'] as const;
 export type EraFitMealKey = (typeof MEAL_KEYS)[number];
@@ -713,29 +714,20 @@ async function fetchMealPlanSlots(session: EraFitSession): Promise<EraFitMealPla
 }
 
 async function fetchMealPlanAiData(session: EraFitSession): Promise<Record<string, unknown>> {
-  const token = await resolveFirebaseIdToken(session);
-  const url = new URL(`https://erafit-${session.app.biz_id}.firebaseio.com/db_ai/sys_clients/${session.app.id_app}/meal_plan.json`);
-  if (token) {
-    url.searchParams.set('auth', token);
-  }
-  const response = await fetch(url);
-  const text = await response.text();
-  if (!response.ok) {
-    const authHint = token
-      ? `${SESSION_ENV_KEY} loaded, but the Firebase token could not read the AI meal plan.`
-      : `Era Fit stores suggested meal details in Firebase RTDB, and the web session did not return a readable Firebase auth token.`;
-    throw new Error(`Era Fit meal-plan API request failed: ${response.status} ${response.statusText}. ${authHint}`);
-  }
-  const json = JSON.parse(text) as unknown;
-  const data = asRecord(json);
-  if (!data) {
-    return {};
-  }
-  return data;
+  return await readEraFitFirebasePath<Record<string, unknown>>(
+    session,
+    `db_ai/sys_clients/${session.app.id_app}/meal_plan`
+  ) ?? {};
 }
 
-export async function resolveFirebaseIdToken(session: EraFitSession): Promise<string | null> {
-  const token = normalizeOptionalString(env.ERA_FIT_FIREBASE_ID_TOKEN);
+export async function resolveFirebaseIdToken(
+  session: EraFitSession,
+  options: { refresh?: boolean } = {}
+): Promise<string | null> {
+  if (options.refresh) {
+    runtimeFirebaseIdToken = null;
+  }
+  const token = options.refresh ? null : normalizeOptionalString(env.ERA_FIT_FIREBASE_ID_TOKEN);
   if (token) {
     return token;
   }
@@ -904,18 +896,51 @@ export async function updateEraFitFirebasePath(
 }
 
 async function firebaseRequest(session: EraFitSession, dbPath: string, init: RequestInit): Promise<Response> {
-  const token = await resolveFirebaseIdToken(session);
+  const firstAttempt = await fetchFirebasePath(session, dbPath, init);
+  if (firstAttempt.response.ok) {
+    return firstAttempt.response;
+  }
+
+  if (isFirebaseAuthDenied(firstAttempt.response.status, firstAttempt.text)) {
+    const retryAttempt = await fetchFirebasePath(session, dbPath, init, { refreshToken: true });
+    if (retryAttempt.response.ok) {
+      return retryAttempt.response;
+    }
+    throw firebaseRequestError(dbPath, retryAttempt.response, retryAttempt.text);
+  }
+
+  throw firebaseRequestError(dbPath, firstAttempt.response, firstAttempt.text);
+}
+
+async function fetchFirebasePath(
+  session: EraFitSession,
+  dbPath: string,
+  init: RequestInit,
+  options: { refreshToken?: boolean } = {}
+): Promise<{ response: Response; text: string }> {
+  const token = await resolveFirebaseIdToken(session, { refresh: options.refreshToken });
   if (!token) {
-    throw new Error(`${FIREBASE_API_KEY_ENV} and ${CREDENTIALS_ENV_KEY} are required for Era Fit Firebase writes.`);
+    const refreshHint = options.refreshToken
+      ? ` The rejected Firebase token could not be refreshed; set ${FIREBASE_API_KEY_ENV} and ${CREDENTIALS_ENV_KEY}, or remove stale ${FIREBASE_ID_TOKEN_ENV}.`
+      : '';
+    throw new Error(`${FIREBASE_API_KEY_ENV} and ${CREDENTIALS_ENV_KEY} are required for Era Fit Firebase requests.${refreshHint}`);
   }
   const url = new URL(`https://erafit-${session.app.biz_id}.firebaseio.com/${dbPath.replace(/^\/+/, '')}.json`);
   url.searchParams.set('auth', token);
   const response = await fetch(url, init);
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Era Fit Firebase request failed: ${response.status} ${response.statusText} (${dbPath}) ${text.slice(0, 500)}`);
-  }
-  return response;
+  const responseText = response.ok ? '' : await response.text();
+  return { response, text: responseText };
+}
+
+function isFirebaseAuthDenied(status: number, text: string): boolean {
+  return (
+    (status === 401 || status === 403) &&
+    /permission denied|auth token|unauthorized|invalid token|expired/i.test(text)
+  );
+}
+
+function firebaseRequestError(dbPath: string, response: Response, text: string): Error {
+  return new Error(`Era Fit Firebase request failed: ${response.status} ${response.statusText} (${dbPath}) ${text.slice(0, 500)}`);
 }
 
 function isRetryableStatus(status: number): boolean {
