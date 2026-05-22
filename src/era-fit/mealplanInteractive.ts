@@ -2715,7 +2715,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
 }
 
 function formatDailyMacroBalanceLines(state: InteractiveState): string[] {
-  const logged = sumTrackedMacros(state, state.trackedEntries);
+  const logged = dayTrackedMacros(state);
   const target = dayTargetMacros(state.day);
   const remaining = subtractMacros(target, logged);
   const widths = getMacroColumnWidths([target, remaining]);
@@ -2724,6 +2724,18 @@ function formatDailyMacroBalanceLines(state: InteractiveState): string[] {
     `${chalk.gray(padVisibleEnd('left:', labelWidth))} ${formatRemainingMacrosWithWidths(target, remaining, widths)}`,
     `${chalk.gray(padVisibleEnd('target:', labelWidth))} ${formatTargetMacros(target, widths)}`,
   ];
+}
+
+function dayTrackedMacros(state: InteractiveState): EraFitMacroTotals {
+  return state.meals.reduce<EraFitMacroTotals>((sum, _, mealIndex) => {
+    const macros = mealTrackedMacros(state, mealIndex);
+    return {
+      calories: (sum.calories ?? 0) + (macros.calories ?? 0),
+      protein: (sum.protein ?? 0) + (macros.protein ?? 0),
+      net_carbs: (sum.net_carbs ?? 0) + (macros.net_carbs ?? 0),
+      fat: (sum.fat ?? 0) + (macros.fat ?? 0),
+    };
+  }, { calories: 0, protein: 0, net_carbs: 0, fat: 0 });
 }
 
 function dayTargetMacros(day: EraFitMealPlanDay): EraFitMacroTotals {
@@ -2783,11 +2795,24 @@ function mealTrackedMacros(state: InteractiveState, mealIndex: number): EraFitMa
   if (!meal) {
     return { calories: 0, protein: 0, net_carbs: 0, fat: 0 };
   }
-  return sumTrackedMacros(state, state.trackedEntries.filter(entry => entry.meal === meal.trackingMeal));
+  return roundDashboardMealMacros(sumTrackedMacros(state, state.trackedEntries.filter(entry => entry.meal === meal.trackingMeal)));
 }
 
 function sumCaloriesMacro(value: number | null): number {
   return value == null ? 0 : Math.round(value);
+}
+
+function roundDashboardMealMacros(value: EraFitMacroTotals): EraFitMacroTotals {
+  return {
+    calories: value.calories == null ? null : Math.round(value.calories),
+    protein: roundDashboardGramMacro(value.protein),
+    net_carbs: roundDashboardGramMacro(value.net_carbs),
+    fat: roundDashboardGramMacro(value.fat),
+  };
+}
+
+function roundDashboardGramMacro(value: number | null): number | null {
+  return value == null ? null : Math.round((value + Number.EPSILON) * 10) / 10;
 }
 
 function scaleMacroValue(value: number | null, multiplier: number): number | null {
