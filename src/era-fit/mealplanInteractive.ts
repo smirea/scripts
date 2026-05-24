@@ -2817,7 +2817,14 @@ function formatDayHeader(state: InteractiveState): string {
   const prefix = active ? chalk.cyan('>') : ' ';
   const arrow = active ? chalk.cyan : chalk.gray;
   const day = active ? chalk.cyan.bold(state.day.day) : chalk.bold(state.day.day);
-  return `${prefix} ${arrow('←')} ${day} ${arrow('→')} ${chalk.gray(formatDateKey(state.date))} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`;
+  return `${prefix} ${arrow('←')} ${day} ${arrow('→')} ${chalk.gray(formatMealplanHeaderDate(state.date))} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`;
+}
+
+function formatMealplanHeaderDate(date: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    day: 'numeric',
+  }).format(date);
 }
 
 function formatDailyMacroBalanceLines(state: InteractiveState): string[] {
