@@ -31,7 +31,7 @@
       "servingType": "standard",
       "servingUnit": "g",
       "servingDescription": "g",
-      "updatedAt": "2026-05-19T22:54:01.097Z"
+      "updatedAt": "2026-05-24T18:14:19.692Z"
     },
     "1 25 cups broccoli steamed 100g": {
       "foodId": "36291",
@@ -165,10 +165,10 @@
     "chicken breast": {
       "foodId": "4881229",
       "foodName": "Skinless Chicken Breast",
-      "servingType": "standard",
-      "servingUnit": "oz",
-      "servingDescription": "oz",
-      "updatedAt": "2026-05-20T15:38:46.119Z"
+      "servingType": "fatsecret",
+      "servingId": "4751536",
+      "servingDescription": "1 oz boneless, cooked, skinless",
+      "updatedAt": "2026-05-24T18:14:05.957Z"
     },
     "7oz chicken breast grilled 196g": {
       "foodId": "4881229",
@@ -238,10 +238,10 @@
       "foodId": "105808960",
       "foodName": "Carbe Diem Rotini",
       "brandName": "General Mills",
-      "servingType": "fatsecret",
-      "servingId": "84074002",
-      "servingDescription": "2 oz dry",
-      "updatedAt": "2026-05-23T14:10:16.775Z"
+      "servingType": "standard",
+      "servingUnit": "oz",
+      "servingDescription": "oz",
+      "updatedAt": "2026-05-24T18:13:28.564Z"
     },
     "sauce 4servings": {
       "foodId": "-OtG1Q_882Bo6A6xb8yC",
@@ -253,6 +253,23 @@
       "savedId": "-OtG1Q_882Bo6A6xb8yC",
       "servingQuantity": 1,
       "updatedAt": "2026-05-23T14:10:27.882Z"
+    },
+    "rice": {
+      "foodId": "4513",
+      "foodName": "Brown Rice",
+      "servingType": "fatsecret",
+      "servingId": "18356",
+      "servingDescription": "1 cup cooked",
+      "updatedAt": "2026-05-24T18:13:56.782Z"
+    },
+    "free ultra filtered milk": {
+      "foodId": "8877146",
+      "foodName": "Fat Free Ultra-Filtered Milk",
+      "brandName": "Fairlife",
+      "servingType": "fatsecret",
+      "servingId": "8512706",
+      "servingDescription": "1 cup",
+      "updatedAt": "2026-05-24T18:15:05.809Z"
     }
   },
   "replacements": {},

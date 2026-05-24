@@ -924,6 +924,7 @@ async function promptForQuantityWithPreview(options: {
     let value = options.initialValue;
     let error: string | null = null;
     let settled = false;
+    let rendered = false;
 
     const cleanup = () => {
       input.off('keypress', onKeypress);
@@ -944,7 +945,11 @@ async function promptForQuantityWithPreview(options: {
       const parsed = parseQuantity(value.trim());
       const preview = parsed != null && parsed > 0 ? options.preview(parsed) : chalk.gray('enter a positive number');
       const suffix = error ? ` ${chalk.red(error)}` : '';
-      output.write(`\r\x1b[2K${chalk.cyan('◇')} ${options.message}: ${value}${chalk.gray('  ')}${preview}${suffix}`);
+      if (rendered) {
+        output.write('\r\x1b[2K\x1b[1A\r\x1b[2K');
+      }
+      output.write(`${chalk.cyan('◇')} ${options.message} ${preview}${suffix}\n${chalk.cyan('│')} ${value}`);
+      rendered = true;
     };
     const onKeypress = (character: string | undefined, key: { name?: string; ctrl?: boolean; meta?: boolean }) => {
       if (key.ctrl && key.name === 'c') {
