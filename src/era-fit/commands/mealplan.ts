@@ -125,7 +125,7 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
     await runInteractiveTodayMealPlan({
       session,
       cache: loadEraFitCache(),
-      day: getTodayMealPlanDay(mealPlan),
+      days: mealPlan.days,
       dryRun: args.dryRun,
     });
     return;

@@ -100,8 +100,162 @@
       "servingUnit": "g",
       "servingDescription": "g",
       "updatedAt": "2026-05-19T23:09:31.500Z"
+    },
+    "greek yogurt nonfat stonyfield": {
+      "foodId": "96856291",
+      "foodName": "Organic Greek Plain Nonfat Yogurt",
+      "brandName": "Stonyfield Farm",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:21:54.154Z"
+    },
+    "greek yogurt": {
+      "foodId": "96856291",
+      "foodName": "Organic Greek Plain Nonfat Yogurt",
+      "brandName": "Stonyfield Farm",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:21:54.157Z"
+    },
+    "1 cup greek yogurt plain 250g": {
+      "foodId": "96856291",
+      "foodName": "Organic Greek Plain Nonfat Yogurt",
+      "brandName": "Stonyfield Farm",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:21:54.157Z"
+    },
+    "blueberries": {
+      "foodId": "6889541",
+      "foodName": "Blueberries",
+      "brandName": "Driscoll's",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:28:21.661Z"
+    },
+    "1 2 cup blueberries 67g": {
+      "foodId": "6889541",
+      "foodName": "Blueberries",
+      "brandName": "Driscoll's",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:28:21.662Z"
+    },
+    "blackberries": {
+      "foodId": "35757",
+      "foodName": "Blackberries",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:28:45.499Z"
+    },
+    "1 4 cup blackberries 35g": {
+      "foodId": "35757",
+      "foodName": "Blackberries",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-20T14:28:45.500Z"
+    },
+    "chicken breast": {
+      "foodId": "4881229",
+      "foodName": "Skinless Chicken Breast",
+      "servingType": "standard",
+      "servingUnit": "oz",
+      "servingDescription": "oz",
+      "updatedAt": "2026-05-20T15:38:46.119Z"
+    },
+    "7oz chicken breast grilled 196g": {
+      "foodId": "4881229",
+      "foodName": "Skinless Chicken Breast",
+      "servingType": "standard",
+      "servingUnit": "oz",
+      "servingDescription": "oz",
+      "updatedAt": "2026-05-20T15:38:46.119Z"
+    },
+    "brown rice": {
+      "foodId": "4513",
+      "foodName": "Brown Rice",
+      "servingType": "fatsecret",
+      "servingId": "18356",
+      "servingDescription": "1 cup cooked",
+      "updatedAt": "2026-05-23T14:09:47.035Z"
+    },
+    "1 cup brown rice cooked 160g": {
+      "foodId": "4513",
+      "foodName": "Brown Rice",
+      "servingType": "fatsecret",
+      "servingId": "18356",
+      "servingDescription": "1 cup cooked",
+      "updatedAt": "2026-05-20T15:39:22.645Z"
+    },
+    "breast": {
+      "foodId": "4881229",
+      "foodName": "Skinless Chicken Breast",
+      "servingType": "fatsecret",
+      "servingId": "4751539",
+      "servingDescription": "100 g",
+      "updatedAt": "2026-05-21T16:31:37.658Z"
+    },
+    "white rice": {
+      "foodId": "39719",
+      "foodName": "White Rice (Long-Grain, Cooked)",
+      "servingType": "fatsecret",
+      "servingId": "40325",
+      "servingDescription": "1 cup",
+      "updatedAt": "2026-05-22T16:24:57.410Z"
+    },
+    "1 5 cups white rice cooked 291g": {
+      "foodId": "39719",
+      "foodName": "White Rice (Long-Grain, Cooked)",
+      "servingType": "fatsecret",
+      "servingId": "40325",
+      "servingDescription": "1 cup",
+      "updatedAt": "2026-05-22T16:24:57.411Z"
+    },
+    "avocado": {
+      "foodId": "35752",
+      "foodName": "Avocados",
+      "servingType": "fatsecret",
+      "servingId": "58483",
+      "servingDescription": "100 g",
+      "updatedAt": "2026-05-22T16:25:28.537Z"
+    },
+    "baked sweetpotato peel not eaten": {
+      "foodId": "6118",
+      "foodName": "Baked Sweetpotato (Peel Not Eaten)",
+      "servingType": "standard",
+      "servingUnit": "g",
+      "servingDescription": "g",
+      "updatedAt": "2026-05-23T14:09:22.642Z"
+    },
+    "diem rotini": {
+      "foodId": "105808960",
+      "foodName": "Carbe Diem Rotini",
+      "brandName": "General Mills",
+      "servingType": "fatsecret",
+      "servingId": "84074002",
+      "servingDescription": "2 oz dry",
+      "updatedAt": "2026-05-23T14:10:16.775Z"
+    },
+    "sauce 4servings": {
+      "foodId": "-OtG1Q_882Bo6A6xb8yC",
+      "foodName": "Pasta Sauce 4servings",
+      "servingType": "saved",
+      "servingUnit": "serving",
+      "servingDescription": "1 serving",
+      "savedSource": "my_meal",
+      "savedId": "-OtG1Q_882Bo6A6xb8yC",
+      "servingQuantity": 1,
+      "updatedAt": "2026-05-23T14:10:27.882Z"
     }
   },
+  "replacements": {},
   "mealPlanMealMap": {
     "breakfast": "breakfast",
     "morning_snack": "snack_am",

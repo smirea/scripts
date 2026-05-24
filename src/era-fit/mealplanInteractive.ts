@@ -32,6 +32,7 @@ import {
   type EraFitMealPlanFoodItem,
   type EraFitMealPlanMeal,
   type EraFitSession,
+  WEEKDAY_NAMES,
 } from './core';
 import { formatMacroColumns, formatMacroNumber, getMacroColumnWidths, type MacroColumnWidths } from './macroFormat';
 import {
@@ -83,7 +84,7 @@ let keypressInterface: Interface | null = null;
 interface InteractiveMealPlanOptions {
   session: EraFitSession;
   cache: EraFitCache;
-  day: EraFitMealPlanDay;
+  days: EraFitMealPlanDay[];
   dryRun: boolean;
 }
 
@@ -146,6 +147,7 @@ interface AddFoodState {
 }
 
 interface InteractiveState {
+  date: Date;
   day: EraFitMealPlanDay;
   meals: Array<{
     meal: EraFitMealPlanMeal;
@@ -188,6 +190,7 @@ interface InteractiveRenderCache {
 }
 
 type MealPlanPromptAction =
+  | { type: 'change-day'; delta: number }
   | { type: 'toggle-meal'; mealIndex: number }
   | { type: 'toggle-row'; mealIndex: number; rowIndex: number }
   | { type: 'set-serving'; mealIndex: number; rowIndex: number }
@@ -207,12 +210,16 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
   }
 
   const date = startOfLocalDay(new Date());
-  const dateId = formatEraFitDateId(date);
-  const tracked = await fetchTrackedFoodsForDate(options.session, dateId);
-  const state = createInteractiveState(options.day, options.cache, tracked, options.dryRun);
+  let state = await createInteractiveStateForDate({
+    session: options.session,
+    cache: options.cache,
+    days: options.days,
+    date,
+    dryRun: options.dryRun,
+  });
   clearInteractiveScreen();
   if (options.dryRun) {
-    pushMessage(state, `dry run for ${formatDateKey(date)}; no Era Fit writes or cache updates`);
+    pushDryRunMessage(state);
   }
 
   while (true) {
@@ -220,15 +227,40 @@ export async function runInteractiveTodayMealPlan(options: InteractiveMealPlanOp
     const action = await promptMealPlanChecklist(options.session, options.cache, state);
     if (!action || action.type === 'done') {
       if (state.tasks.size > 0) {
-        process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
-        await Promise.allSettled(Array.from(state.tasks));
+        await waitForPendingTasks(state);
       }
       clearInteractiveScreen();
       process.stdout.write(chalk.gray('done\n'));
       return;
     }
-    await handleMealPlanAction(options.session, options.cache, dateId, state, action);
+    state = await handleMealPlanAction(options.session, options.cache, options.days, state, action) ?? state;
   }
+}
+
+async function createInteractiveStateForDate(options: {
+  session: EraFitSession;
+  cache: EraFitCache;
+  days: EraFitMealPlanDay[];
+  date: Date;
+  dryRun: boolean;
+}): Promise<InteractiveState> {
+  const date = startOfLocalDay(options.date);
+  const day = mealPlanDayForDate(options.days, date);
+  const tracked = await fetchTrackedFoodsForDate(options.session, formatEraFitDateId(date));
+  return createInteractiveState(day, options.cache, tracked, options.dryRun, date);
+}
+
+function mealPlanDayForDate(days: EraFitMealPlanDay[], date: Date): EraFitMealPlanDay {
+  const weekday = WEEKDAY_NAMES[date.getDay()];
+  const day = days.find(candidate => candidate.day === weekday);
+  if (!day) {
+    throw new Error(`Meal plan did not include ${weekday}.`);
+  }
+  return day;
+}
+
+function pushDryRunMessage(state: InteractiveState): void {
+  pushMessage(state, `dry run for ${formatDateKey(state.date)}; no Era Fit writes or cache updates`);
 }
 
 async function promptMealPlanChecklist(
@@ -243,7 +275,8 @@ function createInteractiveState(
   day: EraFitMealPlanDay,
   cache: EraFitCache,
   tracked: TrackedFoodEntry[],
-  dryRun: boolean
+  dryRun: boolean,
+  date: Date
 ): InteractiveState {
   const meals: InteractiveState['meals'] = day.meals.map((meal, mealIndex) => {
     const trackingMeal = resolveTrackingMeal(cache, meal);
@@ -268,6 +301,7 @@ function createInteractiveState(
   reindexMealRefs(meals);
   refreshOutsideItems(meals, matched.outsideByMeal);
   return {
+    date,
     day,
     meals,
     dryRun,
@@ -369,40 +403,44 @@ function resolveTrackingMeal(cache: EraFitCache, meal: EraFitMealPlanMeal): EraF
 async function handleMealPlanAction(
   session: EraFitSession,
   cache: EraFitCache,
-  dateId: string,
+  days: EraFitMealPlanDay[],
   state: InteractiveState,
   action: MealPlanPromptAction
-): Promise<void> {
+): Promise<InteractiveState | null> {
   state.expandedItemKey = null;
   state.originalMealIndex = null;
   invalidateRenderCache(state);
+  if (action.type === 'change-day') {
+    return await loadAdjacentInteractiveDay(session, cache, days, state, action.delta);
+  }
+  const dateId = formatEraFitDateId(state.date);
   if (action.type === 'toggle-meal') {
     const meal = state.meals[action.mealIndex];
     startToggleItemsTask(session, cache, dateId, state, meal.items);
-    return;
+    return null;
   }
   if (action.type === 'done') {
-    return;
+    return null;
   }
   if (action.type === 'cancel-food-search') {
     closeFoodSearch(state);
-    return;
+    return null;
   }
   if (action.type === 'cancel-replacement-search') {
     closeReplacementSearch(state);
-    return;
+    return null;
   }
   if (action.type === 'select-food-search') {
     await logSelectedFoodSearchChoice(session, cache, dateId, state, action.index);
-    return;
+    return null;
   }
   if (action.type === 'select-replacement-search') {
     await logSelectedReplacementSearchChoice(session, cache, dateId, state, action.index);
-    return;
+    return null;
   }
   if (action.type === 'select-add-food') {
     await logSelectedAddFoodChoice(session, cache, dateId, state, action.index);
-    return;
+    return null;
   }
   const row = getMealRow(state, action.mealIndex, action.rowIndex);
   if (action.type === 'toggle-row') {
@@ -411,32 +449,71 @@ async function handleMealPlanAction(
     } else if (row?.type === 'outside') {
       await removeOutsidePlanItem(session, cache, dateId, state, row.item);
     }
-    return;
+    return null;
   }
   if (action.type === 'edit-serving') {
     clearInteractiveScreen();
     if (row) {
       await editTrackedRowServing(session, cache, dateId, state, row);
     }
-    return;
+    return null;
   }
   if (row?.type !== 'plan') {
-    return;
+    return null;
   }
   clearInteractiveScreen();
   if (action.type === 'open-food-search') {
     await openFoodSearch(session, state, row.item, action.query ?? row.item.item.name);
-    return;
+    return null;
   }
   if (action.type === 'open-replacement-search') {
     await openReplacementSearch(session, cache, state, row.item);
-    return;
+    return null;
   }
   if (action.type === 'set-serving') {
     await promptServingMultiplier(state, row.item);
-    return;
+    return null;
   }
   await openFoodSearch(session, state, row.item, row.item.item.name);
+  return null;
+}
+
+async function loadAdjacentInteractiveDay(
+  session: EraFitSession,
+  cache: EraFitCache,
+  days: EraFitMealPlanDay[],
+  state: InteractiveState,
+  delta: number
+): Promise<InteractiveState> {
+  await waitForPendingTasks(state);
+  const date = addLocalDays(state.date, delta);
+  clearInteractiveScreen();
+  process.stdout.write(chalk.gray(`loading ${formatDateKey(date)}...\n`));
+  const next = await createInteractiveStateForDate({
+    session,
+    cache,
+    days,
+    date,
+    dryRun: state.dryRun,
+  });
+  if (next.dryRun) {
+    pushDryRunMessage(next);
+  }
+  return next;
+}
+
+async function waitForPendingTasks(state: InteractiveState): Promise<void> {
+  if (state.tasks.size === 0) {
+    return;
+  }
+  process.stdout.write(chalk.gray(`waiting for ${state.tasks.size} pending update${state.tasks.size === 1 ? '' : 's'}...\n`));
+  await Promise.allSettled(Array.from(state.tasks));
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return startOfLocalDay(next);
 }
 
 function startToggleItemsTask(
@@ -2007,11 +2084,14 @@ class MealPlanChecklistPrompt {
       this.repaint();
       return;
     }
-    if (info.name === 'right' && this.view.mode === 'meals') {
+    if ((info.name === 'left' || info.name === 'right') && this.view.mode === 'meals') {
       this.clearExpandedItem();
-      this.view.mode = 'items';
-      this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
-      this.repaint();
+      this.submitAction({ type: 'change-day', delta: info.name === 'left' ? -1 : 1 });
+      return;
+    }
+    if (info.name === 'return' && this.view.mode === 'meals') {
+      this.clearExpandedItem();
+      this.enterCurrentMealItems();
       return;
     }
     if (info.name === 'left' && this.view.mode === 'items') {
@@ -2551,6 +2631,12 @@ class MealPlanChecklistPrompt {
     add.cursor = wrap(add.cursor + delta, add.choices.length);
   }
 
+  private enterCurrentMealItems(): void {
+    this.view.mode = 'items';
+    this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
+    this.repaint();
+  }
+
   private submitCurrentToggle(): void {
     if (this.view.mode === 'meals') {
       this.submitAction({ type: 'toggle-meal', mealIndex: this.view.mealCursor });
@@ -2664,7 +2750,7 @@ function ensureKeypressEvents(input: NodeJS.ReadableStream): void {
 function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
-    `${chalk.bold(state.day.day)} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
+    `${chalk.gray('←')} ${chalk.bold(state.day.day)} ${chalk.gray('→')} ${chalk.gray(formatDateKey(state.date))} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
     ...formatDailyMacroBalanceLines(state).map(line => `  ${line}`),
     '',
   ];
@@ -3343,7 +3429,7 @@ function contextHelp(state: InteractiveState): string {
     const originalAction = canShowOriginalMeal(state, state.mealCursor)
       ? ` | O ${isShowingOriginalMeal(state, state.mealCursor) ? 'current' : 'original'}`
       : '';
-    return `↑/↓ meals | → items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
+    return `←/→ days | ↑/↓ meals | Enter items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';

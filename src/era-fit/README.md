@@ -15,7 +15,7 @@ Local Bun CLI for reading and writing Era Fit nutrition data.
 
 ## Interactive Meal Plan
 
-`era-fit mealplan -t` fetches today's suggested meal plan, fetches foods already tracked for today, and renders a terminal checklist grouped by meal.
+`era-fit mealplan -t` fetches the suggested meal plan, starts on today's date, fetches foods already tracked for the selected date, and renders a terminal checklist grouped by meal.
 
 The top summary shows two aligned macro rows:
 
@@ -49,8 +49,9 @@ Checked meal-plan rows are crossed out when the logged food matches the plan row
 
 Meal mode:
 
+- `←` / `→` loads the previous or next calendar day, reusing that weekday's meal plan and fetching tracked foods for that date.
 - `↑` / `↓` moves between meals.
-- `→` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
+- `Enter` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
 - `␣` toggles the entire meal.
 - `A` opens add mode for the selected meal.
 - `O` temporarily shows the original planned rows for the selected meal when that meal has any logged updates.
