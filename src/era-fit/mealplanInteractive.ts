@@ -75,6 +75,7 @@ const OUTSIDE_PLAN_CHECKED = '✔';
 const ASSIGN_POINTER = '↣';
 const EXPAND_COLLAPSED = '⊞';
 const EXPAND_EXPANDED = '⊟';
+const DAY_CURSOR = -1;
 const ITEM_ROW_PREFIX_WIDTH = visibleLength(`  > ${EXPAND_COLLAPSED} ${CHECKBOX_EMPTY} `);
 const LOADING_FRAMES = ['◐', '◓', '◑', '◒'];
 const KEYPRESS_ESCAPE_TIMEOUT_MS = 25;
@@ -306,7 +307,7 @@ function createInteractiveState(
     meals,
     dryRun,
     mode: 'meals',
-    mealCursor: 0,
+    mealCursor: meals.length === 0 ? DAY_CURSOR : 0,
     itemCursor: 0,
     assignSource: null,
     completedItemKeys: matched.completed,
@@ -496,6 +497,7 @@ async function loadAdjacentInteractiveDay(
     date,
     dryRun: state.dryRun,
   });
+  next.mealCursor = DAY_CURSOR;
   if (next.dryRun) {
     pushDryRunMessage(next);
   }
@@ -2084,12 +2086,12 @@ class MealPlanChecklistPrompt {
       this.repaint();
       return;
     }
-    if ((info.name === 'left' || info.name === 'right') && this.view.mode === 'meals') {
+    if ((info.name === 'left' || info.name === 'right') && isDaySelected(this.view)) {
       this.clearExpandedItem();
       this.submitAction({ type: 'change-day', delta: info.name === 'left' ? -1 : 1 });
       return;
     }
-    if (info.name === 'return' && this.view.mode === 'meals') {
+    if ((info.name === 'right' || info.name === 'return') && this.view.mode === 'meals' && !isDaySelected(this.view)) {
       this.clearExpandedItem();
       this.enterCurrentMealItems();
       return;
@@ -2483,6 +2485,9 @@ class MealPlanChecklistPrompt {
   }
 
   private openCurrentAddMode(): void {
+    if (isDaySelected(this.view)) {
+      return;
+    }
     openAddMode(this.view, this.view.mealCursor);
     this.repaint();
   }
@@ -2587,7 +2592,7 @@ class MealPlanChecklistPrompt {
       return;
     }
     if (this.view.mode === 'meals') {
-      this.view.mealCursor = wrap(this.view.mealCursor + delta, this.view.meals.length);
+      this.view.mealCursor = moveMealCursor(this.view.mealCursor, delta, this.view.meals.length);
       this.view.itemCursor = clamp(this.view.itemCursor, 0, Math.max(0, this.currentMealRows().length - 1));
       return;
     }
@@ -2632,6 +2637,9 @@ class MealPlanChecklistPrompt {
   }
 
   private enterCurrentMealItems(): void {
+    if (isDaySelected(this.view) || this.currentMealRows().length === 0) {
+      return;
+    }
     this.view.mode = 'items';
     this.view.itemCursor = firstUncheckedRowIndex(this.view, this.view.mealCursor);
     this.repaint();
@@ -2639,6 +2647,9 @@ class MealPlanChecklistPrompt {
 
   private submitCurrentToggle(): void {
     if (this.view.mode === 'meals') {
+      if (isDaySelected(this.view)) {
+        return;
+      }
       this.submitAction({ type: 'toggle-meal', mealIndex: this.view.mealCursor });
       return;
     }
@@ -2750,7 +2761,7 @@ function ensureKeypressEvents(input: NodeJS.ReadableStream): void {
 function renderMealPlanFrame(state: InteractiveState): string {
   const ingredientLayout = getIngredientLineLayout(state);
   const lines = [
-    `${chalk.gray('←')} ${chalk.bold(state.day.day)} ${chalk.gray('→')} ${chalk.gray(formatDateKey(state.date))} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`,
+    formatDayHeader(state),
     ...formatDailyMacroBalanceLines(state).map(line => `  ${line}`),
     '',
   ];
@@ -2798,6 +2809,14 @@ function renderMealPlanFrame(state: InteractiveState): string {
     lines.push(chalk.gray(message));
   }
   return lines.join('\n');
+}
+
+function formatDayHeader(state: InteractiveState): string {
+  const active = isDaySelected(state);
+  const prefix = active ? chalk.cyan('>') : ' ';
+  const arrow = active ? chalk.cyan : chalk.gray;
+  const day = active ? chalk.cyan.bold(state.day.day) : chalk.bold(state.day.day);
+  return `${prefix} ${arrow('←')} ${day} ${arrow('→')} ${chalk.gray(formatDateKey(state.date))} ${chalk.gray(`(${state.day.template})`)}${state.dryRun ? chalk.yellow(' dry-run') : ''}`;
 }
 
 function formatDailyMacroBalanceLines(state: InteractiveState): string[] {
@@ -3426,10 +3445,14 @@ function formatLoadingSpinner(key: string): string {
 
 function contextHelp(state: InteractiveState): string {
   if (state.mode === 'meals') {
+    if (isDaySelected(state)) {
+      const mealAction = state.meals.length > 0 ? ' | ↓ meals' : '';
+      return `←/→ days${mealAction} | Esc/q exit | Ctrl-C cancel`;
+    }
     const originalAction = canShowOriginalMeal(state, state.mealCursor)
       ? ` | O ${isShowingOriginalMeal(state, state.mealCursor) ? 'current' : 'original'}`
       : '';
-    return `←/→ days | ↑/↓ meals | Enter items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
+    return `↑/↓ meals | →/Enter items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
@@ -3466,6 +3489,27 @@ function pushMessage(state: InteractiveState, message: string): void {
   if (state.messages.length > 8) {
     state.messages.splice(0, state.messages.length - 8);
   }
+}
+
+function isDaySelected(state: InteractiveState): boolean {
+  return state.mode === 'meals' && state.mealCursor === DAY_CURSOR;
+}
+
+function moveMealCursor(current: number, delta: number, mealCount: number): number {
+  if (mealCount === 0) {
+    return DAY_CURSOR;
+  }
+  if (current === DAY_CURSOR) {
+    return delta > 0 ? 0 : DAY_CURSOR;
+  }
+  const next = current + delta;
+  if (next < 0) {
+    return DAY_CURSOR;
+  }
+  if (next >= mealCount) {
+    return 0;
+  }
+  return next;
 }
 
 function wrap(value: number, length: number): number {

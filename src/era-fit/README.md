@@ -49,12 +49,18 @@ Checked meal-plan rows are crossed out when the logged food matches the plan row
 
 Meal mode:
 
-- `←` / `→` loads the previous or next calendar day, reusing that weekday's meal plan and fetching tracked foods for that date.
 - `↑` / `↓` moves between meals.
-- `Enter` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
+- `↑` from the first meal selects the day header.
+- `→` or `Enter` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
 - `␣` toggles the entire meal.
 - `A` opens add mode for the selected meal.
 - `O` temporarily shows the original planned rows for the selected meal when that meal has any logged updates.
+- `Esc` or `q` exits.
+
+Day header mode:
+
+- `←` / `→` loads the previous or next calendar day, reusing that weekday's meal plan and fetching tracked foods for that date.
+- `↓` returns to the meal list.
 - `Esc` or `q` exits.
 
 Item mode:
