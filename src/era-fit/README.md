@@ -22,7 +22,7 @@ The top summary shows two aligned macro rows:
 - `left:` is the remaining daily target after subtracting all matched/logged foods.
 - `target:` is the day target from the meal plan.
 
-Each meal title shows remaining macros for that meal: the meal-plan section target minus all foods currently tracked in that meal. Daily and meal remaining values use the same colors: green when within 5% of the target, yellow when still under, and red when over. `C` means net carbs everywhere in this mode.
+Each meal title shows remaining macros for that meal: the meal-plan section target minus all foods currently tracked in that meal. If a day has no planned foods for a normal Era Fit meal section, the section still appears so add mode can be used there; targetless sections show logged macros instead of remaining macros. Daily and meal remaining values use the same colors: green when within 5% of the target, yellow when still under, and red when over. `C` means net carbs everywhere in this mode.
 
 The mode is meant to be fast:
 

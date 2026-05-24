@@ -296,6 +296,7 @@ function createInteractiveState(
       outsideOnly: false,
     };
   });
+  appendMissingMealSections(cache, meals);
   const matched = matchExistingTrackedItems(cache, meals, tracked);
   appendOutsideOnlyMeals(meals, matched.outsideByMeal);
   sortMealsByTrackingOrder(meals);
@@ -367,6 +368,39 @@ function appendOutsideOnlyMeals(
     });
     visibleMeals.add(mealKey);
   }
+}
+
+function appendMissingMealSections(cache: EraFitCache, meals: InteractiveState['meals']): void {
+  const visibleMeals = new Set(meals.map(meal => meal.trackingMeal));
+  for (const mealKey of MEAL_KEYS) {
+    if (visibleMeals.has(mealKey)) {
+      continue;
+    }
+    meals.push({
+      meal: emptyMealSection(cache, mealKey),
+      trackingMeal: mealKey,
+      items: [],
+      outsideItems: [],
+      outsideOnly: true,
+    });
+    visibleMeals.add(mealKey);
+  }
+}
+
+function emptyMealSection(cache: EraFitCache, mealKey: EraFitMealKey): EraFitMealPlanMeal {
+  return {
+    meal: MEAL_LABELS[mealKey],
+    meal_key: mealPlanKeyForTrackingMeal(cache, mealKey),
+    time: null,
+    recipe: null,
+    macros: { calories: 0, protein: 0, net_carbs: 0, fat: 0 },
+    items: [],
+  };
+}
+
+function mealPlanKeyForTrackingMeal(cache: EraFitCache, mealKey: EraFitMealKey): string {
+  return Object.entries(cache.mealPlanMealMap)
+    .find(([, trackingMeal]) => trackingMeal === mealKey)?.[0] ?? mealKey;
 }
 
 function sumTrackedRecordMacros(entries: TrackedFoodEntry[]): EraFitMacroTotals {
@@ -2769,7 +2803,7 @@ function renderMealPlanFrame(state: InteractiveState): string {
   for (const [mealIndex, meal] of state.meals.entries()) {
     const activeMeal = (state.mode === 'meals' || state.mode === 'add') && state.mealCursor === mealIndex;
     const mealCheckbox = meal.outsideOnly
-      ? chalk.green(OUTSIDE_PLAN_CHECKED)
+      ? meal.outsideItems.length > 0 ? chalk.green(OUTSIDE_PLAN_CHECKED) : CHECKBOX_EMPTY
       : isShowingOriginalMeal(state, mealIndex) ? CHECKBOX_EMPTY : formatMealCheckbox(state, meal.items);
     const mealPrefix = `${activeMeal ? chalk.cyan('>') : ' '} ${mealCheckbox} ${chalk.bold(meal.meal.meal)} ${chalk.gray(meal.meal.time ?? '')}`;
     const mealLine = `${activeMeal ? chalk.cyan(mealPrefix) : mealPrefix} ${formatMealHeaderMacros(state, mealIndex)}`;
