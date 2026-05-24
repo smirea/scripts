@@ -47,20 +47,20 @@ Checked meal-plan rows are crossed out when the logged food matches the plan row
 
 ## Navigation
 
-Meal mode:
+Section mode:
 
-- `↑` / `↓` moves between meals.
-- `↑` from the first meal selects the day header.
-- `→` or `Enter` enters the selected meal and selects the first unchecked item, or the first item if everything is checked.
-- `␣` toggles the entire meal.
-- `A` opens add mode for the selected meal.
-- `O` temporarily shows the original planned rows for the selected meal when that meal has any logged updates.
+- `↑` / `↓` moves between meal sections.
+- `↑` from the first section selects the day header.
+- `→` or `Enter` enters the selected section and selects the first unchecked item, or the first item if everything is checked.
+- `␣` toggles the entire section.
+- `A` opens add mode for the selected section.
+- `O` temporarily shows the original planned rows for the selected section when that section has any logged updates.
 - `Esc` or `q` exits.
 
 Day header mode:
 
 - `←` / `→` loads the previous or next calendar day, reusing that weekday's meal plan and fetching tracked foods for that date.
-- `↓` returns to the meal list.
+- `↓` returns to the section list.
 - `Esc` or `q` exits.
 
 Item mode:

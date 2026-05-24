@@ -2086,12 +2086,13 @@ class MealPlanChecklistPrompt {
       this.repaint();
       return;
     }
+    const isEnter = info.name === 'return' || info.name === 'enter';
     if ((info.name === 'left' || info.name === 'right') && isDaySelected(this.view)) {
       this.clearExpandedItem();
       this.submitAction({ type: 'change-day', delta: info.name === 'left' ? -1 : 1 });
       return;
     }
-    if ((info.name === 'right' || info.name === 'return') && this.view.mode === 'meals' && !isDaySelected(this.view)) {
+    if ((info.name === 'right' || isEnter) && this.view.mode === 'meals' && !isDaySelected(this.view)) {
       this.clearExpandedItem();
       this.enterCurrentMealItems();
       return;
@@ -3446,13 +3447,13 @@ function formatLoadingSpinner(key: string): string {
 function contextHelp(state: InteractiveState): string {
   if (state.mode === 'meals') {
     if (isDaySelected(state)) {
-      const mealAction = state.meals.length > 0 ? ' | ↓ meals' : '';
+      const mealAction = state.meals.length > 0 ? ' | ↓ sections' : '';
       return `←/→ days${mealAction} | Esc/q exit | Ctrl-C cancel`;
     }
     const originalAction = canShowOriginalMeal(state, state.mealCursor)
       ? ` | O ${isShowingOriginalMeal(state, state.mealCursor) ? 'current' : 'original'}`
       : '';
-    return `↑/↓ meals | →/Enter items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
+    return `↑/↓ sections | →/Enter items | ␣ toggle | A add${originalAction} | Esc/q exit | Ctrl-C cancel`;
   }
   if (state.mode === 'assign') {
     return '↑/↓ unchecked | ␣/A assign | ←/Esc cancel | q exit';
