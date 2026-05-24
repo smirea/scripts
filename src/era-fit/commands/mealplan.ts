@@ -13,12 +13,14 @@ import { loadEraFitCache } from '../cache';
 import {
   canonicalShoppingUnit,
   fetchEraFitMealPlan,
+  formatDateKey,
   formatLongDate,
   formatNumber,
   parseNumberLike,
   parseQuantity,
   resolveSession,
   roundNumber,
+  startOfLocalDay,
   shoppingUnitPriority,
   uniqueStrings,
   WEEKDAY_NAMES,
@@ -56,6 +58,7 @@ type MealPlanAnyListCategory = (typeof MEALPLAN_ANYLIST_CATEGORIES)[number];
 interface MealPlanCliArgs extends OutputCliArgs {
   anylist: boolean;
   today: boolean;
+  nextWeek: boolean;
   dryRun: boolean;
 }
 
@@ -83,6 +86,11 @@ interface MealPlanRenderContext {
   itemMacroWidths: MacroColumnWidths;
 }
 
+interface MealPlanDateRange {
+  start: Date;
+  end: Date;
+}
+
 export const mealPlanCommand = {
   command: ['mealplan', 'meaplan'],
   describe: 'Print the weekly suggested meal plan and aggregate shopping list',
@@ -103,6 +111,12 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
       default: false,
       describe: 'Open today\'s suggested meal plan checklist. Use --format=json for noninteractive output',
     })
+    .option('next-week', {
+      alias: ['n'],
+      type: 'boolean',
+      default: false,
+      describe: 'Print the weekly meal plan for next week instead of the current week',
+    })
     .option('dry-run', {
       type: 'boolean',
       default: false,
@@ -115,12 +129,16 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
   if (args.today && args.anylist) {
     throw new Error('--today cannot be combined with --anylist.');
   }
+  if (args.today && args.nextWeek) {
+    throw new Error('--next-week cannot be combined with --today.');
+  }
   if (args.dryRun && (!args.today || format !== 'table' || args.output)) {
     throw new Error('--dry-run only applies to interactive --today mode.');
   }
 
   const session = await resolveSession();
   const mealPlan = await fetchEraFitMealPlan(session);
+  const dateRange = resolveMealPlanDateRange({ nextWeek: args.nextWeek });
   if (args.today && format === 'table' && !args.output) {
     await runInteractiveTodayMealPlan({
       session,
@@ -133,6 +151,7 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
   const anyListResult = args.anylist ? await createAnyListMealPlan(mealPlan) : null;
   renderMealPlanOutput({
     report: mealPlan,
+    dateRange,
     format,
     outputPath: args.output,
     anyListResult,
@@ -258,6 +277,7 @@ function inferMealPlanCategory(name: string): MealPlanAnyListCategory {
 
 function renderMealPlanOutput(options: {
   report: EraFitMealPlanReport;
+  dateRange: MealPlanDateRange;
   format: OutputFormat;
   outputPath?: string;
   anyListResult: { id: string; name: string; added: number } | null;
@@ -276,6 +296,7 @@ function renderMealPlanOutput(options: {
 
 function renderMealPlanOutputText(options: {
   report: EraFitMealPlanReport;
+  dateRange: MealPlanDateRange;
   format: OutputFormat;
   anyListResult: { id: string; name: string; added: number } | null;
   todayOnly?: boolean;
@@ -287,8 +308,8 @@ function renderMealPlanOutputText(options: {
       : renderMealPlanDayText(day);
   }
   return options.format === 'json'
-    ? `${JSON.stringify({ ...options.report, anyList: options.anyListResult }, null, 2)}\n`
-    : renderMealPlanText(options.report, options.anyListResult);
+    ? `${JSON.stringify({ ...options.report, dateRange: serializeMealPlanDateRange(options.dateRange), anyList: options.anyListResult }, null, 2)}\n`
+    : renderMealPlanText(options.report, options.dateRange, options.anyListResult);
 }
 
 function getTodayMealPlanDay(report: EraFitMealPlanReport): EraFitMealPlanDay {
@@ -302,9 +323,10 @@ function getTodayMealPlanDay(report: EraFitMealPlanReport): EraFitMealPlanDay {
 
 function renderMealPlanText(
   report: EraFitMealPlanReport,
+  dateRange: MealPlanDateRange,
   anyListResult: { id: string; name: string; added: number } | null = null
 ): string {
-  const lines: string[] = [chalk.bold('Weekly Meal Plan'), ''];
+  const lines: string[] = [chalk.bold(`Weekly Meal Plan (${formatMealPlanDateRange(dateRange)})`), ''];
   const context = createMealPlanRenderContext(report.days);
   for (const day of report.days) {
     lines.push(...renderMealPlanDayLines(day, context), '');
@@ -333,6 +355,37 @@ function renderMealPlanText(
     lines.push(`  Created ${chalk.cyan(anyListResult.name)} with ${formatNumber(anyListResult.added)} ingredients.`);
   }
   return `${lines.join('\n')}\n`;
+}
+
+function resolveMealPlanDateRange(options: { nextWeek: boolean }): MealPlanDateRange {
+  const currentWeekStart = startOfWeek(startOfLocalDay(new Date()));
+  const start = addLocalDays(currentWeekStart, options.nextWeek ? 7 : 0);
+  return {
+    start,
+    end: addLocalDays(start, 6),
+  };
+}
+
+function startOfWeek(date: Date): Date {
+  return addLocalDays(date, -date.getDay());
+}
+
+function addLocalDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function serializeMealPlanDateRange(dateRange: MealPlanDateRange): { start: string; end: string; label: string } {
+  return {
+    start: formatDateKey(dateRange.start),
+    end: formatDateKey(dateRange.end),
+    label: formatMealPlanDateRange(dateRange),
+  };
+}
+
+function formatMealPlanDateRange(dateRange: MealPlanDateRange): string {
+  return `${formatLongDate(dateRange.start)} - ${formatLongDate(dateRange.end)}`;
 }
 
 function renderMealPlanDayText(day: EraFitMealPlanDay): string {
