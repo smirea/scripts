@@ -77,7 +77,7 @@ Item mode:
 
 Expanded ingredients are reference-only. They render inline under the selected row with their own macros, use already-loaded plan/tracked data, and do not change what gets logged. `E` only expands rows when serving edit is not available; checked/tracked rows use `E` for edit instead. Pressing `E` again collapses an expanded row; any other action also clears the expansion.
 
-Serving edits reuse the same serving selector and amount prompt used when adding past foods, prefilled from the tracked item. In `--dry-run`, the edited serving is rendered locally without writing to Era Fit.
+Serving edits reuse the same serving selector and amount prompt used when adding past foods, prefilled from the tracked item. The amount prompt keeps the selected serving stable, defaults the quantity from the previous log when available, and shows live computed macros as the amount changes. In `--dry-run`, the edited serving is rendered locally without writing to Era Fit.
 
 Original section view is reference-only. It is available when the selected meal has checked items, replacements, or added outside-plan foods; pressing `O` in meal mode swaps the whole meal back to the original meal-plan labels and macros, hides added outside-plan rows for that meal, and switches the meal title from remaining macros to the section target. Press `O` again or take any other action to return to the current logged view.
 
@@ -118,7 +118,7 @@ Add mode:
 - `Esc` returns to meal mode.
 - `Ctrl-C` exits.
 
-Past foods are deduped by item and show the latest logged serving. They always prompt for serving and amount, prefilled from that previous log. Added foods show as green outside-plan rows under the meal and subtract from that meal title's remaining macros. Press `␣` on an outside-plan row to remove that logged item. In `--dry-run`, add mode goes through matching and rendering without writing to Era Fit.
+Past foods are deduped by item and show the latest logged serving. They always prompt for serving and amount, prefilled from that previous log, with live macro totals beside the amount. Added foods show as green outside-plan rows under the meal and subtract from that meal title's remaining macros. Press `␣` on an outside-plan row to remove that logged item. In `--dry-run`, add mode goes through matching and rendering without writing to Era Fit.
 
 Assign mode:
 

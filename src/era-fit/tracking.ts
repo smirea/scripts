@@ -1,3 +1,5 @@
+import { emitKeypressEvents } from 'node:readline';
+
 import { isCancel, select, text } from '@clack/prompts';
 import chalk from 'chalk';
 
@@ -852,27 +854,23 @@ async function promptForQuantity(
   food: EraFitFatSecretFood
 ): Promise<number | null> {
   const initialValue = formatNumber(defaultQuantityForServing(item, serving, food, item.amount));
-  const value = await text({
+  return await promptForQuantityWithPreview({
     message: `Amount for ${serving.description}`,
     initialValue,
-    validate(input) {
-      const parsed = parseQuantity(input?.trim() ?? '');
-      return parsed != null && parsed > 0 ? undefined : 'Enter a positive number.';
-    },
+    preview: quantity => formatQuantityMacroPreview(trackedFoodRecordMacroTotals(
+      buildTrackedFoodRecord(food, serving, quantity, '')
+    )),
   });
-  if (isCancel(value)) {
-    return null;
-  }
-  return parseQuantity(value.trim()) ?? Number(initialValue);
 }
 
 async function promptForPastServing(past: PastFoodSearchItem): Promise<ServingChoice | null> {
+  const description = basePastServingDescription(past);
   const value = await select({
     message: `Select serving for ${past.name}`,
     options: [
       {
         value: 'past',
-        label: past.servingDescription,
+        label: description,
       },
     ],
     initialValue: 'past',
@@ -882,25 +880,137 @@ async function promptForPastServing(past: PastFoodSearchItem): Promise<ServingCh
   }
   return {
     type: 'saved',
-    label: past.servingDescription,
-    description: past.servingDescription,
+    label: description,
+    description,
   };
 }
 
 async function promptForPastQuantity(past: PastFoodSearchItem): Promise<number | null> {
   const initialValue = formatNumber(past.servingQuantity > 0 ? past.servingQuantity : 1);
-  const value = await text({
-    message: `Amount for ${past.servingDescription}`,
+  return await promptForQuantityWithPreview({
+    message: `Amount for ${basePastServingDescription(past)}`,
     initialValue,
-    validate(input) {
-      const parsed = parseQuantity(input?.trim() ?? '');
-      return parsed != null && parsed > 0 ? undefined : 'Enter a positive number.';
-    },
+    preview: quantity => formatQuantityMacroPreview(trackedFoodRecordMacroTotals({
+      ...scalePastFoodRecord(past.record, quantity),
+      serving_qtd: quantity,
+    })),
   });
-  if (isCancel(value)) {
-    return null;
+}
+
+async function promptForQuantityWithPreview(options: {
+  message: string;
+  initialValue: string;
+  preview: (quantity: number) => string;
+}): Promise<number | null> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    const value = await text({
+      message: `${options.message} ${options.preview(parseQuantity(options.initialValue) ?? 1)}`,
+      initialValue: options.initialValue,
+      validate(input) {
+        const parsed = parseQuantity(input?.trim() ?? '');
+        return parsed != null && parsed > 0 ? undefined : 'Enter a positive number.';
+      },
+    });
+    if (isCancel(value)) {
+      return null;
+    }
+    return parseQuantity(value.trim()) ?? Number(options.initialValue);
   }
-  return parseQuantity(value.trim()) ?? Number(initialValue);
+
+  return await new Promise<number | null>(resolve => {
+    const input = process.stdin;
+    const output = process.stdout;
+    const rawModeWasEnabled = input.isRaw;
+    let value = options.initialValue;
+    let error: string | null = null;
+    let settled = false;
+
+    const cleanup = () => {
+      input.off('keypress', onKeypress);
+      if (input.setRawMode) {
+        input.setRawMode(rawModeWasEnabled);
+      }
+      output.write('\n');
+    };
+    const finish = (result: number | null) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const render = () => {
+      const parsed = parseQuantity(value.trim());
+      const preview = parsed != null && parsed > 0 ? options.preview(parsed) : chalk.gray('enter a positive number');
+      const suffix = error ? ` ${chalk.red(error)}` : '';
+      output.write(`\r\x1b[2K${chalk.cyan('◇')} ${options.message}: ${value}${chalk.gray('  ')}${preview}${suffix}`);
+    };
+    const onKeypress = (character: string | undefined, key: { name?: string; ctrl?: boolean; meta?: boolean }) => {
+      if (key.ctrl && key.name === 'c') {
+        finish(null);
+        return;
+      }
+      if (key.name === 'escape') {
+        finish(null);
+        return;
+      }
+      if (key.name === 'return' || key.name === 'enter') {
+        const parsed = parseQuantity(value.trim());
+        if (parsed != null && parsed > 0) {
+          finish(parsed);
+          return;
+        }
+        error = 'Enter a positive number.';
+        render();
+        return;
+      }
+      if (key.name === 'backspace' || key.name === 'delete') {
+        value = value.slice(0, -1);
+        error = null;
+        render();
+        return;
+      }
+      if (key.ctrl && key.name === 'u') {
+        value = '';
+        error = null;
+        render();
+        return;
+      }
+      if (!key.ctrl && !key.meta && character && /^[\d./ ]$/.test(character)) {
+        value += character;
+        error = null;
+        render();
+      }
+    };
+
+    emitKeypressEvents(input);
+    input.on('keypress', onKeypress);
+    input.setRawMode?.(true);
+    input.resume();
+    render();
+  });
+}
+
+function basePastServingDescription(past: PastFoodSearchItem): string {
+  if (past.servingUnit !== 'fatsecret') {
+    return `1 ${formatServingUnitForDisplay(singularServingUnit(past.servingUnit))}`;
+  }
+  return past.servingDescription;
+}
+
+function singularServingUnit(unit: string): string {
+  const normalized = unit.trim();
+  return normalized.toLowerCase() === 'servings' ? 'serving' : normalized;
+}
+
+function formatQuantityMacroPreview(macros: EraFitMacroTotals): string {
+  return [
+    `${chalk.blue(formatMacroNumber(macros.calories ?? 0))} cal`,
+    `P ${chalk.red(formatMacroNumber(macros.protein ?? 0))}`,
+    `C ${chalk.yellow(formatMacroNumber(macros.net_carbs ?? 0))}`,
+    `F ${chalk.cyan(formatMacroNumber(macros.fat ?? 0))}`,
+  ].join(chalk.gray(' | '));
 }
 
 function servingFromCache(food: EraFitFatSecretFood, cached: EraFitCache['foods'][string]): ServingChoice | null {
