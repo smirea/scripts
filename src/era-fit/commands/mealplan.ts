@@ -115,7 +115,7 @@ function addMealPlanOptions<T>(parser: Argv<T>): Argv<T & MealPlanCliArgs> {
       alias: ['n'],
       type: 'boolean',
       default: false,
-      describe: 'Print the weekly meal plan for next week instead of the current week',
+      describe: 'Print the weekly meal plan for the next Monday-starting calendar week',
     })
     .option('dry-run', {
       type: 'boolean',
@@ -139,6 +139,7 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
   const session = await resolveSession();
   const mealPlan = await fetchEraFitMealPlan(session);
   const dateRange = resolveMealPlanDateRange({ nextWeek: args.nextWeek });
+  const datedMealPlan = { ...mealPlan, days: orderMealPlanDays(mealPlan.days, dateRange.start) };
   if (args.today && format === 'table' && !args.output) {
     await runInteractiveTodayMealPlan({
       session,
@@ -148,9 +149,9 @@ async function runMealPlanCommand(args: ArgumentsCamelCase<MealPlanCliArgs>): Pr
     });
     return;
   }
-  const anyListResult = args.anylist ? await createAnyListMealPlan(mealPlan) : null;
+  const anyListResult = args.anylist ? await createAnyListMealPlan(datedMealPlan) : null;
   renderMealPlanOutput({
-    report: mealPlan,
+    report: datedMealPlan,
     dateRange,
     format,
     outputPath: args.output,
@@ -367,7 +368,7 @@ function resolveMealPlanDateRange(options: { nextWeek: boolean }): MealPlanDateR
 }
 
 function startOfWeek(date: Date): Date {
-  return addLocalDays(date, -date.getDay());
+  return addLocalDays(date, -((date.getDay() + 6) % 7));
 }
 
 function addLocalDays(date: Date, days: number): Date {
@@ -386,6 +387,19 @@ function serializeMealPlanDateRange(dateRange: MealPlanDateRange): { start: stri
 
 function formatMealPlanDateRange(dateRange: MealPlanDateRange): string {
   return `${formatLongDate(dateRange.start)} - ${formatLongDate(dateRange.end)}`;
+}
+
+function orderMealPlanDays(days: EraFitMealPlanDay[], start: Date): EraFitMealPlanDay[] {
+  const byDay = new Map(days.map(day => [day.day, day]));
+  const orderedDays: EraFitMealPlanDay[] = [];
+  for (let index = 0; index < 7; index += 1) {
+    const dayName = WEEKDAY_NAMES[addLocalDays(start, index).getDay()];
+    const day = byDay.get(dayName);
+    if (day) {
+      orderedDays.push(day);
+    }
+  }
+  return orderedDays.length === days.length ? orderedDays : days;
 }
 
 function renderMealPlanDayText(day: EraFitMealPlanDay): string {
