@@ -252,7 +252,7 @@
       "savedSource": "my_meal",
       "savedId": "-OtG1Q_882Bo6A6xb8yC",
       "servingQuantity": 1,
-      "updatedAt": "2026-05-23T14:10:27.882Z"
+      "updatedAt": "2026-05-25T16:41:05.001Z"
     },
     "rice": {
       "foodId": "4513",
@@ -270,6 +270,15 @@
       "servingId": "8512706",
       "servingDescription": "1 cup",
       "updatedAt": "2026-05-24T18:15:05.809Z"
+    },
+    "carbe diem rotini": {
+      "foodId": "105808960",
+      "foodName": "Carbe Diem Rotini",
+      "brandName": "General Mills",
+      "servingType": "standard",
+      "servingUnit": "oz",
+      "servingDescription": "oz",
+      "updatedAt": "2026-05-25T16:41:30.117Z"
     }
   },
   "replacements": {},

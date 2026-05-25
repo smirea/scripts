@@ -200,6 +200,8 @@ function normalizeCommitArgs(args: string[]): string[] {
 }
 
 function runGitCommit(identity: AiIdentity, args: string[]): void {
+  assertContributionIdentity("GIT_AUTHOR_IDENT");
+  assertContributionIdentity("GIT_COMMITTER_IDENT");
   const result = spawnSync("git", ["commit", `--trailer=${buildCoAuthorTrailer(identity)}`, ...args], {
     stdio: "inherit",
   });
@@ -218,6 +220,49 @@ function assertInsideGitWorkTree(): void {
   if (result.status !== 0 || (result.stdout ?? "").trim() !== "true") {
     throw new Error("Current directory is not a git work tree.");
   }
+}
+
+function assertContributionIdentity(kind: "GIT_AUTHOR_IDENT" | "GIT_COMMITTER_IDENT"): void {
+  const result = spawnSync("git", ["var", kind], { encoding: "utf8" });
+  handleSpawnErrors(result, `git var ${kind}`);
+  const identity = parseGitIdentity((result.stdout ?? "").trim());
+  if (!identity) {
+    throw new Error(`Could not parse ${kind}: ${(result.stdout ?? "").trim()}`);
+  }
+  const label = kind === "GIT_AUTHOR_IDENT" ? "author" : "committer";
+  const reason = getUnsafeGitIdentityReason(identity);
+  if (reason) {
+    throw new Error(
+      `Refusing to commit with ${label} identity ${identity.name} <${identity.email}>: ${reason}.\n` +
+      "Fix the repo or global git config first, for example:\n" +
+      "  git config user.name stefan\n" +
+      "  git config user.email me@stefanmirea.com"
+    );
+  }
+}
+
+function parseGitIdentity(value: string): AiIdentity | null {
+  const match = value.match(/^(.+) <([^<>]+)> \d+ [+-]\d+$/);
+  if (!match) {
+    return null;
+  }
+  return { name: match[1], email: match[2] };
+}
+
+function getUnsafeGitIdentityReason(identity: AiIdentity): string | null {
+  const name = identity.name.trim().toLowerCase();
+  const email = identity.email.trim().toLowerCase();
+  const domain = email.split("@").at(1) ?? "";
+  if (name === "test user") {
+    return "placeholder git user name";
+  }
+  if (["example.com", "example.net", "example.org"].includes(domain)) {
+    return "placeholder email domains are not GitHub contribution identities";
+  }
+  if (domain.endsWith(".local")) {
+    return "local machine email domains cannot be linked to GitHub contribution identities";
+  }
+  return null;
 }
 
 function printGreyBlock(text: string): void {
