@@ -31,7 +31,7 @@
       "servingType": "standard",
       "servingUnit": "g",
       "servingDescription": "g",
-      "updatedAt": "2026-05-24T18:14:19.692Z"
+      "updatedAt": "2026-05-26T00:25:57.851Z"
     },
     "1 25 cups broccoli steamed 100g": {
       "foodId": "36291",
@@ -72,10 +72,10 @@
     "extra virgin olive oil": {
       "foodId": "283520",
       "foodName": "Extra Virgin Olive Oil",
-      "servingType": "standard",
-      "servingUnit": "g",
-      "servingDescription": "g",
-      "updatedAt": "2026-05-19T23:09:21.814Z"
+      "servingType": "fatsecret",
+      "servingId": "319312",
+      "servingDescription": "1 tbsp",
+      "updatedAt": "2026-05-26T19:34:30.687Z"
     },
     "1 tbsp extra virgin olive oil 15g": {
       "foodId": "283520",
@@ -88,10 +88,10 @@
     "sweet potato": {
       "foodId": "36617",
       "foodName": "Sweet Potato",
-      "servingType": "standard",
-      "servingUnit": "g",
-      "servingDescription": "g",
-      "updatedAt": "2026-05-19T23:09:31.500Z"
+      "servingType": "fatsecret",
+      "servingId": "44362",
+      "servingDescription": "1 oz",
+      "updatedAt": "2026-05-26T00:25:50.281Z"
     },
     "1 8 cups sweet potato roasted 300g": {
       "foodId": "36617",
@@ -168,7 +168,7 @@
       "servingType": "fatsecret",
       "servingId": "4751536",
       "servingDescription": "1 oz boneless, cooked, skinless",
-      "updatedAt": "2026-05-24T18:14:05.957Z"
+      "updatedAt": "2026-05-26T00:25:36.896Z"
     },
     "7oz chicken breast grilled 196g": {
       "foodId": "4881229",
@@ -269,7 +269,24 @@
       "servingType": "fatsecret",
       "servingId": "8512706",
       "servingDescription": "1 cup",
-      "updatedAt": "2026-05-24T18:15:05.809Z"
+      "updatedAt": "2026-05-26T17:24:30.152Z"
+    },
+    "bananas": {
+      "foodId": "35755",
+      "foodName": "Bananas",
+      "servingType": "fatsecret",
+      "servingId": "32978",
+      "servingDescription": "1 medium (7\" to 7-7/8\" long)",
+      "updatedAt": "2026-05-26T14:24:25.534Z"
+    },
+    "carbe diem rotini": {
+      "foodId": "105808960",
+      "foodName": "Carbe Diem Rotini",
+      "brandName": "General Mills",
+      "servingType": "standard",
+      "servingUnit": "oz",
+      "servingDescription": "oz",
+      "updatedAt": "2026-05-26T17:23:34.431Z"
     }
   },
   "replacements": {},
