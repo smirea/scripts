@@ -21,6 +21,13 @@ const FIREBASE_WEB_API_KEY = 'AIzaSyA17Uwy37irVEQSwz6PIyX3wnkHrDBeleA';
 const FIREBASE_PROJECT_ID = 'sbs-diet-app';
 const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 const IOS_BUNDLE_ID = 'com.sbs.diet';
+const FIREBASE_AUTH_CONFIG = {
+  apiKey: FIREBASE_WEB_API_KEY,
+  headers: {
+    'X-Ios-Bundle-Identifier': IOS_BUNDLE_ID,
+  },
+} satisfies FirebaseAuthConfig;
+const FIREBASE_APP_CHECK_ERROR = 'Firebase App Check token is invalid.';
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 const FOOD_DOC_BATCH_SIZE = 10;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -179,11 +186,17 @@ const PREFERRED_NUTRIENT_ORDER = [
   'histidine_g',
 ] as const;
 
+interface FirebaseAuthConfig {
+  apiKey: string;
+  headers: Record<string, string>;
+}
+
 interface FirebaseSession {
   idToken: string;
   refreshToken: string;
   expiresAtMs: number;
   userId: string;
+  appCheckToken?: string;
 }
 
 interface FirestoreDocumentResponse {
@@ -201,6 +214,7 @@ interface FirebaseRefreshResponse {
   id_token?: string;
   refresh_token?: string;
   expires_in?: string;
+  user_id?: string;
 }
 
 interface BuildApiReportOptions {
@@ -592,7 +606,10 @@ async function runCli(): Promise<void> {
     }
 
     const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
-    const client = await MacroFactorApiClient.login(credentials.email, credentials.password);
+    const client = await MacroFactorApiClient.login(credentials.email, credentials.password, {
+      refreshToken: env.MACROFACTOR_FIREBASE_REFRESH_TOKEN,
+      appCheckToken: env.MACROFACTOR_FIREBASE_APP_CHECK_TOKEN,
+    });
     const window = resolveWindow({
       days: args.days,
       start: args.start,
@@ -1648,15 +1665,28 @@ function parseFirestoreFields(fields: unknown): Record<string, unknown> {
 class MacroFactorApiClient {
   private constructor(private readonly session: FirebaseSession) {}
 
-  static async login(email: string, password: string): Promise<MacroFactorApiClient> {
+  static async login(
+    email: string,
+    password: string,
+    options: { refreshToken?: string; appCheckToken?: string } = {}
+  ): Promise<MacroFactorApiClient> {
+    const refreshToken = cleanOptionalSecret(options.refreshToken);
+    const appCheckToken = cleanOptionalSecret(options.appCheckToken);
+    const errors: string[] = [];
+
+    if (refreshToken) {
+      try {
+        return new MacroFactorApiClient(await MacroFactorApiClient.refreshSession(refreshToken, appCheckToken));
+      } catch (error) {
+        errors.push(`refresh token: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
     const response = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_WEB_API_KEY}`,
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_AUTH_CONFIG.apiKey}`,
       {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Ios-Bundle-Identifier': IOS_BUNDLE_ID,
-        },
+        headers: buildFirebaseHeaders('application/json', appCheckToken),
         body: JSON.stringify({
           email,
           password,
@@ -1666,12 +1696,14 @@ class MacroFactorApiClient {
     );
 
     if (!response.ok) {
-      throw new Error(`MacroFactor sign-in failed: ${await formatError(response)}`);
+      errors.push(`password: ${await formatError(response)}`);
+      throw new Error(formatSignInFailure(errors));
     }
 
     const data = (await response.json()) as FirebaseSignInResponse;
     if (!data.idToken || !data.refreshToken || !data.expiresIn || !data.localId) {
-      throw new Error('MacroFactor sign-in response was missing required auth fields.');
+      errors.push('password: sign-in response was missing required auth fields.');
+      throw new Error(formatSignInFailure(errors));
     }
 
     return new MacroFactorApiClient({
@@ -1679,6 +1711,7 @@ class MacroFactorApiClient {
       refreshToken: data.refreshToken,
       expiresAtMs: Date.now() + Number(data.expiresIn) * 1000,
       userId: data.localId,
+      appCheckToken,
     });
   }
 
@@ -1722,15 +1755,21 @@ class MacroFactorApiClient {
       return this.session.idToken;
     }
 
-    const response = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_WEB_API_KEY}`, {
+    const refreshed = await MacroFactorApiClient.refreshSession(this.session.refreshToken, this.session.appCheckToken);
+    this.session.idToken = refreshed.idToken;
+    this.session.refreshToken = refreshed.refreshToken;
+    this.session.expiresAtMs = refreshed.expiresAtMs;
+    this.session.userId = refreshed.userId;
+    return this.session.idToken;
+  }
+
+  private static async refreshSession(refreshToken: string, appCheckToken?: string): Promise<FirebaseSession> {
+    const response = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_AUTH_CONFIG.apiKey}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'X-Ios-Bundle-Identifier': IOS_BUNDLE_ID,
-      },
+      headers: buildFirebaseHeaders('application/x-www-form-urlencoded', appCheckToken),
       body: new URLSearchParams({
         grant_type: 'refresh_token',
-        refresh_token: this.session.refreshToken,
+        refresh_token: refreshToken,
       }).toString(),
     });
 
@@ -1739,15 +1778,44 @@ class MacroFactorApiClient {
     }
 
     const data = (await response.json()) as FirebaseRefreshResponse;
-    if (!data.id_token || !data.refresh_token || !data.expires_in) {
+    if (!data.id_token || !data.refresh_token || !data.expires_in || !data.user_id) {
       throw new Error('MacroFactor token refresh response was missing required auth fields.');
     }
 
-    this.session.idToken = data.id_token;
-    this.session.refreshToken = data.refresh_token;
-    this.session.expiresAtMs = Date.now() + Number(data.expires_in) * 1000;
-    return this.session.idToken;
+    return {
+      idToken: data.id_token,
+      refreshToken: data.refresh_token,
+      expiresAtMs: Date.now() + Number(data.expires_in) * 1000,
+      userId: data.user_id,
+      appCheckToken,
+    };
   }
+}
+
+function buildFirebaseHeaders(contentType: string, appCheckToken?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': contentType,
+    ...FIREBASE_AUTH_CONFIG.headers,
+  };
+  if (appCheckToken) {
+    headers['X-Firebase-AppCheck'] = appCheckToken;
+  }
+  return headers;
+}
+
+function cleanOptionalSecret(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function formatSignInFailure(errors: string[]): string {
+  const lines = ['MacroFactor sign-in failed.', ...errors];
+  if (errors.some(error => error.includes(FIREBASE_APP_CHECK_ERROR))) {
+    lines.push(
+      'Password sign-in is being rejected by Firebase App Check. Set MACROFACTOR_FIREBASE_REFRESH_TOKEN from an existing signed-in session, or provide a current MACROFACTOR_FIREBASE_APP_CHECK_TOKEN.'
+    );
+  }
+  return lines.join('\n');
 }
 
 async function formatError(response: Response): Promise<string> {
