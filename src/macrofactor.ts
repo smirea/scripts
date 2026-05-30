@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import yargs from 'yargs';
@@ -21,6 +21,8 @@ const FIREBASE_WEB_API_KEY = 'AIzaSyA17Uwy37irVEQSwz6PIyX3wnkHrDBeleA';
 const FIREBASE_PROJECT_ID = 'sbs-diet-app';
 const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
 const IOS_BUNDLE_ID = 'com.sbs.diet';
+const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
+const FIREBASE_REFRESH_TOKEN_ENV = 'MACROFACTOR_FIREBASE_REFRESH_TOKEN';
 const FIREBASE_AUTH_CONFIG = {
   apiKey: FIREBASE_WEB_API_KEY,
   headers: {
@@ -1706,13 +1708,15 @@ class MacroFactorApiClient {
       throw new Error(formatSignInFailure(errors));
     }
 
-    return new MacroFactorApiClient({
+    const session = {
       idToken: data.idToken,
       refreshToken: data.refreshToken,
       expiresAtMs: Date.now() + Number(data.expiresIn) * 1000,
       userId: data.localId,
       appCheckToken,
-    });
+    };
+    saveFirebaseRefreshToken(session.refreshToken);
+    return new MacroFactorApiClient(session);
   }
 
   async getFoodLogDocument(date: string): Promise<Record<string, unknown> | null> {
@@ -1782,13 +1786,15 @@ class MacroFactorApiClient {
       throw new Error('MacroFactor token refresh response was missing required auth fields.');
     }
 
-    return {
+    const session = {
       idToken: data.id_token,
       refreshToken: data.refresh_token,
       expiresAtMs: Date.now() + Number(data.expires_in) * 1000,
       userId: data.user_id,
       appCheckToken,
     };
+    saveFirebaseRefreshToken(session.refreshToken);
+    return session;
   }
 }
 
@@ -1806,6 +1812,27 @@ function buildFirebaseHeaders(contentType: string, appCheckToken?: string): Reco
 function cleanOptionalSecret(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function saveFirebaseRefreshToken(refreshToken: string): void {
+  setEnvLocalValue(FIREBASE_REFRESH_TOKEN_ENV, refreshToken);
+  process.env[FIREBASE_REFRESH_TOKEN_ENV] = refreshToken;
+}
+
+function setEnvLocalValue(key: string, value: string): void {
+  const current = existsSync(ENV_LOCAL_PATH) ? readFileSync(ENV_LOCAL_PATH, 'utf8') : '';
+  const line = `${key}=${JSON.stringify(value)}`;
+  const pattern = new RegExp(`^${escapeRegExp(key)}=.*$`, 'm');
+  const next = pattern.test(current)
+    ? current.replace(pattern, line)
+    : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${line}\n`;
+  if (next !== current) {
+    writeFileSync(ENV_LOCAL_PATH, next, 'utf8');
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function formatSignInFailure(errors: string[]): string {
