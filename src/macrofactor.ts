@@ -1683,6 +1683,7 @@ async function ensureMacroFactorCacheFresh(
   const syncState = readCacheSyncState();
   const currentCache = readCacheFingerprint(cacheDir);
   const wasRunning = isMacroFactorRunning();
+  const hadVisibleWindow = wasRunning && getMacroFactorWindowFrame() != null;
 
   if (options.appMode === 'none') {
     if (wasRunning) {
@@ -1719,9 +1720,9 @@ async function ensureMacroFactorCacheFresh(
   } catch (error) {
     warmError = error;
   } finally {
-    if (!wasRunning && isMacroFactorRunning()) {
+    if ((!wasRunning || !hadVisibleWindow) && isMacroFactorRunning()) {
       try {
-        closeMacroFactorApp();
+        await closeMacroFactorAppWindow();
         await waitForMacroFactorExit();
       } catch (error) {
         closeError = error;
@@ -2013,11 +2014,23 @@ function openMacroFactorApp(): void {
   }
 }
 
-function closeMacroFactorApp(): void {
-  const result = runAppleScriptExpression(`quit app id "${MACROFACTOR_APP_BUNDLE_ID}"`);
-  if (result.status !== 0) {
-    throw new Error(commandError(result, `Failed to quit ${MACROFACTOR_APP_NAME}.`));
+async function closeMacroFactorAppWindow(): Promise<void> {
+  const frame = getMacroFactorWindowFrame();
+  if (frame) {
+    clickMacroFactorAbsolutePoint(frame.x + 17, frame.y + 17);
+    await waitForMacroFactorWindowClosed();
   }
+}
+
+async function waitForMacroFactorWindowClosed(): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    if (!isMacroFactorRunning() || !getMacroFactorWindowFrame()) {
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error(`Timed out waiting for the ${MACROFACTOR_APP_NAME} window to close.`);
 }
 
 async function waitForMacroFactorExit(): Promise<void> {
