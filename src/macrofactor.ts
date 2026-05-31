@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { spawnSync } from 'node:child_process';
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -36,8 +36,9 @@ const CACHE_REFRESH_POLL_MS = 1_000;
 const APP_LAUNCH_TIMEOUT_MS = 30_000;
 const APP_UI_SETTLE_MS = 900;
 const APP_DAY_NAVIGATION_SETTLE_MS = 650;
-const FOOD_DOC_BATCH_SIZE = 10;
 const SECONDS_PER_DAY = 24 * 60 * 60;
+const DATE_KEY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+const MONTH_DAY_PATTERN = /^\d{4}$/;
 const APP_MODES = ['auto', 'open', 'none'] as const;
 type MacroFactorAppMode = (typeof APP_MODES)[number];
 const CSV_COLUMNS = [
@@ -195,21 +196,18 @@ const PREFERRED_NUTRIENT_ORDER = [
   'histidine_g',
 ] as const;
 
-interface BuildApiReportOptions {
+interface BuildMacrofactorReportOptions {
   sourcePath: string;
-  dayDocuments: ApiFoodLogDay[];
+  window: ResolvedWindow;
+  dayDocuments: CachedFoodLogDay[];
   customFoodDetails?: Record<string, CustomFoodDetails>;
   programTargets?: ProgramTarget[];
   scaleMetrics?: Record<string, ScaleMetrics>;
   microNutrition?: Record<string, DailyNutritionTotals>;
-  days: number;
-  start?: string;
-  end?: string;
   limit?: number;
-  nowUnixSeconds?: number;
 }
 
-interface ApiFoodLogDay {
+interface CachedFoodLogDay {
   date: string;
   document: Record<string, unknown> | null;
 }
@@ -257,13 +255,10 @@ interface DailyNutritionTotals {
 }
 
 interface CacheSyncState {
-  refreshedDate?: string;
   refreshedAt?: string;
   appOpenedAt?: string;
-  warmedAt?: string;
   warmedStartDate?: string;
   warmedEndDate?: string;
-  cacheMtimeMs?: number;
 }
 
 interface MacrofactorReport {
@@ -381,11 +376,7 @@ function renderOutput(options: {
     if (options.format === 'csv:full') {
       return renderFullCsv(options.report, { full });
     }
-    if (!full) {
-      return renderCsv(toConciseRows(options.report, { dateFormat: 'csv' }));
-    }
-    const fullRows = toFullRows(options.report, { dateFormat: 'csv' });
-    return renderCsvRecords(fullRows.rows, fullRows.columns);
+    return renderDetailedFoodsCsv(options.report, { full, dateFormat: 'csv' });
   })();
 
   if (options.outputPath) {
@@ -461,6 +452,17 @@ function renderCsv(rows: MacrofactorConciseRow[]): string {
   );
 }
 
+function renderDetailedFoodsCsv(
+  report: MacrofactorReport,
+  options: { full: boolean; dateFormat: ConciseDateFormat }
+): string {
+  if (!options.full) {
+    return renderCsv(toConciseRows(report, { dateFormat: options.dateFormat }));
+  }
+  const fullRows = toFullRows(report, { dateFormat: options.dateFormat });
+  return renderCsvRecords(fullRows.rows, fullRows.columns);
+}
+
 function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }): string {
   const full = options?.full ?? false;
   const sections = [
@@ -472,12 +474,7 @@ function renderFullCsv(report: MacrofactorReport, options?: { full?: boolean }):
     },
     {
       name: 'detailed_foods_day',
-      csv: full
-        ? (() => {
-            const rows = toFullRows(report, { dateFormat: 'csv' });
-            return renderCsvRecords(rows.rows, rows.columns);
-          })()
-        : renderCsv(toConciseRows(report, { dateFormat: 'csv' })),
+      csv: renderDetailedFoodsCsv(report, { full, dateFormat: 'csv' }),
     },
     {
       name: 'recipe_meal_breakdown',
@@ -543,10 +540,6 @@ function resolveWindow(options: {
   }
 
   return { startUnixSeconds, endUnixSeconds };
-}
-
-function toIso(unixSeconds: number): string {
-  return formatLocalIso(unixSeconds * 1000);
 }
 
 async function runCli(): Promise<void> {
@@ -616,23 +609,19 @@ async function runCli(): Promise<void> {
     });
     const appMode = parseMacroFactorAppMode(args.app);
     const client = await MacroFactorCacheClient.create({ appMode, window });
-    const dayDocuments = await fetchFoodLogDays(client, window);
-    const [customFoodDetails, programTargets, scaleMetrics, microNutrition] = await Promise.all([
-      fetchCustomFoodDetails(client, dayDocuments),
-      fetchProgramTargets(client, window),
-      fetchScaleMetrics(client, window),
-      fetchMicroNutrition(client, window),
-    ]);
-    const report = buildMacrofactorApiReport({
+    const dayDocuments = fetchFoodLogDays(client, window);
+    const customFoodDetails = fetchCustomFoodDetails(client, dayDocuments);
+    const programTargets = fetchProgramTargets(client, window);
+    const scaleMetrics = fetchScaleMetrics(client, window);
+    const microNutrition = fetchMicroNutrition(client, window);
+    const report = buildMacrofactorReport({
       sourcePath: SOURCE_PATH,
+      window,
       dayDocuments,
       customFoodDetails,
       programTargets,
       scaleMetrics,
       microNutrition,
-      days: args.days,
-      start: args.start,
-      end: args.end,
       limit: args.limit,
     });
 
@@ -650,43 +639,25 @@ async function runCli(): Promise<void> {
   }
 }
 
-async function fetchFoodLogDays(client: MacroFactorCacheClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
-  const dateKeys = listFetchDateKeys(window);
-  const days: ApiFoodLogDay[] = [];
-  for (let index = 0; index < dateKeys.length; index += FOOD_DOC_BATCH_SIZE) {
-    const batch = dateKeys.slice(index, index + FOOD_DOC_BATCH_SIZE);
-    const batchDays = await Promise.all(
-      batch.map(async date => ({
-        date,
-        document: await client.getFoodLogDocument(date),
-      }))
-    );
-    days.push(...batchDays);
-  }
-  return days;
+function fetchFoodLogDays(client: MacroFactorCacheClient, window: ResolvedWindow): CachedFoodLogDay[] {
+  return listFetchDateKeys(window).map(date => ({
+    date,
+    document: client.getFoodLogDocument(date),
+  }));
 }
 
-async function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
-  const years = listProgramYears(window);
-  const documents = await Promise.all(
-    years.map(async year => ({
-      year,
-      document: await client.getProgramDocument(year),
-    }))
-  );
+function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWindow): ProgramTarget[] {
+  const documents = listYearDocuments(listProgramYears(window), year => client.getProgramDocument(year));
   const targets: ProgramTarget[] = [];
 
   for (const { year, document } of documents) {
-    if (!document) {
-      continue;
-    }
-    for (const [monthDay, rawValue] of Object.entries(document)) {
-      const raw = asRecord(rawValue);
-      if (!raw || !/^\d{4}$/.test(monthDay)) {
+    for (const { date, value } of listDatedDocumentEntries(year, document)) {
+      const raw = asRecord(value);
+      if (!raw) {
         continue;
       }
       targets.push({
-        effectiveDate: `${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`,
+        effectiveDate: date,
         calories: parseNullableNumberArray(raw.calories),
         protein: parseNullableNumberArray(raw.protein),
         carbs: parseNullableNumberArray(raw.carbs),
@@ -699,31 +670,22 @@ async function fetchProgramTargets(client: MacroFactorCacheClient, window: Resol
   return targets;
 }
 
-async function fetchScaleMetrics(
+function fetchScaleMetrics(
   client: MacroFactorCacheClient,
   window: ResolvedWindow
-): Promise<Record<string, ScaleMetrics>> {
-  const years = listWindowYears(window);
-  const documents = await Promise.all(
-    years.map(async year => ({
-      year,
-      document: await client.getScaleDocument(year),
-    }))
-  );
+): Record<string, ScaleMetrics> {
+  const documents = listYearDocuments(listWindowYears(window), year => client.getScaleDocument(year));
   const metrics: Record<string, ScaleMetrics> = {};
 
   for (const { year, document } of documents) {
-    if (!document) {
-      continue;
-    }
-    for (const [monthDay, rawValue] of Object.entries(document)) {
-      const raw = asRecord(rawValue);
+    for (const { date, value } of listDatedDocumentEntries(year, document)) {
+      const raw = asRecord(value);
       const weightKg = raw ? parseNumberLike(raw.w) : null;
       const bodyFatPct = raw ? parseNumberLike(raw.f) : null;
-      if (!raw || !/^\d{4}$/.test(monthDay) || (weightKg == null && bodyFatPct == null)) {
+      if (!raw || (weightKg == null && bodyFatPct == null)) {
         continue;
       }
-      metrics[`${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`] = {
+      metrics[date] = {
         weightKg,
         bodyFatPct,
       };
@@ -733,32 +695,20 @@ async function fetchScaleMetrics(
   return metrics;
 }
 
-async function fetchMicroNutrition(
+function fetchMicroNutrition(
   client: MacroFactorCacheClient,
   window: ResolvedWindow
-): Promise<Record<string, DailyNutritionTotals>> {
-  const years = listWindowYears(window);
-  const documents = await Promise.all(
-    years.map(async year => ({
-      year,
-      document: await client.getMicroDocument(year),
-    }))
-  );
+): Record<string, DailyNutritionTotals> {
+  const documents = listYearDocuments(listWindowYears(window), year => client.getMicroDocument(year));
   const totals: Record<string, DailyNutritionTotals> = {};
 
   for (const { year, document } of documents) {
-    if (!document) {
-      continue;
-    }
-    for (const [monthDay, rawValue] of Object.entries(document)) {
-      if (!/^\d{4}$/.test(monthDay)) {
-        continue;
-      }
-      const raw = asRecord(rawValue);
+    for (const { date, value } of listDatedDocumentEntries(year, document)) {
+      const raw = asRecord(value);
       if (!raw) {
         continue;
       }
-      totals[`${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`] = {
+      totals[date] = {
         calories: parseNumberLike(raw.k) ?? 0,
         carbs: parseNumberLike(raw.c) ?? 0,
         protein: parseNumberLike(raw.p) ?? 0,
@@ -771,13 +721,31 @@ async function fetchMicroNutrition(
   return totals;
 }
 
-function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
-  const window = resolveWindow({
-    days: options.days,
-    start: options.start,
-    end: options.end,
-    nowUnixSeconds: options.nowUnixSeconds,
+function listYearDocuments(
+  years: number[],
+  fetchDocument: (year: number) => Record<string, unknown> | null
+): Array<{ year: number; document: Record<string, unknown> }> {
+  const documents = years.map(year => ({
+    year,
+    document: fetchDocument(year),
+  }));
+  return documents.filter(
+    (entry): entry is { year: number; document: Record<string, unknown> } => entry.document != null
+  );
+}
+
+function listDatedDocumentEntries(
+  year: number,
+  document: Record<string, unknown>
+): Array<{ date: string; value: unknown }> {
+  return Object.entries(document).flatMap(([monthDay, value]) => {
+    const date = dateKeyFromMonthDay(year, monthDay);
+    return date ? [{ date, value }] : [];
   });
+}
+
+function buildMacrofactorReport(options: BuildMacrofactorReportOptions): MacrofactorReport {
+  const window = options.window;
   const startMs = window.startUnixSeconds * 1000;
   const endMs = window.endUnixSeconds * 1000;
   const entries = options.dayDocuments
@@ -809,8 +777,8 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
     generatedAt: formatLocalIso(Date.now()),
     sourcePath: options.sourcePath,
     window: {
-      start: toIso(window.startUnixSeconds),
-      end: toIso(window.endUnixSeconds),
+      start: formatLocalIso(window.startUnixSeconds * 1000),
+      end: formatLocalIso(window.endUnixSeconds * 1000),
     },
     matchedFoods: rows.length,
     returnedFoods: limitedRows.length,
@@ -828,15 +796,12 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
 
 function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
   if (fallbackDate) {
-    const [year, month, day] = fallbackDate.split('-').map(part => Number(part));
-    if ([year, month, day].every(Number.isFinite)) {
-      const hour = parseNumberLike(fallbackHour);
-      const minute = parseNumberLike(fallbackMinute);
-      if (hour != null && minute != null) {
-        const localTimestampMs = new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
-        if (Number.isFinite(localTimestampMs)) {
-          return localTimestampMs;
-        }
+    const hour = parseNumberLike(fallbackHour);
+    const minute = parseNumberLike(fallbackMinute);
+    if (hour != null && minute != null) {
+      const localTimestampMs = localDateTimestampMs(fallbackDate, hour, minute);
+      if (localTimestampMs != null) {
+        return localTimestampMs;
       }
     }
   }
@@ -854,17 +819,10 @@ function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackH
   if (!fallbackDate) {
     return null;
   }
-  const [year, month, day] = fallbackDate.split('-').map(part => Number(part));
-  if (![year, month, day].every(Number.isFinite)) {
-    return null;
-  }
-  const hour = parseNumberLike(fallbackHour) ?? 0;
-  const minute = parseNumberLike(fallbackMinute) ?? 0;
-  const fallbackMs = new Date(year, month - 1, day, hour, minute, 0, 0).getTime();
-  return Number.isFinite(fallbackMs) ? fallbackMs : null;
+  return localDateTimestampMs(fallbackDate, parseNumberLike(fallbackHour) ?? 0, parseNumberLike(fallbackMinute) ?? 0);
 }
 
-function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<string, CustomFoodDetails>): ParsedFoodLogEntry[] {
+function parseFoodLogEntries(day: CachedFoodLogDay, customFoodDetails: Record<string, CustomFoodDetails>): ParsedFoodLogEntry[] {
   if (!day.document) {
     return [];
   }
@@ -891,14 +849,14 @@ function parseFoodLogEntries(day: ApiFoodLogDay, customFoodDetails: Record<strin
     entries.push({
       itemId,
       title,
-      brandName: parseOptionalString(raw.b),
+      brandName: parseString(raw.b),
       source,
       isCustom: source != null && source !== 't',
       kind: customInfo.kind,
       recipeId: customInfo.recipeId,
       timestampMs,
-      consumedDate: formatDateKey(timestampMs),
-      serving: buildServingString(parseNumberLike(raw.y), parseOptionalString(raw.u) ?? parseOptionalString(raw.s)),
+      consumedDate: formatLocalDateKey(new Date(timestampMs)),
+      serving: buildServingString(parseNumberLike(raw.y), parseString(raw.u) ?? parseString(raw.s)),
       servingGrams: computeConsumedGrams(raw),
       nutrition: buildNutrition(raw),
     });
@@ -914,9 +872,9 @@ function buildNutrition(raw: Record<string, unknown>): MacrofactorFoodRecord['nu
   const carbs = scaleValue(raw.e, multiplier);
   const fat = scaleValue(raw.f, multiplier);
   const nutrientCodes = parseNumericNutrientCodes(raw, multiplier);
-  const fiber = maybeNumber(nutrientCodes['291']);
-  const sugar = maybeNumber(nutrientCodes['269']);
-  const alcohol = maybeNumber(nutrientCodes['221']);
+  const fiber = nutrientCodes['291'] ?? null;
+  const sugar = nutrientCodes['269'] ?? null;
+  const alcohol = nutrientCodes['221'] ?? null;
   const byCode: Record<string, number> = { ...nutrientCodes };
 
   setByCodeValue(byCode, 'k', calories);
@@ -989,7 +947,7 @@ function computeNutritionMultiplier(raw: Record<string, unknown>): number {
 
 function computeConsumedGrams(raw: Record<string, unknown>): number | null {
   const quantity = parseNumberLike(raw.y);
-  const displayUnit = parseOptionalString(raw.u) ?? parseOptionalString(raw.s);
+  const displayUnit = parseString(raw.u) ?? parseString(raw.s);
   if (quantity == null) {
     return parseNumberLike(raw.g);
   }
@@ -1031,7 +989,7 @@ function lookupMeasurementWeight(
     if (!measurement) {
       continue;
     }
-    const measurementUnit = parseOptionalString(measurement.m);
+    const measurementUnit = parseString(measurement.m);
     if (normalizeUnit(measurementUnit) !== normalizeUnit(unit)) {
       continue;
     }
@@ -1066,10 +1024,6 @@ function setByCodeValue(target: Record<string, number>, code: string, value: num
   }
 }
 
-function maybeNumber(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
 function parseNumberLike(value: unknown): number | null {
   if (typeof value === 'number') {
     return Number.isFinite(value) ? value : null;
@@ -1085,10 +1039,6 @@ function parseString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
-function parseOptionalString(value: unknown): string | null {
-  return parseString(value);
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null;
@@ -1102,10 +1052,6 @@ function listFetchDateKeys(window: ResolvedWindow): string[] {
   const endDate = new Date(window.endUnixSeconds * 1000);
   endDate.setDate(endDate.getDate() + 1);
   return listDateKeysBetween(startDate.getTime(), endDate.getTime());
-}
-
-function formatDateKey(timestampMs: number): string {
-  return formatLocalDateKey(new Date(timestampMs));
 }
 
 function buildDailyOverview(
@@ -1214,14 +1160,14 @@ function buildRecipeBreakdown(
     });
 }
 
-async function fetchCustomFoodDetails(
+function fetchCustomFoodDetails(
   client: MacroFactorCacheClient,
-  dayDocuments: ApiFoodLogDay[]
-): Promise<Record<string, CustomFoodDetails>> {
+  dayDocuments: CachedFoodLogDay[]
+): Record<string, CustomFoodDetails> {
   const ids = collectCustomFoodIds(dayDocuments);
   const info: Record<string, CustomFoodDetails> = {};
   for (const id of ids) {
-    const document = await client.getCustomFoodDocument(id);
+    const document = client.getCustomFoodDocument(id);
     if (!document) {
       continue;
     }
@@ -1230,7 +1176,7 @@ async function fetchCustomFoodDetails(
   return info;
 }
 
-function collectCustomFoodIds(dayDocuments: ApiFoodLogDay[]): string[] {
+function collectCustomFoodIds(dayDocuments: CachedFoodLogDay[]): string[] {
   const ids = new Set<string>();
   for (const day of dayDocuments) {
     if (!day.document) {
@@ -1279,7 +1225,7 @@ function parseRecipeIngredients(value: unknown): string[] {
       if (!name) {
         return null;
       }
-      const unit = parseOptionalString(ingredient.u) ?? parseOptionalString(ingredient.s);
+      const unit = parseString(ingredient.u) ?? parseString(ingredient.s);
       return `[${buildServingString(parseNumberLike(ingredient.y), unit)}] ${name}`;
     })
     .filter((ingredient): ingredient is string => ingredient != null);
@@ -1362,11 +1308,11 @@ function listWindowDateKeys(window: ResolvedWindow): string[] {
 
 function renderTable(report: MacrofactorReport, options: { full: boolean }): void {
   process.stdout.write('Daily Overview\n');
-  printTable(report.dailyOverview, { valueFormatters: DAILY_OVERVIEW_VALUE_FORMATTERS });
+  renderTableRecords(report.dailyOverview, { valueFormatters: DAILY_OVERVIEW_VALUE_FORMATTERS });
   process.stdout.write('\nDetailed Foods / Day\n');
-  printTable(options.full ? toFullRows(report, { dateFormat: 'table' }).rows : toConciseRows(report, { dateFormat: 'table' }));
+  renderTableRecords(options.full ? toFullRows(report, { dateFormat: 'table' }).rows : toConciseRows(report, { dateFormat: 'table' }));
   process.stdout.write('\nRecipe / Meal Breakdown\n');
-  printTable(
+  renderTableRecords(
     report.recipeBreakdown.map(recipe => ({
       name: recipe.name,
       ingredients: recipe.ingredients.join('\n'),
@@ -1403,13 +1349,6 @@ function toRecipeBreakdownCsvRows(report: MacrofactorReport): Record<string, Csv
   }));
 }
 
-function printTable(
-  rows: object[],
-  options?: Parameters<typeof renderTableRecords>[1]
-): void {
-  renderTableRecords(rows, options);
-}
-
 function parseMacroFactorAppMode(value: unknown): MacroFactorAppMode {
   if (APP_MODES.includes(value as MacroFactorAppMode)) {
     return value as MacroFactorAppMode;
@@ -1418,16 +1357,12 @@ function parseMacroFactorAppMode(value: unknown): MacroFactorAppMode {
 }
 
 function parseDateArg(value: string, label: string): number {
-  const localDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (localDateMatch) {
-    const year = Number(localDateMatch[1]);
-    const month = Number(localDateMatch[2]);
-    const day = Number(localDateMatch[3]);
-    const timestamp = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
-    if (!Number.isFinite(timestamp)) {
+  if (DATE_KEY_PATTERN.test(value)) {
+    const localDateMs = localDateTimestampMs(value, 0, 0);
+    if (localDateMs == null) {
       throw new Error(`Invalid ${label} date: ${value}`);
     }
-    return timestamp / 1000;
+    return localDateMs / 1000;
   }
 
   const timestamp = Date.parse(value);
@@ -1435,6 +1370,37 @@ function parseDateArg(value: string, label: string): number {
     throw new Error(`Invalid ${label} date: ${value}`);
   }
   return timestamp / 1000;
+}
+
+function localDateTimestampMs(dateKey: string, hour: number, minute: number): number | null {
+  const parts = parseDateKeyParts(dateKey);
+  if (!parts || !Number.isFinite(hour) || !Number.isFinite(minute)) {
+    return null;
+  }
+  const timestamp = new Date(parts.year, parts.month - 1, parts.day, hour, minute, 0, 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function parseDateKeyParts(dateKey: string): { year: number; month: number; day: number } | null {
+  const match = dateKey.match(DATE_KEY_PATTERN);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (![year, month, day].every(Number.isInteger)) {
+    return null;
+  }
+  const roundTrip = new Date(year, month - 1, day);
+  if (roundTrip.getFullYear() !== year || roundTrip.getMonth() !== month - 1 || roundTrip.getDate() !== day) {
+    return null;
+  }
+  return { year, month, day };
+}
+
+function dateKeyFromMonthDay(year: number, monthDay: string): string | null {
+  return MONTH_DAY_PATTERN.test(monthDay) ? `${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}` : null;
 }
 
 function getDateTimeParts(value: string, dateFormat: ConciseDateFormat): { date: string; time: string } {
@@ -1470,8 +1436,8 @@ function formatDate(timestamp: number, format: ConciseDateFormat): string {
     return formatLocalDateKey(d);
   }
   if (format === 'csv') {
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = pad2(d.getDate());
+    const mm = pad2(d.getMonth() + 1);
     const yyyy = String(d.getFullYear());
     return `${dd}.${mm}.${yyyy}`;
   }
@@ -1483,33 +1449,37 @@ function formatDate(timestamp: number, format: ConciseDateFormat): string {
 
 function formatTime(timestamp: number): string {
   const d = new Date(timestamp);
-  const hours = String(d.getHours()).padStart(2, '0');
-  const minutes = String(d.getMinutes()).padStart(2, '0');
-  const seconds = String(d.getSeconds()).padStart(2, '0');
+  const hours = pad2(d.getHours());
+  const minutes = pad2(d.getMinutes());
+  const seconds = pad2(d.getSeconds());
   return `${hours}:${minutes}:${seconds}`;
 }
 
 function formatLocalIso(timestamp: number): string {
   const d = new Date(timestamp);
   const year = String(d.getFullYear());
-  const month = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const hours = String(d.getHours()).padStart(2, '0');
-  const minutes = String(d.getMinutes()).padStart(2, '0');
-  const seconds = String(d.getSeconds()).padStart(2, '0');
+  const month = pad2(d.getMonth() + 1);
+  const day = pad2(d.getDate());
+  const hours = pad2(d.getHours());
+  const minutes = pad2(d.getMinutes());
+  const seconds = pad2(d.getSeconds());
   const offsetMinutes = -d.getTimezoneOffset();
   const sign = offsetMinutes >= 0 ? '+' : '-';
   const absoluteOffsetMinutes = Math.abs(offsetMinutes);
-  const offsetHours = String(Math.floor(absoluteOffsetMinutes / 60)).padStart(2, '0');
-  const offsetRemainderMinutes = String(absoluteOffsetMinutes % 60).padStart(2, '0');
+  const offsetHours = pad2(Math.floor(absoluteOffsetMinutes / 60));
+  const offsetRemainderMinutes = pad2(absoluteOffsetMinutes % 60);
   return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}${sign}${offsetHours}:${offsetRemainderMinutes}`;
 }
 
 function formatLocalDateKey(date: Date): string {
   const year = String(date.getFullYear());
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+  const month = pad2(date.getMonth() + 1);
+  const day = pad2(date.getDate());
   return `${year}-${month}-${day}`;
+}
+
+function pad2(value: number): string {
+  return String(value).padStart(2, '0');
 }
 
 function roundToSingleDecimal(value: number | null | undefined): number | null {
@@ -1657,23 +1627,23 @@ class MacroFactorCacheClient {
     return new MacroFactorCacheClient(userPath, documents);
   }
 
-  async getFoodLogDocument(date: string): Promise<Record<string, unknown> | null> {
+  getFoodLogDocument(date: string): Record<string, unknown> | null {
     return this.getUserDocument(`food/${date}`);
   }
 
-  async getCustomFoodDocument(id: string): Promise<Record<string, unknown> | null> {
+  getCustomFoodDocument(id: string): Record<string, unknown> | null {
     return this.getUserDocument(`customFoods/${id}`);
   }
 
-  async getProgramDocument(year: number | string): Promise<Record<string, unknown> | null> {
+  getProgramDocument(year: number | string): Record<string, unknown> | null {
     return this.getUserDocument(`program/${year}`);
   }
 
-  async getScaleDocument(year: number | string): Promise<Record<string, unknown> | null> {
+  getScaleDocument(year: number | string): Record<string, unknown> | null {
     return this.getUserDocument(`scale/${year}`);
   }
 
-  async getMicroDocument(year: number | string): Promise<Record<string, unknown> | null> {
+  getMicroDocument(year: number | string): Record<string, unknown> | null {
     return this.getUserDocument(`micro/${year}`);
   }
 
@@ -1741,30 +1711,52 @@ async function ensureMacroFactorCacheFresh(
     return false;
   }
 
-  await warmMacroFactorAppCache(cacheDir, options.dateKeys);
-  const nextSyncState: CacheSyncState = {
-    refreshedDate: formatLocalDateKey(new Date()),
-    refreshedAt: formatLocalIso(Date.now()),
-    appOpenedAt: formatLocalIso(Date.now()),
-    warmedAt: formatLocalIso(Date.now()),
-    cacheMtimeMs: readCacheFingerprint(cacheDir)?.latestMtimeMs,
-  };
-  const warmedStartDate = options.dateKeys[0];
-  const warmedEndDate = options.dateKeys.at(-1);
-  if (warmedStartDate) {
-    nextSyncState.warmedStartDate = warmedStartDate;
+  let warmError: unknown;
+  let closeError: unknown;
+  try {
+    await warmMacroFactorAppCache(cacheDir, options.dateKeys);
+    writeCacheSyncState(buildCacheSyncState(options.dateKeys, Date.now()));
+  } catch (error) {
+    warmError = error;
+  } finally {
+    if (!wasRunning && isMacroFactorRunning()) {
+      try {
+        closeMacroFactorApp();
+        await waitForMacroFactorExit();
+      } catch (error) {
+        closeError = error;
+      }
+    }
   }
-  if (warmedEndDate) {
-    nextSyncState.warmedEndDate = warmedEndDate;
-  }
-  writeCacheSyncState(nextSyncState);
 
-  if (!wasRunning) {
-    closeMacroFactorApp();
-    await waitForMacroFactorExit();
+  if (warmError) {
+    if (closeError) {
+      console.error(closeError instanceof Error ? closeError.message : String(closeError));
+    }
+    throw warmError;
+  }
+  if (closeError) {
+    throw closeError;
   }
 
   return true;
+}
+
+function buildCacheSyncState(dateKeys: string[], timestampMs: number): CacheSyncState {
+  const timestamp = formatLocalIso(timestampMs);
+  const state: CacheSyncState = {
+    refreshedAt: timestamp,
+    appOpenedAt: timestamp,
+  };
+  const warmedStartDate = dateKeys[0];
+  const warmedEndDate = dateKeys.at(-1);
+  if (warmedStartDate) {
+    state.warmedStartDate = warmedStartDate;
+  }
+  if (warmedEndDate) {
+    state.warmedEndDate = warmedEndDate;
+  }
+  return state;
 }
 
 function listMissingFoodDateKeys(
@@ -1895,8 +1887,8 @@ tell application "System Events"
     return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
   end tell
 end tell
-`.trim();
-  const result = spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+`;
+  const result = runAppleScript(script);
   if (result.status !== 0) {
     return null;
   }
@@ -1930,8 +1922,8 @@ tell application "System Events"
     end try
   end tell
 end tell
-`.trim();
-  spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+`;
+  runAppleScript(script);
 }
 
 async function moveMacroFactorFoodLogToToday(frame: WindowFrame): Promise<void> {
@@ -1968,21 +1960,12 @@ async function walkMacroFactorFoodLogDates(frame: WindowFrame, dateKeys: string[
 }
 
 function localDateOffset(fromDate: string, toDate: string): number | null {
-  const from = localDateNoonMs(fromDate);
-  const to = localDateNoonMs(toDate);
+  const from = localDateTimestampMs(fromDate, 12, 0);
+  const to = localDateTimestampMs(toDate, 12, 0);
   if (from == null || to == null) {
     return null;
   }
   return Math.round((to - from) / (SECONDS_PER_DAY * 1000));
-}
-
-function localDateNoonMs(dateKey: string): number | null {
-  const match = dateKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return null;
-  }
-  const timestamp = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0, 0).getTime();
-  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function clickMacroFactorWindowPoint(frame: WindowFrame, xRatio: number, yRatio: number): void {
@@ -1995,8 +1978,8 @@ tell application "System Events"
   if exists process "${MACROFACTOR_APP_NAME}" then set frontmost of process "${MACROFACTOR_APP_NAME}" to true
   click at {${Math.round(x)}, ${Math.round(y)}}
 end tell
-`.trim();
-  const result = spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+`;
+  const result = runAppleScript(script);
   if (result.status !== 0) {
     throw new Error(commandError(result, `Failed to click ${MACROFACTOR_APP_NAME}.`));
   }
@@ -2019,9 +2002,7 @@ function writeCacheSyncState(state: CacheSyncState): void {
 }
 
 function isMacroFactorRunning(): boolean {
-  const result = spawnSync('osascript', ['-e', `application id "${MACROFACTOR_APP_BUNDLE_ID}" is running`], {
-    encoding: 'utf8',
-  });
+  const result = runAppleScriptExpression(`application id "${MACROFACTOR_APP_BUNDLE_ID}" is running`);
   return result.status === 0 && result.stdout.trim() === 'true';
 }
 
@@ -2033,7 +2014,7 @@ function openMacroFactorApp(): void {
 }
 
 function closeMacroFactorApp(): void {
-  const result = spawnSync('osascript', ['-e', `quit app id "${MACROFACTOR_APP_BUNDLE_ID}"`], { encoding: 'utf8' });
+  const result = runAppleScriptExpression(`quit app id "${MACROFACTOR_APP_BUNDLE_ID}"`);
   if (result.status !== 0) {
     throw new Error(commandError(result, `Failed to quit ${MACROFACTOR_APP_NAME}.`));
   }
@@ -2052,6 +2033,14 @@ async function waitForMacroFactorExit(): Promise<void> {
 function commandError(result: { stdout?: unknown; stderr?: unknown }, fallback: string): string {
   const output = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
   return output ? `${fallback} ${output}` : fallback;
+}
+
+function runAppleScript(script: string): SpawnSyncReturns<string> {
+  return spawnSync('osascript', [], { input: script.trim(), encoding: 'utf8' });
+}
+
+function runAppleScriptExpression(expression: string): SpawnSyncReturns<string> {
+  return spawnSync('osascript', ['-e', expression], { encoding: 'utf8' });
 }
 
 interface CacheFingerprint {
