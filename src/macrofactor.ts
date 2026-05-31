@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
+import { ClassicLevel } from 'classic-level';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
-import env from './env';
 import {
   OUTPUT_FORMATS,
   formatDisplayNumber,
@@ -16,21 +18,22 @@ import {
   type OutputFormat,
 } from './utils/output';
 
-const SOURCE_PATH = 'api://macrofactor/food-log';
-const FIREBASE_WEB_API_KEY = 'AIzaSyA17Uwy37irVEQSwz6PIyX3wnkHrDBeleA';
-const FIREBASE_PROJECT_ID = 'sbs-diet-app';
-const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
-const IOS_BUNDLE_ID = 'com.sbs.diet';
-const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
-const FIREBASE_REFRESH_TOKEN_ENV = 'MACROFACTOR_FIREBASE_REFRESH_TOKEN';
-const FIREBASE_AUTH_CONFIG = {
-  apiKey: FIREBASE_WEB_API_KEY,
-  headers: {
-    'X-Ios-Bundle-Identifier': IOS_BUNDLE_ID,
-  },
-} satisfies FirebaseAuthConfig;
-const FIREBASE_APP_CHECK_ERROR = 'Firebase App Check token is invalid.';
-const TOKEN_REFRESH_MARGIN_MS = 60_000;
+const SOURCE_PATH = 'cache://macrofactor/firestore';
+const MACROFACTOR_APP_BUNDLE_ID = 'com.sbs.diet';
+const MACROFACTOR_APP_NAME = 'MacroFactor';
+const FIRESTORE_CACHE_RELATIVE_DIR = path.join(
+  'Data',
+  'Library',
+  'Application Support',
+  'firestore',
+  '__FIRAPP_DEFAULT',
+  'sbs-diet-app',
+  'main'
+);
+const CACHE_SYNC_STATE_PATH = path.join(os.homedir(), '.cache', 'scripts', 'macrofactor-cache-sync.json');
+const CACHE_REFRESH_TIMEOUT_MS = 45_000;
+const CACHE_REFRESH_POLL_MS = 1_000;
+const CACHE_REFRESH_STABLE_MS = 5_000;
 const FOOD_DOC_BATCH_SIZE = 10;
 const SECONDS_PER_DAY = 24 * 60 * 60;
 const CSV_COLUMNS = [
@@ -188,43 +191,13 @@ const PREFERRED_NUTRIENT_ORDER = [
   'histidine_g',
 ] as const;
 
-interface FirebaseAuthConfig {
-  apiKey: string;
-  headers: Record<string, string>;
-}
-
-interface FirebaseSession {
-  idToken: string;
-  refreshToken: string;
-  expiresAtMs: number;
-  userId: string;
-  appCheckToken?: string;
-}
-
-interface FirestoreDocumentResponse {
-  fields?: Record<string, unknown>;
-}
-
-interface FirebaseSignInResponse {
-  idToken?: string;
-  refreshToken?: string;
-  expiresIn?: string;
-  localId?: string;
-}
-
-interface FirebaseRefreshResponse {
-  id_token?: string;
-  refresh_token?: string;
-  expires_in?: string;
-  user_id?: string;
-}
-
 interface BuildApiReportOptions {
   sourcePath: string;
   dayDocuments: ApiFoodLogDay[];
   customFoodDetails?: Record<string, CustomFoodDetails>;
   programTargets?: ProgramTarget[];
   scaleMetrics?: Record<string, ScaleMetrics>;
+  microNutrition?: Record<string, DailyNutritionTotals>;
   days: number;
   start?: string;
   end?: string;
@@ -269,6 +242,20 @@ interface ProgramTarget {
 interface ScaleMetrics {
   weightKg: number | null;
   bodyFatPct: number | null;
+}
+
+interface DailyNutritionTotals {
+  calories: number;
+  carbs: number;
+  protein: number;
+  fat: number;
+  fiber: number;
+}
+
+interface CacheSyncState {
+  refreshedDate?: string;
+  refreshedAt?: string;
+  cacheMtimeMs?: number;
 }
 
 interface MacrofactorReport {
@@ -600,6 +587,12 @@ async function runCli(): Promise<void> {
         default: false,
         describe: 'Include all nutrients in CSV/table output',
       })
+      .option('cache', {
+        type: 'boolean',
+        default: true,
+        describe: 'Use the once-per-day app refresh marker; pass --no-cache to force a MacroFactor app refresh',
+      })
+      .version(false)
       .help()
       .parseAsync();
 
@@ -607,21 +600,18 @@ async function runCli(): Promise<void> {
       throw new Error('--limit must be a positive number.');
     }
 
-    const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
-    const client = await MacroFactorApiClient.login(credentials.email, credentials.password, {
-      refreshToken: env.MACROFACTOR_FIREBASE_REFRESH_TOKEN,
-      appCheckToken: env.MACROFACTOR_FIREBASE_APP_CHECK_TOKEN,
-    });
     const window = resolveWindow({
       days: args.days,
       start: args.start,
       end: args.end,
     });
+    const client = await MacroFactorCacheClient.create({ forceRefresh: args.cache === false });
     const dayDocuments = await fetchFoodLogDays(client, window);
-    const [customFoodDetails, programTargets, scaleMetrics] = await Promise.all([
+    const [customFoodDetails, programTargets, scaleMetrics, microNutrition] = await Promise.all([
       fetchCustomFoodDetails(client, dayDocuments),
       fetchProgramTargets(client, window),
       fetchScaleMetrics(client, window),
+      fetchMicroNutrition(client, window),
     ]);
     const report = buildMacrofactorApiReport({
       sourcePath: SOURCE_PATH,
@@ -629,6 +619,7 @@ async function runCli(): Promise<void> {
       customFoodDetails,
       programTargets,
       scaleMetrics,
+      microNutrition,
       days: args.days,
       start: args.start,
       end: args.end,
@@ -649,7 +640,7 @@ async function runCli(): Promise<void> {
   }
 }
 
-async function fetchFoodLogDays(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
+async function fetchFoodLogDays(client: MacroFactorCacheClient, window: ResolvedWindow): Promise<ApiFoodLogDay[]> {
   const dateKeys = listFetchDateKeys(window);
   const days: ApiFoodLogDay[] = [];
   for (let index = 0; index < dateKeys.length; index += FOOD_DOC_BATCH_SIZE) {
@@ -665,7 +656,7 @@ async function fetchFoodLogDays(client: MacroFactorApiClient, window: ResolvedWi
   return days;
 }
 
-async function fetchProgramTargets(client: MacroFactorApiClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
+async function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWindow): Promise<ProgramTarget[]> {
   const years = listProgramYears(window);
   const documents = await Promise.all(
     years.map(async year => ({
@@ -699,7 +690,7 @@ async function fetchProgramTargets(client: MacroFactorApiClient, window: Resolve
 }
 
 async function fetchScaleMetrics(
-  client: MacroFactorApiClient,
+  client: MacroFactorCacheClient,
   window: ResolvedWindow
 ): Promise<Record<string, ScaleMetrics>> {
   const years = listWindowYears(window);
@@ -730,6 +721,44 @@ async function fetchScaleMetrics(
   }
 
   return metrics;
+}
+
+async function fetchMicroNutrition(
+  client: MacroFactorCacheClient,
+  window: ResolvedWindow
+): Promise<Record<string, DailyNutritionTotals>> {
+  const years = listWindowYears(window);
+  const documents = await Promise.all(
+    years.map(async year => ({
+      year,
+      document: await client.getMicroDocument(year),
+    }))
+  );
+  const totals: Record<string, DailyNutritionTotals> = {};
+
+  for (const { year, document } of documents) {
+    if (!document) {
+      continue;
+    }
+    for (const [monthDay, rawValue] of Object.entries(document)) {
+      if (!/^\d{4}$/.test(monthDay)) {
+        continue;
+      }
+      const raw = asRecord(rawValue);
+      if (!raw) {
+        continue;
+      }
+      totals[`${year}-${monthDay.slice(0, 2)}-${monthDay.slice(2)}`] = {
+        calories: parseNumberLike(raw.k) ?? 0,
+        carbs: parseNumberLike(raw.c) ?? 0,
+        protein: parseNumberLike(raw.p) ?? 0,
+        fat: parseNumberLike(raw.f) ?? 0,
+        fiber: parseNumberLike(raw['291']) ?? parseNumberLike(raw.e) ?? 0,
+      };
+    }
+  }
+
+  return totals;
 }
 
 function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorReport {
@@ -775,30 +804,16 @@ function buildMacrofactorApiReport(options: BuildApiReportOptions): MacrofactorR
     },
     matchedFoods: rows.length,
     returnedFoods: limitedRows.length,
-    dailyOverview: buildDailyOverview(window, entries, options.programTargets ?? [], options.scaleMetrics ?? {}),
+    dailyOverview: buildDailyOverview(
+      window,
+      entries,
+      options.programTargets ?? [],
+      options.scaleMetrics ?? {},
+      options.microNutrition ?? {}
+    ),
     foods: limitedRows,
     recipeBreakdown: buildRecipeBreakdown(entries, options.customFoodDetails ?? {}),
   };
-}
-
-function parseMacrofactorCredentials(value: string | undefined): { email: string; password: string } {
-  const raw = value?.trim();
-  if (!raw) {
-    throw new Error('MACROFACTOR_CREDENTIALS is not set. Expected <email>:<password>.');
-  }
-
-  const separatorIndex = raw.indexOf(':');
-  if (separatorIndex === -1) {
-    throw new Error('MACROFACTOR_CREDENTIALS must use the format <email>:<password>.');
-  }
-
-  const email = raw.slice(0, separatorIndex).trim();
-  const password = raw.slice(separatorIndex + 1);
-  if (!email || !password) {
-    throw new Error('MACROFACTOR_CREDENTIALS must include both a non-empty email and password.');
-  }
-
-  return { email, password };
 }
 
 function parseFoodLogTimestamp(entryId: string, fallbackDate?: string, fallbackHour?: unknown, fallbackMinute?: unknown): number | null {
@@ -1087,7 +1102,8 @@ function buildDailyOverview(
   window: ResolvedWindow,
   entries: ParsedFoodLogEntry[],
   programTargets: ProgramTarget[],
-  scaleMetrics: Record<string, ScaleMetrics>
+  scaleMetrics: Record<string, ScaleMetrics>,
+  microNutrition: Record<string, DailyNutritionTotals>
 ): MacrofactorDailyOverviewRecord[] {
   const totals = new Map(
     listWindowDateKeys(window).map(date => [
@@ -1120,15 +1136,16 @@ function buildDailyOverview(
     .map(([date, totalsForDate]) => {
       const goals = findProgramGoalsForDate(date, programTargets);
       const scale = scaleMetrics[date];
+      const fallback = totalsForDate.foods_logged === 0 ? microNutrition[date] : undefined;
       return {
         date,
         weightKg: roundToSingleDecimal(scale?.weightKg),
         bodyFatPct: roundToSingleDecimal(scale?.bodyFatPct),
-        calories: totalsForDate.calories,
-        carbs: totalsForDate.carbs,
-        protein: totalsForDate.protein,
-        fat: totalsForDate.fat,
-        fiber: totalsForDate.fiber,
+        calories: fallback?.calories ?? totalsForDate.calories,
+        carbs: fallback?.carbs ?? totalsForDate.carbs,
+        protein: fallback?.protein ?? totalsForDate.protein,
+        fat: fallback?.fat ?? totalsForDate.fat,
+        fiber: fallback?.fiber ?? totalsForDate.fiber,
         goal_calories: goals.goal_calories,
         goal_protein: goals.goal_protein,
         goal_carbs: goals.goal_carbs,
@@ -1188,7 +1205,7 @@ function buildRecipeBreakdown(
 }
 
 async function fetchCustomFoodDetails(
-  client: MacroFactorApiClient,
+  client: MacroFactorCacheClient,
   dayDocuments: ApiFoodLogDay[]
 ): Promise<Record<string, CustomFoodDetails>> {
   const ids = collectCustomFoodIds(dayDocuments);
@@ -1600,253 +1617,497 @@ function collectNutrientColumns(nutrientsList: Record<string, number>[]): string
   });
 }
 
-function parseFirestoreValue(value: unknown): unknown {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return value;
-  }
-  const typedValue = value as Record<string, unknown>;
-  if ('stringValue' in typedValue) {
-    return typedValue.stringValue ?? null;
-  }
-  if ('integerValue' in typedValue) {
-    return parseNumberLike(typedValue.integerValue) ?? typedValue.integerValue ?? null;
-  }
-  if ('doubleValue' in typedValue) {
-    return parseNumberLike(typedValue.doubleValue) ?? typedValue.doubleValue ?? null;
-  }
-  if ('booleanValue' in typedValue) {
-    return Boolean(typedValue.booleanValue);
-  }
-  if ('nullValue' in typedValue) {
-    return null;
-  }
-  if ('timestampValue' in typedValue) {
-    return typedValue.timestampValue ?? null;
-  }
-  if ('referenceValue' in typedValue) {
-    return typedValue.referenceValue ?? null;
-  }
-  if ('geoPointValue' in typedValue) {
-    return typedValue.geoPointValue ?? null;
-  }
-  if ('bytesValue' in typedValue) {
-    return typedValue.bytesValue ?? null;
-  }
-  if ('mapValue' in typedValue) {
-    const mapValue = typedValue.mapValue;
-    if (mapValue && typeof mapValue === 'object' && !Array.isArray(mapValue)) {
-      return parseFirestoreFields((mapValue as { fields?: unknown }).fields);
-    }
-    return {};
-  }
-  if ('arrayValue' in typedValue) {
-    const arrayValue = typedValue.arrayValue;
-    if (!arrayValue || typeof arrayValue !== 'object' || Array.isArray(arrayValue)) {
-      return [];
-    }
-    const values = (arrayValue as { values?: unknown }).values;
-    if (!Array.isArray(values)) {
-      return [];
-    }
-    return values.map(parseFirestoreValue);
-  }
-  return typedValue;
-}
+class MacroFactorCacheClient {
+  private constructor(
+    private readonly userPath: string,
+    private readonly documents: Map<string, Record<string, unknown>>
+  ) {}
 
-function parseFirestoreFields(fields: unknown): Record<string, unknown> {
-  if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
-    return {};
-  }
-  const result: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(fields)) {
-    result[key] = parseFirestoreValue(value);
-  }
-  return result;
-}
-
-class MacroFactorApiClient {
-  private constructor(private readonly session: FirebaseSession) {}
-
-  static async login(
-    email: string,
-    password: string,
-    options: { refreshToken?: string; appCheckToken?: string } = {}
-  ): Promise<MacroFactorApiClient> {
-    const refreshToken = cleanOptionalSecret(options.refreshToken);
-    const appCheckToken = cleanOptionalSecret(options.appCheckToken);
-    const errors: string[] = [];
-
-    if (refreshToken) {
-      try {
-        return new MacroFactorApiClient(await MacroFactorApiClient.refreshSession(refreshToken, appCheckToken));
-      } catch (error) {
-        errors.push(`refresh token: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
-    const response = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_AUTH_CONFIG.apiKey}`,
-      {
-        method: 'POST',
-        headers: buildFirebaseHeaders('application/json', appCheckToken),
-        body: JSON.stringify({
-          email,
-          password,
-          returnSecureToken: true,
-        }),
-      }
-    );
-
-    if (!response.ok) {
-      errors.push(`password: ${await formatError(response)}`);
-      throw new Error(formatSignInFailure(errors));
-    }
-
-    const data = (await response.json()) as FirebaseSignInResponse;
-    if (!data.idToken || !data.refreshToken || !data.expiresIn || !data.localId) {
-      errors.push('password: sign-in response was missing required auth fields.');
-      throw new Error(formatSignInFailure(errors));
-    }
-
-    const session = {
-      idToken: data.idToken,
-      refreshToken: data.refreshToken,
-      expiresAtMs: Date.now() + Number(data.expiresIn) * 1000,
-      userId: data.localId,
-      appCheckToken,
-    };
-    saveFirebaseRefreshToken(session.refreshToken);
-    return new MacroFactorApiClient(session);
+  static async create(options: { forceRefresh: boolean }): Promise<MacroFactorCacheClient> {
+    const cacheDir = resolveFirestoreCacheDir();
+    await ensureMacroFactorCacheFresh(cacheDir, options.forceRefresh);
+    const documents = await readCachedFirestoreDocuments(cacheDir);
+    const userPath = findCachedUserPath(documents);
+    return new MacroFactorCacheClient(userPath, documents);
   }
 
   async getFoodLogDocument(date: string): Promise<Record<string, unknown> | null> {
-    return this.getUserDocument(`food/${date}`, `MacroFactor food log request failed for ${date}`);
+    return this.getUserDocument(`food/${date}`);
   }
 
   async getCustomFoodDocument(id: string): Promise<Record<string, unknown> | null> {
-    return this.getUserDocument(`customFoods/${id}`, `MacroFactor custom food request failed for ${id}`);
+    return this.getUserDocument(`customFoods/${id}`);
   }
 
   async getProgramDocument(year: number | string): Promise<Record<string, unknown> | null> {
-    return this.getUserDocument(`program/${year}`, `MacroFactor program request failed for ${year}`);
+    return this.getUserDocument(`program/${year}`);
   }
 
   async getScaleDocument(year: number | string): Promise<Record<string, unknown> | null> {
-    return this.getUserDocument(`scale/${year}`, `MacroFactor scale request failed for ${year}`);
+    return this.getUserDocument(`scale/${year}`);
   }
 
-  private async getUserDocument(pathSuffix: string, errorLabel: string): Promise<Record<string, unknown> | null> {
-    const token = await this.getIdToken();
-    const response = await fetch(`${FIRESTORE_BASE_URL}/users/${this.session.userId}/${pathSuffix}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-
-    if (response.status === 404) {
-      return null;
-    }
-    if (!response.ok) {
-      throw new Error(`${errorLabel}: ${await formatError(response)}`);
-    }
-
-    const document = (await response.json()) as FirestoreDocumentResponse;
-    return parseFirestoreFields(document.fields);
+  async getMicroDocument(year: number | string): Promise<Record<string, unknown> | null> {
+    return this.getUserDocument(`micro/${year}`);
   }
 
-  private async getIdToken(): Promise<string> {
-    if (this.session.expiresAtMs - TOKEN_REFRESH_MARGIN_MS > Date.now()) {
-      return this.session.idToken;
-    }
-
-    const refreshed = await MacroFactorApiClient.refreshSession(this.session.refreshToken, this.session.appCheckToken);
-    this.session.idToken = refreshed.idToken;
-    this.session.refreshToken = refreshed.refreshToken;
-    this.session.expiresAtMs = refreshed.expiresAtMs;
-    this.session.userId = refreshed.userId;
-    return this.session.idToken;
-  }
-
-  private static async refreshSession(refreshToken: string, appCheckToken?: string): Promise<FirebaseSession> {
-    const response = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FIREBASE_AUTH_CONFIG.apiKey}`, {
-      method: 'POST',
-      headers: buildFirebaseHeaders('application/x-www-form-urlencoded', appCheckToken),
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-      }).toString(),
-    });
-
-    if (!response.ok) {
-      throw new Error(`MacroFactor token refresh failed: ${await formatError(response)}`);
-    }
-
-    const data = (await response.json()) as FirebaseRefreshResponse;
-    if (!data.id_token || !data.refresh_token || !data.expires_in || !data.user_id) {
-      throw new Error('MacroFactor token refresh response was missing required auth fields.');
-    }
-
-    const session = {
-      idToken: data.id_token,
-      refreshToken: data.refresh_token,
-      expiresAtMs: Date.now() + Number(data.expires_in) * 1000,
-      userId: data.user_id,
-      appCheckToken,
-    };
-    saveFirebaseRefreshToken(session.refreshToken);
-    return session;
+  private getUserDocument(pathSuffix: string): Record<string, unknown> | null {
+    return this.documents.get(`${this.userPath}/${pathSuffix}`) ?? null;
   }
 }
 
-function buildFirebaseHeaders(contentType: string, appCheckToken?: string): Record<string, string> {
-  const headers: Record<string, string> = {
-    'Content-Type': contentType,
-    ...FIREBASE_AUTH_CONFIG.headers,
+function resolveFirestoreCacheDir(): string {
+  const containersDir = path.join(os.homedir(), 'Library', 'Containers');
+  if (existsSync(containersDir)) {
+    for (const entry of readdirSync(containersDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const containerDir = path.join(containersDir, entry.name);
+      const markerPath = path.join(containerDir, 'Data', 'Library', 'Preferences', `${MACROFACTOR_APP_BUNDLE_ID}.plist`);
+      const cacheDir = path.join(containerDir, FIRESTORE_CACHE_RELATIVE_DIR);
+      if (existsSync(markerPath) && existsSync(cacheDir)) {
+        return cacheDir;
+      }
+    }
+  }
+
+  throw new Error(`MacroFactor Firestore cache was not found. Open ${MACROFACTOR_APP_NAME} once, then rerun this script.`);
+}
+
+async function ensureMacroFactorCacheFresh(cacheDir: string, forceRefresh: boolean): Promise<void> {
+  const today = formatLocalDateKey(new Date());
+  const syncState = readCacheSyncState();
+  const currentCache = readCacheFingerprint(cacheDir);
+  const wasRunning = isMacroFactorRunning();
+  if (!forceRefresh && (syncState?.refreshedDate === today || isLocalDate(currentCache?.latestMtimeMs, today))) {
+    if (wasRunning) {
+      await waitForCacheStable(cacheDir);
+    }
+    return;
+  }
+
+  openMacroFactorApp();
+  await waitForCacheRefresh(cacheDir, currentCache);
+  writeCacheSyncState({
+    refreshedDate: today,
+    refreshedAt: formatLocalIso(Date.now()),
+    cacheMtimeMs: readCacheFingerprint(cacheDir)?.latestMtimeMs,
+  });
+
+  if (!wasRunning) {
+    closeMacroFactorApp();
+    await waitForMacroFactorExit();
+  }
+}
+
+function isLocalDate(timestampMs: number | null | undefined, dateKey: string): boolean {
+  return Number.isFinite(timestampMs) && formatLocalDateKey(new Date(timestampMs as number)) === dateKey;
+}
+
+function readCacheSyncState(): CacheSyncState | null {
+  if (!existsSync(CACHE_SYNC_STATE_PATH)) {
+    return null;
+  }
+  try {
+    return JSON.parse(readFileSync(CACHE_SYNC_STATE_PATH, 'utf8')) as CacheSyncState;
+  } catch {
+    return null;
+  }
+}
+
+function writeCacheSyncState(state: CacheSyncState): void {
+  mkdirSync(path.dirname(CACHE_SYNC_STATE_PATH), { recursive: true });
+  writeFileSync(CACHE_SYNC_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+}
+
+function isMacroFactorRunning(): boolean {
+  const result = spawnSync('osascript', ['-e', `application id "${MACROFACTOR_APP_BUNDLE_ID}" is running`], {
+    encoding: 'utf8',
+  });
+  return result.status === 0 && result.stdout.trim() === 'true';
+}
+
+function openMacroFactorApp(): void {
+  const result = spawnSync('open', ['-b', MACROFACTOR_APP_BUNDLE_ID], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(commandError(result, `Failed to open ${MACROFACTOR_APP_NAME}.`));
+  }
+}
+
+function closeMacroFactorApp(): void {
+  const result = spawnSync('osascript', ['-e', `quit app id "${MACROFACTOR_APP_BUNDLE_ID}"`], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(commandError(result, `Failed to quit ${MACROFACTOR_APP_NAME}.`));
+  }
+}
+
+async function waitForMacroFactorExit(): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 10_000) {
+    if (!isMacroFactorRunning()) {
+      return;
+    }
+    await sleep(500);
+  }
+}
+
+function commandError(result: { stdout?: unknown; stderr?: unknown }, fallback: string): string {
+  const output = `${result.stderr ?? ''}${result.stdout ?? ''}`.trim();
+  return output ? `${fallback} ${output}` : fallback;
+}
+
+interface CacheFingerprint {
+  latestMtimeMs: number;
+  value: string;
+}
+
+function readCacheFingerprint(cacheDir: string): CacheFingerprint | null {
+  if (!existsSync(cacheDir)) {
+    return null;
+  }
+  const parts: string[] = [];
+  let latestMtimeMs = 0;
+  for (const entry of readdirSync(cacheDir, { withFileTypes: true })) {
+    if (!entry.isFile() || entry.name === 'LOCK') {
+      continue;
+    }
+    const filePath = path.join(cacheDir, entry.name);
+    const stats = statSync(filePath);
+    latestMtimeMs = Math.max(latestMtimeMs, stats.mtimeMs);
+    parts.push(`${entry.name}:${stats.size}:${Math.trunc(stats.mtimeMs)}`);
+  }
+  parts.sort();
+  return {
+    latestMtimeMs,
+    value: parts.join('|'),
   };
-  if (appCheckToken) {
-    headers['X-Firebase-AppCheck'] = appCheckToken;
+}
+
+async function waitForCacheRefresh(cacheDir: string, before: CacheFingerprint | null): Promise<void> {
+  const start = Date.now();
+  let latest = before;
+  let stableSince = Date.now();
+  let observedChange = false;
+
+  while (Date.now() - start < CACHE_REFRESH_TIMEOUT_MS) {
+    await sleep(CACHE_REFRESH_POLL_MS);
+    const current = readCacheFingerprint(cacheDir);
+    if (!current) {
+      continue;
+    }
+    if (!latest || current.value !== latest.value) {
+      observedChange = !before || current.value !== before.value || current.latestMtimeMs > before.latestMtimeMs;
+      latest = current;
+      stableSince = Date.now();
+    }
+    if (observedChange && Date.now() - stableSince >= CACHE_REFRESH_STABLE_MS) {
+      return;
+    }
   }
-  return headers;
+
+  console.error(`${MACROFACTOR_APP_NAME} cache refresh wait timed out; using the currently available local cache.`);
 }
 
-function cleanOptionalSecret(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
-}
+async function waitForCacheStable(cacheDir: string): Promise<void> {
+  const start = Date.now();
+  let latest = readCacheFingerprint(cacheDir);
+  let stableSince = Date.now();
 
-function saveFirebaseRefreshToken(refreshToken: string): void {
-  setEnvLocalValue(FIREBASE_REFRESH_TOKEN_ENV, refreshToken);
-  process.env[FIREBASE_REFRESH_TOKEN_ENV] = refreshToken;
-}
-
-function setEnvLocalValue(key: string, value: string): void {
-  const current = existsSync(ENV_LOCAL_PATH) ? readFileSync(ENV_LOCAL_PATH, 'utf8') : '';
-  const line = `${key}=${JSON.stringify(value)}`;
-  const pattern = new RegExp(`^${escapeRegExp(key)}=.*$`, 'm');
-  const next = pattern.test(current)
-    ? current.replace(pattern, line)
-    : `${current}${current && !current.endsWith('\n') ? '\n' : ''}${line}\n`;
-  if (next !== current) {
-    writeFileSync(ENV_LOCAL_PATH, next, 'utf8');
+  while (Date.now() - start < 10_000) {
+    await sleep(CACHE_REFRESH_POLL_MS);
+    const current = readCacheFingerprint(cacheDir);
+    if (current?.value !== latest?.value) {
+      latest = current;
+      stableSince = Date.now();
+    }
+    if (Date.now() - stableSince >= 2_000) {
+      return;
+    }
   }
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function formatSignInFailure(errors: string[]): string {
-  const lines = ['MacroFactor sign-in failed.', ...errors];
-  if (errors.some(error => error.includes(FIREBASE_APP_CHECK_ERROR))) {
-    lines.push(
-      'Password sign-in is being rejected by Firebase App Check. Set MACROFACTOR_FIREBASE_REFRESH_TOKEN from an existing signed-in session, or provide a current MACROFACTOR_FIREBASE_APP_CHECK_TOKEN.'
-    );
+async function readCachedFirestoreDocuments(cacheDir: string): Promise<Map<string, Record<string, unknown>>> {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'macrofactor-firestore-cache-'));
+  const snapshotDir = path.join(tempDir, 'main');
+  try {
+    cpSync(cacheDir, snapshotDir, { recursive: true });
+    const db = new ClassicLevel<Buffer, Buffer>(snapshotDir, {
+      keyEncoding: 'buffer',
+      valueEncoding: 'buffer',
+      createIfMissing: false,
+    });
+    const documents = new Map<string, Record<string, unknown>>();
+    try {
+      for await (const [rawKey, rawValue] of db.iterator()) {
+        const key = Buffer.isBuffer(rawKey) ? rawKey : Buffer.from(rawKey as Uint8Array);
+        const value = Buffer.isBuffer(rawValue) ? rawValue : Buffer.from(rawValue as Uint8Array);
+        const documentPath = decodeRemoteDocumentPath(key);
+        if (!documentPath) {
+          continue;
+        }
+        const document = parseRemoteDocumentValue(value);
+        if (document) {
+          documents.set(documentPath, document.fields);
+        }
+      }
+    } finally {
+      await db.close();
+    }
+    return documents;
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
   }
-  return lines.join('\n');
 }
 
-async function formatError(response: Response): Promise<string> {
-  const body = await response.text();
-  const snippet = body.trim().slice(0, 500);
-  return `${response.status} ${response.statusText}${snippet ? `: ${snippet}` : ''}`;
+function decodeRemoteDocumentPath(key: Buffer): string | null {
+  const tokens = key.toString('utf8').match(/[A-Za-z0-9][A-Za-z0-9_-]*/g) ?? [];
+  if (tokens[0] !== 'remote_document') {
+    return null;
+  }
+  return tokens.slice(1).join('/');
+}
+
+function findCachedUserPath(documents: Map<string, Record<string, unknown>>): string {
+  const users = Array.from(documents.keys())
+    .filter(documentPath => /^users\/[^/]+$/.test(documentPath))
+    .sort();
+  const userPath = users[0];
+  if (!userPath) {
+    throw new Error(`MacroFactor Firestore cache does not contain a user document. Open ${MACROFACTOR_APP_NAME}, wait for sync, then rerun.`);
+  }
+  return userPath;
+}
+
+interface ParsedRemoteDocument {
+  name: string;
+  fields: Record<string, unknown>;
+}
+
+function parseRemoteDocumentValue(value: Buffer): ParsedRemoteDocument | null {
+  const reader = new ProtoReader(value);
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 2 && tag.wireType === 2) {
+      return parseFirestoreDocument(reader.readBytes());
+    }
+    reader.skip(tag.wireType);
+  }
+  return null;
+}
+
+function parseFirestoreDocument(value: Buffer): ParsedRemoteDocument {
+  const reader = new ProtoReader(value);
+  const fields: Record<string, unknown> = {};
+  let name = '';
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      name = reader.readBytes().toString('utf8');
+    } else if (tag.field === 2) {
+      const [key, fieldValue] = parseFirestoreFieldEntry(reader.readBytes());
+      fields[key] = fieldValue;
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return { name, fields };
+}
+
+function parseFirestoreFieldEntry(value: Buffer): [string, unknown] {
+  const reader = new ProtoReader(value);
+  let key = '';
+  let fieldValue: unknown = null;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      key = reader.readBytes().toString('utf8');
+    } else if (tag.field === 2) {
+      fieldValue = parseFirestoreProtoValue(reader.readBytes());
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return [key, fieldValue];
+}
+
+function parseFirestoreProtoValue(value: Buffer): unknown {
+  const reader = new ProtoReader(value);
+  let parsed: unknown = null;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      parsed = Boolean(reader.readVarint());
+    } else if (tag.field === 2) {
+      const integer = decodeSignedInt64(reader.readVarint());
+      const numeric = Number(integer);
+      parsed = Number.isSafeInteger(numeric) ? numeric : integer.toString();
+    } else if (tag.field === 3) {
+      parsed = reader.readDouble();
+    } else if (tag.field === 5) {
+      parsed = reader.readBytes().toString('utf8');
+    } else if (tag.field === 6) {
+      parsed = parseFirestoreMapValue(reader.readBytes());
+    } else if (tag.field === 8) {
+      parsed = parseFirestoreGeoPointValue(reader.readBytes());
+    } else if (tag.field === 9) {
+      parsed = parseFirestoreArrayValue(reader.readBytes());
+    } else if (tag.field === 10) {
+      parsed = parseFirestoreTimestampValue(reader.readBytes());
+    } else if (tag.field === 11) {
+      reader.readVarint();
+      parsed = null;
+    } else if (tag.field === 17) {
+      parsed = reader.readBytes().toString('utf8');
+    } else if (tag.field === 18) {
+      parsed = reader.readBytes().toString('base64');
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return parsed;
+}
+
+function parseFirestoreMapValue(value: Buffer): Record<string, unknown> {
+  const reader = new ProtoReader(value);
+  const fields: Record<string, unknown> = {};
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      const [key, fieldValue] = parseFirestoreFieldEntry(reader.readBytes());
+      fields[key] = fieldValue;
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return fields;
+}
+
+function parseFirestoreArrayValue(value: Buffer): unknown[] {
+  const reader = new ProtoReader(value);
+  const values: unknown[] = [];
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      values.push(parseFirestoreProtoValue(reader.readBytes()));
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return values;
+}
+
+function parseFirestoreTimestampValue(value: Buffer): string {
+  const reader = new ProtoReader(value);
+  let seconds = 0n;
+  let nanos = 0;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      seconds = decodeSignedInt64(reader.readVarint());
+    } else if (tag.field === 2) {
+      nanos = Number(reader.readVarint());
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return new Date(Number(seconds) * 1000 + Math.floor(nanos / 1_000_000)).toISOString();
+}
+
+function parseFirestoreGeoPointValue(value: Buffer): { latitude: number | null; longitude: number | null } {
+  const reader = new ProtoReader(value);
+  let latitude: number | null = null;
+  let longitude: number | null = null;
+  while (!reader.eof()) {
+    const tag = reader.readTag();
+    if (tag.field === 1) {
+      latitude = reader.readDouble();
+    } else if (tag.field === 2) {
+      longitude = reader.readDouble();
+    } else {
+      reader.skip(tag.wireType);
+    }
+  }
+  return { latitude, longitude };
+}
+
+const MAX_INT64 = (1n << 63n) - 1n;
+const TWO_64 = 1n << 64n;
+
+function decodeSignedInt64(value: bigint): bigint {
+  return value > MAX_INT64 ? value - TWO_64 : value;
+}
+
+class ProtoReader {
+  private offset = 0;
+
+  constructor(private readonly data: Buffer) {}
+
+  eof(): boolean {
+    return this.offset >= this.data.length;
+  }
+
+  readTag(): { field: number; wireType: number } {
+    const tag = Number(this.readVarint());
+    return {
+      field: tag >> 3,
+      wireType: tag & 7,
+    };
+  }
+
+  readVarint(): bigint {
+    let result = 0n;
+    let shift = 0n;
+    while (this.offset < this.data.length) {
+      const byte = this.data[this.offset++] ?? 0;
+      result |= BigInt(byte & 0x7f) << shift;
+      if ((byte & 0x80) === 0) {
+        return result;
+      }
+      shift += 7n;
+    }
+    throw new Error('Unexpected end of protobuf varint.');
+  }
+
+  readBytes(): Buffer {
+    const length = Number(this.readVarint());
+    const end = this.offset + length;
+    if (end > this.data.length) {
+      throw new Error('Unexpected end of protobuf length-delimited field.');
+    }
+    const value = this.data.subarray(this.offset, end);
+    this.offset = end;
+    return value;
+  }
+
+  readDouble(): number {
+    const value = this.data.readDoubleLE(this.offset);
+    this.offset += 8;
+    return value;
+  }
+
+  skip(wireType: number): void {
+    if (wireType === 0) {
+      this.readVarint();
+      return;
+    }
+    if (wireType === 1) {
+      this.offset += 8;
+      return;
+    }
+    if (wireType === 2) {
+      const length = Number(this.readVarint());
+      this.offset += length;
+      return;
+    }
+    if (wireType === 5) {
+      this.offset += 4;
+      return;
+    }
+    throw new Error(`Unsupported protobuf wire type ${wireType}.`);
+  }
 }

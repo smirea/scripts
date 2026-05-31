@@ -13,6 +13,7 @@
         "@typescript/native-preview": "^7.0.0-dev.20260129.1",
         "anylist": "^0.8.6",
         "chalk": "^5.6.2",
+        "classic-level": "^3.0.0",
         "date-fns": "^4.1.0",
         "kill-port-process": "^3.2.1",
         "lefthook": "^2.0.16",

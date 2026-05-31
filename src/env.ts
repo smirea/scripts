@@ -8,8 +8,6 @@ const env = z.object({
   WHOOP_REDIRECT_URI: z.string(),
   GEMINI_API_KEY: z.string(),
   MACROFACTOR_CREDENTIALS: z.string(),
-  MACROFACTOR_FIREBASE_REFRESH_TOKEN: z.string().optional(),
-  MACROFACTOR_FIREBASE_APP_CHECK_TOKEN: z.string().optional(),
   ERA_FIT_CREDENTIALS: z.string().optional(),
   ERA_FIT_SESSION_COOKIE: z.string().optional(),
   ERA_FIT_FIREBASE_ID_TOKEN: z.string().optional(),
