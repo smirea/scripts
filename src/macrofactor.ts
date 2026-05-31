@@ -31,11 +31,15 @@ const FIRESTORE_CACHE_RELATIVE_DIR = path.join(
   'main'
 );
 const CACHE_SYNC_STATE_PATH = path.join(os.homedir(), '.cache', 'scripts', 'macrofactor-cache-sync.json');
-const CACHE_REFRESH_TIMEOUT_MS = 45_000;
+const APP_REFRESH_INTERVAL_MS = 12 * 60 * 60 * 1000;
 const CACHE_REFRESH_POLL_MS = 1_000;
-const CACHE_REFRESH_STABLE_MS = 5_000;
+const APP_LAUNCH_TIMEOUT_MS = 30_000;
+const APP_UI_SETTLE_MS = 900;
+const APP_DAY_NAVIGATION_SETTLE_MS = 650;
 const FOOD_DOC_BATCH_SIZE = 10;
 const SECONDS_PER_DAY = 24 * 60 * 60;
+const APP_MODES = ['auto', 'open', 'none'] as const;
+type MacroFactorAppMode = (typeof APP_MODES)[number];
 const CSV_COLUMNS = [
   'date',
   'time',
@@ -255,6 +259,10 @@ interface DailyNutritionTotals {
 interface CacheSyncState {
   refreshedDate?: string;
   refreshedAt?: string;
+  appOpenedAt?: string;
+  warmedAt?: string;
+  warmedStartDate?: string;
+  warmedEndDate?: string;
   cacheMtimeMs?: number;
 }
 
@@ -587,10 +595,11 @@ async function runCli(): Promise<void> {
         default: false,
         describe: 'Include all nutrients in CSV/table output',
       })
-      .option('cache', {
-        type: 'boolean',
-        default: true,
-        describe: 'Use the once-per-day app refresh marker; pass --no-cache to force a MacroFactor app refresh',
+      .option('app', {
+        type: 'string',
+        choices: APP_MODES,
+        default: 'auto',
+        describe: 'MacroFactor app warm mode: auto opens when stale or missing docs, open always opens, none never opens',
       })
       .version(false)
       .help()
@@ -605,7 +614,8 @@ async function runCli(): Promise<void> {
       start: args.start,
       end: args.end,
     });
-    const client = await MacroFactorCacheClient.create({ forceRefresh: args.cache === false });
+    const appMode = parseMacroFactorAppMode(args.app);
+    const client = await MacroFactorCacheClient.create({ appMode, window });
     const dayDocuments = await fetchFoodLogDays(client, window);
     const [customFoodDetails, programTargets, scaleMetrics, microNutrition] = await Promise.all([
       fetchCustomFoodDetails(client, dayDocuments),
@@ -1399,6 +1409,14 @@ function printTable(
 ): void {
   renderTableRecords(rows, options);
 }
+
+function parseMacroFactorAppMode(value: unknown): MacroFactorAppMode {
+  if (APP_MODES.includes(value as MacroFactorAppMode)) {
+    return value as MacroFactorAppMode;
+  }
+  throw new Error(`--app must be one of: ${APP_MODES.join(', ')}`);
+}
+
 function parseDateArg(value: string, label: string): number {
   const localDateMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (localDateMatch) {
@@ -1623,10 +1641,18 @@ class MacroFactorCacheClient {
     private readonly documents: Map<string, Record<string, unknown>>
   ) {}
 
-  static async create(options: { forceRefresh: boolean }): Promise<MacroFactorCacheClient> {
+  static async create(options: { appMode: MacroFactorAppMode; window: ResolvedWindow }): Promise<MacroFactorCacheClient> {
     const cacheDir = resolveFirestoreCacheDir();
-    await ensureMacroFactorCacheFresh(cacheDir, options.forceRefresh);
-    const documents = await readCachedFirestoreDocuments(cacheDir);
+    const dateKeys = listFetchDateKeys(options.window);
+    const initialDocuments = await readCachedFirestoreDocuments(cacheDir);
+    const initialUserPath = findCachedUserPathOrNull(initialDocuments);
+    const shouldReread = await ensureMacroFactorCacheFresh(cacheDir, {
+      appMode: options.appMode,
+      dateKeys,
+      documents: initialDocuments,
+      userPath: initialUserPath,
+    });
+    const documents = shouldReread ? await readCachedFirestoreDocuments(cacheDir) : initialDocuments;
     const userPath = findCachedUserPath(documents);
     return new MacroFactorCacheClient(userPath, documents);
   }
@@ -1675,34 +1701,305 @@ function resolveFirestoreCacheDir(): string {
   throw new Error(`MacroFactor Firestore cache was not found. Open ${MACROFACTOR_APP_NAME} once, then rerun this script.`);
 }
 
-async function ensureMacroFactorCacheFresh(cacheDir: string, forceRefresh: boolean): Promise<void> {
-  const today = formatLocalDateKey(new Date());
+async function ensureMacroFactorCacheFresh(
+  cacheDir: string,
+  options: {
+    appMode: MacroFactorAppMode;
+    dateKeys: string[];
+    documents: Map<string, Record<string, unknown>>;
+    userPath: string | null;
+  }
+): Promise<boolean> {
   const syncState = readCacheSyncState();
   const currentCache = readCacheFingerprint(cacheDir);
   const wasRunning = isMacroFactorRunning();
-  if (!forceRefresh && (syncState?.refreshedDate === today || isLocalDate(currentCache?.latestMtimeMs, today))) {
+
+  if (options.appMode === 'none') {
     if (wasRunning) {
       await waitForCacheStable(cacheDir);
+      return true;
     }
-    return;
+    return false;
   }
 
-  openMacroFactorApp();
-  await waitForCacheRefresh(cacheDir, currentCache);
-  writeCacheSyncState({
-    refreshedDate: today,
+  const appRefreshStale = isMacroFactorAppRefreshStale(syncState, currentCache);
+  const warmedRangeCoversRequest = !appRefreshStale && isMacroFactorCacheWarmForDateKeys(syncState, options.dateKeys);
+  const missingFoodDateKeys = warmedRangeCoversRequest
+    ? []
+    : listMissingFoodDateKeys(options.dateKeys, options.userPath, options.documents);
+  const shouldOpen =
+    options.appMode === 'open' ||
+    !options.userPath ||
+    appRefreshStale ||
+    missingFoodDateKeys.length > 0;
+
+  if (!shouldOpen) {
+    if (wasRunning) {
+      await waitForCacheStable(cacheDir);
+      return true;
+    }
+    return false;
+  }
+
+  await warmMacroFactorAppCache(cacheDir, options.dateKeys);
+  const nextSyncState: CacheSyncState = {
+    refreshedDate: formatLocalDateKey(new Date()),
     refreshedAt: formatLocalIso(Date.now()),
+    appOpenedAt: formatLocalIso(Date.now()),
+    warmedAt: formatLocalIso(Date.now()),
     cacheMtimeMs: readCacheFingerprint(cacheDir)?.latestMtimeMs,
-  });
+  };
+  const warmedStartDate = options.dateKeys[0];
+  const warmedEndDate = options.dateKeys.at(-1);
+  if (warmedStartDate) {
+    nextSyncState.warmedStartDate = warmedStartDate;
+  }
+  if (warmedEndDate) {
+    nextSyncState.warmedEndDate = warmedEndDate;
+  }
+  writeCacheSyncState(nextSyncState);
 
   if (!wasRunning) {
     closeMacroFactorApp();
     await waitForMacroFactorExit();
   }
+
+  return true;
 }
 
-function isLocalDate(timestampMs: number | null | undefined, dateKey: string): boolean {
-  return Number.isFinite(timestampMs) && formatLocalDateKey(new Date(timestampMs as number)) === dateKey;
+function listMissingFoodDateKeys(
+  dateKeys: string[],
+  userPath: string | null,
+  documents: Map<string, Record<string, unknown>>
+): string[] {
+  if (!userPath) {
+    return dateKeys;
+  }
+  return dateKeys.filter(date => !documents.has(`${userPath}/food/${date}`));
+}
+
+function isMacroFactorAppRefreshStale(syncState: CacheSyncState | null, currentCache: CacheFingerprint | null): boolean {
+  const lastScriptOpenMs = parseLocalTimestampMs(syncState?.appOpenedAt ?? syncState?.refreshedAt);
+  const lastActivityMs = Math.max(lastScriptOpenMs ?? 0, currentCache?.latestMtimeMs ?? 0);
+  return !lastActivityMs || Date.now() - lastActivityMs >= APP_REFRESH_INTERVAL_MS;
+}
+
+function isMacroFactorCacheWarmForDateKeys(syncState: CacheSyncState | null, dateKeys: string[]): boolean {
+  const firstDate = dateKeys[0];
+  const lastDate = dateKeys.at(-1);
+  if (!firstDate || !lastDate) {
+    return true;
+  }
+  return Boolean(
+    syncState?.warmedStartDate &&
+      syncState.warmedStartDate <= firstDate &&
+      syncState?.warmedEndDate &&
+      syncState.warmedEndDate >= lastDate
+  );
+}
+
+function parseLocalTimestampMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+async function warmMacroFactorAppCache(cacheDir: string, dateKeys: string[]): Promise<void> {
+  openMacroFactorApp();
+  await waitForMacroFactorRunning();
+  await sleep(APP_UI_SETTLE_MS);
+  dismissMacroFactorRestoreDialog();
+
+  const frame = await waitForMacroFactorWindowFrame();
+  clickMacroFactorWindowPoint(frame, 0.3, 0.965);
+  await sleep(APP_UI_SETTLE_MS * 2);
+
+  await moveMacroFactorFoodLogToToday(frame);
+  await walkMacroFactorFoodLogDates(frame, dateKeys);
+  await waitForCacheStable(cacheDir);
+}
+
+async function waitForMacroFactorRunning(): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < APP_LAUNCH_TIMEOUT_MS) {
+    if (isMacroFactorRunning()) {
+      return;
+    }
+    await sleep(500);
+  }
+  throw new Error(`Timed out waiting for ${MACROFACTOR_APP_NAME} to launch.`);
+}
+
+interface WindowFrame {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+async function waitForMacroFactorWindowFrame(): Promise<WindowFrame> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < APP_LAUNCH_TIMEOUT_MS) {
+    const frame = getMacroFactorWindowFrame();
+    if (frame && frame.width > 250 && frame.height > 250) {
+      return frame;
+    }
+    await sleep(500);
+  }
+  throw new Error(`Timed out waiting for the ${MACROFACTOR_APP_NAME} window.`);
+}
+
+function getMacroFactorWindowFrame(): WindowFrame | null {
+  return getMacroFactorWindowFrameFromCoreGraphics() ?? getMacroFactorWindowFrameFromSystemEvents();
+}
+
+function getMacroFactorWindowFrameFromCoreGraphics(): WindowFrame | null {
+  const script = `
+import CoreGraphics
+let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+let matches = windows.filter { window in
+  guard let owner = window[kCGWindowOwnerName as String] as? String,
+        let layer = window[kCGWindowLayer as String] as? Int,
+        let bounds = window[kCGWindowBounds as String] as? [String: Any],
+        let width = bounds["Width"] as? Double,
+        let height = bounds["Height"] as? Double else { return false }
+  return owner == "${MACROFACTOR_APP_NAME}" && layer == 0 && width > 250 && height > 250
+}
+if let window = matches.first,
+   let bounds = window[kCGWindowBounds as String] as? [String: Any],
+   let x = bounds["X"] as? Double,
+   let y = bounds["Y"] as? Double,
+   let width = bounds["Width"] as? Double,
+   let height = bounds["Height"] as? Double {
+  print("\\(Int(x)),\\(Int(y)),\\(Int(width)),\\(Int(height))")
+}
+`.trim();
+  const result = spawnSync('swift', ['-e', script], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    return null;
+  }
+  return parseWindowFrame(result.stdout);
+}
+
+function getMacroFactorWindowFrameFromSystemEvents(): WindowFrame | null {
+  const script = `
+tell application "System Events"
+  if not (exists process "${MACROFACTOR_APP_NAME}") then return ""
+  tell process "${MACROFACTOR_APP_NAME}"
+    set frontmost to true
+    if not (exists window 1) then return ""
+    set p to position of window 1
+    set s to size of window 1
+    return (item 1 of p as text) & "," & (item 2 of p as text) & "," & (item 1 of s as text) & "," & (item 2 of s as text)
+  end tell
+end tell
+`.trim();
+  const result = spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+  if (result.status !== 0) {
+    return null;
+  }
+  return parseWindowFrame(result.stdout);
+}
+
+function parseWindowFrame(output: string): WindowFrame | null {
+  const parts = output.trim().split(',').map(Number);
+  if (parts.length !== 4 || parts.some(part => !Number.isFinite(part))) {
+    return null;
+  }
+  return {
+    x: parts[0],
+    y: parts[1],
+    width: parts[2],
+    height: parts[3],
+  };
+}
+
+function dismissMacroFactorRestoreDialog(): void {
+  const script = `
+tell application "System Events"
+  if not (exists process "${MACROFACTOR_APP_NAME}") then return
+  tell process "${MACROFACTOR_APP_NAME}"
+    set frontmost to true
+    if not (exists window 1) then return
+    try
+      if description of window 1 is "alert" and (count of buttons of window 1) >= 2 then
+        click button 2 of window 1
+      end if
+    end try
+  end tell
+end tell
+`.trim();
+  spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+}
+
+async function moveMacroFactorFoodLogToToday(frame: WindowFrame): Promise<void> {
+  clickMacroFactorWindowPoint(frame, 0.5, 0.075);
+  await sleep(APP_UI_SETTLE_MS);
+  clickMacroFactorAbsolutePoint(frame.x + frame.width * 0.265, frame.y + frame.height - 98);
+  await sleep(APP_UI_SETTLE_MS);
+}
+
+async function walkMacroFactorFoodLogDates(frame: WindowFrame, dateKeys: string[]): Promise<void> {
+  const today = formatLocalDateKey(new Date());
+  const dateOffsets = dateKeys
+    .map(date => localDateOffset(today, date))
+    .filter((offset): offset is number => offset != null);
+  if (dateOffsets.length === 0) {
+    return;
+  }
+
+  const futureDays = Math.max(0, ...dateOffsets);
+  for (let index = 0; index < futureDays; index += 1) {
+    clickMacroFactorWindowPoint(frame, 0.64, 0.075);
+    await sleep(APP_DAY_NAVIGATION_SETTLE_MS);
+  }
+
+  if (futureDays > 0) {
+    await moveMacroFactorFoodLogToToday(frame);
+  }
+
+  const pastDays = Math.abs(Math.min(0, ...dateOffsets));
+  for (let index = 0; index < pastDays; index += 1) {
+    clickMacroFactorWindowPoint(frame, 0.36, 0.075);
+    await sleep(APP_DAY_NAVIGATION_SETTLE_MS);
+  }
+}
+
+function localDateOffset(fromDate: string, toDate: string): number | null {
+  const from = localDateNoonMs(fromDate);
+  const to = localDateNoonMs(toDate);
+  if (from == null || to == null) {
+    return null;
+  }
+  return Math.round((to - from) / (SECONDS_PER_DAY * 1000));
+}
+
+function localDateNoonMs(dateKey: string): number | null {
+  const match = dateKey.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+  const timestamp = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12, 0, 0, 0).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function clickMacroFactorWindowPoint(frame: WindowFrame, xRatio: number, yRatio: number): void {
+  clickMacroFactorAbsolutePoint(frame.x + frame.width * xRatio, frame.y + frame.height * yRatio);
+}
+
+function clickMacroFactorAbsolutePoint(x: number, y: number): void {
+  const script = `
+tell application "System Events"
+  if exists process "${MACROFACTOR_APP_NAME}" then set frontmost of process "${MACROFACTOR_APP_NAME}" to true
+  click at {${Math.round(x)}, ${Math.round(y)}}
+end tell
+`.trim();
+  const result = spawnSync('osascript', [], { input: script, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(commandError(result, `Failed to click ${MACROFACTOR_APP_NAME}.`));
+  }
 }
 
 function readCacheSyncState(): CacheSyncState | null {
@@ -1784,31 +2081,6 @@ function readCacheFingerprint(cacheDir: string): CacheFingerprint | null {
   };
 }
 
-async function waitForCacheRefresh(cacheDir: string, before: CacheFingerprint | null): Promise<void> {
-  const start = Date.now();
-  let latest = before;
-  let stableSince = Date.now();
-  let observedChange = false;
-
-  while (Date.now() - start < CACHE_REFRESH_TIMEOUT_MS) {
-    await sleep(CACHE_REFRESH_POLL_MS);
-    const current = readCacheFingerprint(cacheDir);
-    if (!current) {
-      continue;
-    }
-    if (!latest || current.value !== latest.value) {
-      observedChange = !before || current.value !== before.value || current.latestMtimeMs > before.latestMtimeMs;
-      latest = current;
-      stableSince = Date.now();
-    }
-    if (observedChange && Date.now() - stableSince >= CACHE_REFRESH_STABLE_MS) {
-      return;
-    }
-  }
-
-  console.error(`${MACROFACTOR_APP_NAME} cache refresh wait timed out; using the currently available local cache.`);
-}
-
 async function waitForCacheStable(cacheDir: string): Promise<void> {
   const start = Date.now();
   let latest = readCacheFingerprint(cacheDir);
@@ -1873,14 +2145,18 @@ function decodeRemoteDocumentPath(key: Buffer): string | null {
 }
 
 function findCachedUserPath(documents: Map<string, Record<string, unknown>>): string {
-  const users = Array.from(documents.keys())
-    .filter(documentPath => /^users\/[^/]+$/.test(documentPath))
-    .sort();
-  const userPath = users[0];
+  const userPath = findCachedUserPathOrNull(documents);
   if (!userPath) {
     throw new Error(`MacroFactor Firestore cache does not contain a user document. Open ${MACROFACTOR_APP_NAME}, wait for sync, then rerun.`);
   }
   return userPath;
+}
+
+function findCachedUserPathOrNull(documents: Map<string, Record<string, unknown>>): string | null {
+  const users = Array.from(documents.keys())
+    .filter(documentPath => /^users\/[^/]+$/.test(documentPath))
+    .sort();
+  return users[0] ?? null;
 }
 
 interface ParsedRemoteDocument {
