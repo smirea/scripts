@@ -94,7 +94,7 @@ main().catch((error) => {
 
 async function main() {
   await yargs(hideBin(process.argv))
-    .scriptName("convex")
+    .scriptName("convex-manage")
     .version(false)
     .strict()
     .command(
@@ -507,9 +507,9 @@ ${composeCommand} down
 Helper commands:
 
 \`\`\`sh
-convex.ts restart ${name}
-convex.ts dashboard ${name}
-convex.ts delete ${name}
+convex-manage restart ${name}
+convex-manage dashboard ${name}
+convex-manage delete ${name}
 \`\`\`
 
 Boot start: ${boot ? `enabled via ${launchAgentPath(name)}` : "disabled"}

@@ -15,7 +15,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'workouts', source: 'src/workouts.ts' },
   { name: 'voice-memo-parse', source: 'src/voice-memo-parse.ts' },
   { name: 'anylist', source: 'src/anylist.ts' },
-  { name: 'convex', source: 'src/convex.ts' },
+  { name: 'convex-manage', source: 'src/convex-manage.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
