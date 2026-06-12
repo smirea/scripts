@@ -7,6 +7,7 @@ const env = z.object({
   WHOOP_REFRESH_TOKEN: z.string().optional(),
   WHOOP_REDIRECT_URI: z.string(),
   GEMINI_API_KEY: z.string(),
+  GOOGLE_MAPS_API_KEY: z.string(),
   MACROFACTOR_CREDENTIALS: z.string(),
   ERA_FIT_CREDENTIALS: z.string().optional(),
   ERA_FIT_SESSION_COOKIE: z.string().optional(),
