@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -25,6 +26,11 @@ for (const wrapper of installedWrappers) {
   console.log(`Installed ${wrapper}`);
 }
 
+const devrageRoot = path.join(home, 'code', 'devrage');
+if (linkDevrageIfCheckedOut(devrageRoot)) {
+  console.log(`Linked devrage globally from ${devrageRoot}`);
+}
+
 function ensureWrapper(command: { name: string; source: string; target: string }): boolean {
   if (!existsSync(command.source)) {
     throw new Error(`Missing source for ${command.name}: ${command.source}`);
@@ -49,6 +55,35 @@ function ensureWrapper(command: { name: string; source: string; target: string }
     unlinkSync(command.target);
   }
   writeFileSync(command.target, wrapper, { encoding: 'utf8', mode: 0o755 });
+  return true;
+}
+
+function linkDevrageIfCheckedOut(repoRoot: string): boolean {
+  if (!existsSync(path.join(repoRoot, '.git'))) {
+    return false;
+  }
+
+  const packageJsonPath = path.join(repoRoot, 'package.json');
+  if (!existsSync(packageJsonPath)) {
+    return false;
+  }
+
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { name?: unknown };
+  if (packageJson.name !== 'devrage') {
+    return false;
+  }
+
+  const result = spawnSync('npm', ['link', '--silent'], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`npm link failed for ${repoRoot} with exit code ${result.status ?? 'unknown'}`);
+  }
+
   return true;
 }
 
