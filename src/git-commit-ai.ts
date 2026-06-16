@@ -40,7 +40,9 @@ if (import.meta.main) {
 
     const stagedDiff = getStagedDiff();
     if (!stagedDiff.trim()) {
-      throw new Error("No files staged for commit. Stage changes with `git add <files>` and retry.");
+      throw new Error(
+        "No files staged for commit. Stage changes with `git add <files>` and retry.",
+      );
     }
     console.log("\x1b[1mGenerating AI commit message...\x1b[0m");
     const prompt = buildPrompt(stagedDiff);
@@ -48,7 +50,9 @@ if (import.meta.main) {
     printGreyBlock(rawResponse);
     const commitMessage = extractCommitMessage(rawResponse);
     if (!commitMessage) {
-      throw new Error("Failed to extract commit message from AI response. Review the output above for details.");
+      throw new Error(
+        "Failed to extract commit message from AI response. Review the output above for details.",
+      );
     }
     console.log();
     console.log("\x1b[1mCommit message:\x1b[0m");
@@ -71,7 +75,10 @@ function handleWhoAction(action: WhoAction): void {
     console.log(`${PRIMARY_AI_EMAIL_KEY}=${currentEmail}`);
     return;
   }
-  runEnvManager(["global", "set", PRIMARY_AI_NAME_KEY, action.value], "env-manager global set failed");
+  runEnvManager(
+    ["global", "set", PRIMARY_AI_NAME_KEY, action.value],
+    "env-manager global set failed",
+  );
   console.log(`Updated env-manager global value ${PRIMARY_AI_NAME_KEY}=${action.value}`);
   console.log("Run `env-manager ts` in the scripts repo if env key definitions changed.");
   console.log(`${PRIMARY_AI_NAME_KEY}=${action.value}`);
@@ -106,15 +113,25 @@ function parseCliArgs(rawArgs: string[]): CliOptions {
 
 function resolveAiCommitterName(): string {
   return resolveValue(
-    [env.AI_COMITTER_NAME, env.AI_COMMITTER_NAME, env.DEFAULT_AI_COMITTER_NAME, env.DEFAULT_AI_COMMITTER_NAME],
-    "AI"
+    [
+      env.AI_COMITTER_NAME,
+      env.AI_COMMITTER_NAME,
+      env.DEFAULT_AI_COMITTER_NAME,
+      env.DEFAULT_AI_COMMITTER_NAME,
+    ],
+    "AI",
   );
 }
 
 function resolveAiCommitterEmail(): string {
   return resolveValue(
-    [env.AI_COMITTER_EMAIL, env.AI_COMMITTER_EMAIL, env.DEFAULT_AI_COMITTER_EMAIL, env.DEFAULT_AI_COMMITTER_EMAIL],
-    LEGACY_DEFAULT_AI_EMAIL
+    [
+      env.AI_COMITTER_EMAIL,
+      env.AI_COMMITTER_EMAIL,
+      env.DEFAULT_AI_COMITTER_EMAIL,
+      env.DEFAULT_AI_COMMITTER_EMAIL,
+    ],
+    LEGACY_DEFAULT_AI_EMAIL,
   );
 }
 
@@ -169,11 +186,9 @@ your commit message here
 }
 
 function callGemini(prompt: string): string {
-  const result = spawnSync(
-    "gemini",
-    ["-y", "-m", "gemini-2.5-flash", "--prompt", prompt],
-    { encoding: "utf8" }
-  );
+  const result = spawnSync("gemini", ["-y", "-m", "gemini-2.5-flash", "--prompt", prompt], {
+    encoding: "utf8",
+  });
   handleSpawnErrors(result, "gemini -y -m gemini-2.5-flash --prompt <...>");
   const combined = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   if (!combined.trim()) {
@@ -200,14 +215,22 @@ function normalizeCommitArgs(args: string[]): string[] {
 }
 
 function runGitCommit(identity: AiIdentity, args: string[]): void {
-  const result = spawnSync("git", ["commit", `--trailer=${buildCoAuthorTrailer(identity)}`, ...args], {
-    stdio: "inherit",
-  });
+  const result = spawnSync(
+    "git",
+    [
+      "-c",
+      `user.name='${identity.name.replace(/'/g, "")}'`,
+      "-c",
+      `user.email='${identity.email}'`,
+      "commit",
+      `--trailer='Co-Authored-By: stefan <steven.mirea@gmail.com>'"`,
+      ...args,
+    ],
+    {
+      stdio: "inherit",
+    },
+  );
   handleSpawnErrors(result, "git commit");
-}
-
-function buildCoAuthorTrailer(identity: AiIdentity): string {
-  return `Co-Authored-By: ${identity.name} <${identity.email}>`;
 }
 
 function assertInsideGitWorkTree(): void {
