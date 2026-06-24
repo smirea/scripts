@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "email-save",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-24",
+  "workers_dev": true,
+  "vars": {
+    "ALLOWED_SENDERS": "steven.mirea@gmail.com,me@stefanmirea.com"
+  },
+  "r2_buckets": [
+    {
+      "binding": "EMAIL_BUCKET",
+      "bucket_name": "email-save-archive"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "email-save",
+      "database_id": "6df53736-5be0-4ed1-a50c-55e981e21717",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

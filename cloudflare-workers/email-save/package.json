@@ -1,0 +1,20 @@
+{
+  "name": "email-save-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "migrate:local": "wrangler d1 migrations apply email-save --local",
+    "migrate:remote": "wrangler d1 migrations apply email-save --remote"
+  },
+  "dependencies": {
+    "postal-mime": "^2.6.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250601.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.104.0"
+  }
+}
