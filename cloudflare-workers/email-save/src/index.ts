@@ -14,8 +14,44 @@ interface ForwardedHeaders {
   subject?: string;
 }
 
+interface GmailForwardedConversation {
+  subject: string | null;
+  parts: GmailForwardedPart[];
+}
+
+interface GmailForwardedPart extends ForwardedHeaders {
+  index: number;
+  text: string;
+  html: string | null;
+}
+
+type ParsedEmail = Awaited<ReturnType<typeof PostalMime.parse>>;
+type ParsedAttachments = NonNullable<ParsedEmail['attachments']>;
+
+interface StoredEmailInput {
+  id: string;
+  dedupeKey: string;
+  receivedAt: string;
+  fromAddr: string;
+  toAddr: string;
+  subject: string | null;
+  normalizedSubject: string | null;
+  messageId: string | null;
+  inReplyTo: string | null;
+  referencesHeader: string | null;
+  threadKey: string;
+  threadBasis: string;
+  forwarded: ForwardedHeaders;
+  raw: ArrayBuffer | string;
+  headers: Record<string, unknown>;
+  text: string | null;
+  html: string | null;
+  attachments: ParsedAttachments;
+}
+
 interface EmailRow {
   id: string;
+  dedupe_key: string;
   received_at: string;
   from_addr: string;
   to_addr: string;
@@ -51,93 +87,21 @@ export default {
       return;
     }
 
-    const id = crypto.randomUUID();
     const receivedAt = new Date().toISOString();
-    const datePrefix = receivedAt.slice(0, 10);
-    const baseKey = `emails/${datePrefix}/${id}`;
     const subject = parsed.subject || message.headers.get('subject') || null;
-    const normalizedSubject = normalizeSubject(subject);
-    const forwarded = extractForwardedHeaders(parsed.text || htmlToText(parsed.html || ''));
-    const thread = await buildThreadKey(message.headers, normalizedSubject, forwarded);
-    const rawKey = `${baseKey}/raw.eml`;
-    const headersKey = `${baseKey}/headers.json`;
-    const text = parsed.text || null;
-    const html = parsed.html || null;
-    const textKey = text ? `${baseKey}/body.txt` : null;
-    const htmlKey = html ? `${baseKey}/body.html` : null;
-
-    await env.EMAIL_BUCKET.put(rawKey, raw, {
-      httpMetadata: { contentType: 'message/rfc822' },
+    const emails = await buildEmailsToStore({
+      raw,
+      parsed,
+      fromAddr,
+      toAddr: message.to,
+      receivedAt,
+      subject,
+      headers: message.headers,
     });
 
-    await env.EMAIL_BUCKET.put(headersKey, JSON.stringify(headersToObject(message.headers), null, 2), {
-      httpMetadata: { contentType: 'application/json; charset=utf-8' },
-    });
-
-    if (textKey) {
-      await env.EMAIL_BUCKET.put(textKey, text, {
-        httpMetadata: { contentType: 'text/plain; charset=utf-8' },
-      });
+    for (const email of emails) {
+      await storeEmail(env, email);
     }
-
-    if (htmlKey) {
-      await env.EMAIL_BUCKET.put(htmlKey, html, {
-        httpMetadata: { contentType: 'text/html; charset=utf-8' },
-      });
-    }
-
-    const attachmentRows = await storeAttachments(env.EMAIL_BUCKET, baseKey, id, parsed.attachments);
-
-    await env.DB.batch([
-      env.DB.prepare(`
-        INSERT INTO emails (
-          id, received_at, from_addr, to_addr, subject, normalized_subject,
-          message_id, in_reply_to, references_header, thread_key, thread_basis,
-          forwarded_from, forwarded_to, forwarded_date, forwarded_subject,
-          raw_key, headers_key, text_key, html_key, attachment_count, raw_size
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).bind(
-        id,
-        receivedAt,
-        fromAddr,
-        message.to,
-        subject,
-        normalizedSubject,
-        message.headers.get('message-id'),
-        message.headers.get('in-reply-to'),
-        message.headers.get('references'),
-        thread.key,
-        thread.basis,
-        forwarded.from || null,
-        forwarded.to || null,
-        forwarded.date || null,
-        forwarded.subject || null,
-        rawKey,
-        headersKey,
-        textKey,
-        htmlKey,
-        attachmentRows.length,
-        raw.byteLength,
-      ),
-      ...attachmentRows.map((attachment) =>
-        env.DB.prepare(`
-          INSERT INTO attachments (
-            id, email_id, attachment_index, filename, mime_type, content_id, size, r2_key
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(
-          attachment.id,
-          attachment.emailId,
-          attachment.index,
-          attachment.filename,
-          attachment.mimeType,
-          attachment.contentId,
-          attachment.size,
-          attachment.key,
-        ),
-      ),
-    ]);
   },
 
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -209,6 +173,257 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+async function buildEmailsToStore(input: {
+  raw: ArrayBuffer;
+  parsed: ParsedEmail;
+  fromAddr: string;
+  toAddr: string;
+  receivedAt: string;
+  subject: string | null;
+  headers: Headers;
+}): Promise<StoredEmailInput[]> {
+  const text = input.parsed.text || null;
+  const html = input.parsed.html || null;
+  const bodyText = text || htmlToText(html || '');
+  const gmailConversation = parseGmailForwardedConversation(bodyText, html, input.subject);
+
+  if (gmailConversation?.parts.length) {
+    return buildGmailForwardedEmails(input, gmailConversation);
+  }
+
+  const normalizedSubject = normalizeSubject(input.subject);
+  const forwarded = extractForwardedHeaders(bodyText);
+  const thread = await buildThreadKey(input.headers, normalizedSubject, forwarded);
+  const dedupeKey = await buildRegularDedupeKey(input);
+  const id = await idFromDedupeKey(dedupeKey);
+
+  return [{
+    id,
+    dedupeKey,
+    receivedAt: input.receivedAt,
+    fromAddr: input.fromAddr,
+    toAddr: input.toAddr,
+    subject: input.subject,
+    normalizedSubject,
+    messageId: input.headers.get('message-id'),
+    inReplyTo: input.headers.get('in-reply-to'),
+    referencesHeader: input.headers.get('references'),
+    threadKey: thread.key,
+    threadBasis: thread.basis,
+    forwarded,
+    raw: input.raw,
+    headers: headersToObject(input.headers),
+    text,
+    html,
+    attachments: input.parsed.attachments,
+  }];
+}
+
+async function buildGmailForwardedEmails(
+  input: {
+    raw: ArrayBuffer;
+    parsed: ParsedEmail;
+    fromAddr: string;
+    toAddr: string;
+    receivedAt: string;
+    subject: string | null;
+    headers: Headers;
+  },
+  conversation: GmailForwardedConversation,
+): Promise<StoredEmailInput[]> {
+  const sourceHeaders = headersToObject(input.headers);
+  const normalizedConversationSubject = normalizeSubject(conversation.subject || input.subject);
+  const sourceMessageId = input.headers.get('message-id');
+  const sourceHash = await sha256Bytes(input.raw);
+  const threadSeed = normalizedConversationSubject || sourceMessageId || sourceHash;
+  const threadKey = `gmail-forwarded:${await sha256(threadSeed)}`;
+  const threadBasis = 'gmail-forwarded-conversation';
+  const emails: StoredEmailInput[] = [];
+
+  for (const part of conversation.parts) {
+    const subject = part.subject || conversation.subject || input.subject;
+    const normalizedSubject = normalizeSubject(subject);
+    const dedupeKey = [
+      'gmail-forwarded',
+      normalizedConversationSubject || '',
+      String(part.index),
+      normalizeAddressish(part.from),
+      normalizeAddressish(part.to),
+      normalizeDateish(part.date),
+      normalizedSubject || '',
+    ].join(':');
+    const id = await idFromDedupeKey(dedupeKey);
+    const receivedAt = forwardedDateToIso(part.date) || input.receivedAt;
+    const messageId = `<gmail-forwarded-${id}@email-save.local>`;
+    const fromAddr = extractEmailAddress(part.from) || part.from || input.fromAddr;
+    const toAddr = extractEmailAddress(part.to) || part.to || input.toAddr;
+    const raw = buildSyntheticRawEmail({
+      from: part.from || fromAddr,
+      to: part.to || toAddr,
+      date: part.date || receivedAt,
+      subject,
+      messageId,
+      text: part.text,
+      sourceMessageId,
+      forwardedIndex: part.index,
+    });
+
+    emails.push({
+      id,
+      dedupeKey,
+      receivedAt,
+      fromAddr,
+      toAddr,
+      subject,
+      normalizedSubject,
+      messageId,
+      inReplyTo: input.headers.get('in-reply-to'),
+      referencesHeader: input.headers.get('references'),
+      threadKey,
+      threadBasis,
+      forwarded: {
+        from: part.from,
+        to: part.to,
+        date: part.date,
+        subject: subject || undefined,
+      },
+      raw,
+      headers: {
+        source: {
+          from: input.fromAddr,
+          to: input.toAddr,
+          subject: input.subject,
+          message_id: sourceMessageId,
+          references: input.headers.get('references'),
+          in_reply_to: input.headers.get('in-reply-to'),
+        },
+        source_headers: sourceHeaders,
+        gmail_forwarded_conversation: {
+          subject: conversation.subject,
+          part_index: part.index,
+          part_count: conversation.parts.length,
+        },
+        forwarded_headers: {
+          from: part.from || null,
+          to: part.to || null,
+          date: part.date || null,
+          subject: subject || null,
+        },
+      },
+      text: part.text,
+      html: part.html,
+      attachments: [],
+    });
+  }
+
+  return emails;
+}
+
+async function storeEmail(env: Env, email: StoredEmailInput): Promise<void> {
+  const baseKey = `emails/${email.id}`;
+  const rawKey = `${baseKey}/raw.eml`;
+  const headersKey = `${baseKey}/headers.json`;
+  const textKey = email.text ? `${baseKey}/body.txt` : null;
+  const htmlKey = email.html ? `${baseKey}/body.html` : null;
+  const rawSize = byteLength(email.raw);
+
+  await env.EMAIL_BUCKET.put(rawKey, email.raw, {
+    httpMetadata: { contentType: 'message/rfc822' },
+  });
+
+  await env.EMAIL_BUCKET.put(headersKey, JSON.stringify(email.headers, null, 2), {
+    httpMetadata: { contentType: 'application/json; charset=utf-8' },
+  });
+
+  if (textKey && email.text) {
+    await env.EMAIL_BUCKET.put(textKey, email.text, {
+      httpMetadata: { contentType: 'text/plain; charset=utf-8' },
+    });
+  }
+
+  if (htmlKey && email.html) {
+    await env.EMAIL_BUCKET.put(htmlKey, email.html, {
+      httpMetadata: { contentType: 'text/html; charset=utf-8' },
+    });
+  }
+
+  const attachmentRows = await storeAttachments(env.EMAIL_BUCKET, baseKey, email.id, email.attachments);
+
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM attachments WHERE email_id = ?').bind(email.id),
+    env.DB.prepare(`
+      INSERT INTO emails (
+        id, dedupe_key, received_at, from_addr, to_addr, subject, normalized_subject,
+        message_id, in_reply_to, references_header, thread_key, thread_basis,
+        forwarded_from, forwarded_to, forwarded_date, forwarded_subject,
+        raw_key, headers_key, text_key, html_key, attachment_count, raw_size
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(dedupe_key) DO UPDATE SET
+        received_at = excluded.received_at,
+        from_addr = excluded.from_addr,
+        to_addr = excluded.to_addr,
+        subject = excluded.subject,
+        normalized_subject = excluded.normalized_subject,
+        message_id = excluded.message_id,
+        in_reply_to = excluded.in_reply_to,
+        references_header = excluded.references_header,
+        thread_key = excluded.thread_key,
+        thread_basis = excluded.thread_basis,
+        forwarded_from = excluded.forwarded_from,
+        forwarded_to = excluded.forwarded_to,
+        forwarded_date = excluded.forwarded_date,
+        forwarded_subject = excluded.forwarded_subject,
+        raw_key = excluded.raw_key,
+        headers_key = excluded.headers_key,
+        text_key = excluded.text_key,
+        html_key = excluded.html_key,
+        attachment_count = excluded.attachment_count,
+        raw_size = excluded.raw_size
+    `).bind(
+      email.id,
+      email.dedupeKey,
+      email.receivedAt,
+      email.fromAddr,
+      email.toAddr,
+      email.subject,
+      email.normalizedSubject,
+      email.messageId,
+      email.inReplyTo,
+      email.referencesHeader,
+      email.threadKey,
+      email.threadBasis,
+      email.forwarded.from || null,
+      email.forwarded.to || null,
+      email.forwarded.date || null,
+      email.forwarded.subject || null,
+      rawKey,
+      headersKey,
+      textKey,
+      htmlKey,
+      attachmentRows.length,
+      rawSize,
+    ),
+    ...attachmentRows.map((attachment) =>
+      env.DB.prepare(`
+        INSERT INTO attachments (
+          id, email_id, attachment_index, filename, mime_type, content_id, size, r2_key
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        attachment.id,
+        attachment.emailId,
+        attachment.index,
+        attachment.filename,
+        attachment.mimeType,
+        attachment.contentId,
+        attachment.size,
+        attachment.key,
+      ),
+    ),
+  ]);
+}
+
 function isAllowedSender(address: string, allowed: string): boolean {
   const normalized = address.trim().toLowerCase();
   return allowed.split(',').map((entry) => entry.trim().toLowerCase()).includes(normalized);
@@ -231,6 +446,142 @@ function normalizeSubject(subject: string | null | undefined): string | null {
   }
 
   return value.toLowerCase().replace(/\s+/g, ' ') || null;
+}
+
+export function parseGmailForwardedConversation(
+  text: string,
+  html: string | null = null,
+  fallbackSubject: string | null = null,
+): GmailForwardedConversation | null {
+  const lines = normalizeLineEndings(text).split('\n');
+  const markerIndex = lines.findIndex((line) => line.trim().toLowerCase() === 'forwarded conversation');
+  if (markerIndex === -1) return null;
+
+  const separatorIndex = lines.findIndex((line, index) => index > markerIndex && /^-{5,}$/.test(line.trim()));
+  if (separatorIndex === -1) return null;
+
+  const subject = firstHeader(lines.slice(markerIndex + 1, separatorIndex).join('\n'), 'subject') || fallbackSubject;
+  const contentStart = nextNonBlankLine(lines, separatorIndex + 1);
+  const starts: number[] = [];
+
+  for (let index = contentStart; index < lines.length; index++) {
+    if (!/^From:\s*/i.test(lines[index] || '')) continue;
+    if (starts.length === 0 || previousNonBlankLine(lines, index - 1) === '----------') {
+      starts.push(index);
+    }
+  }
+
+  if (!starts.length) return null;
+
+  const htmlParts = splitGmailForwardedHtml(html, starts.length);
+  const parts = starts.map((start, index) => {
+    const end = starts[index + 1] ?? lines.length;
+    const blockLines = trimBlockLines(lines.slice(start, end));
+    const part = parseGmailForwardedPart(blockLines);
+
+    return {
+      ...part,
+      index,
+      subject: part.subject || subject || undefined,
+      html: htmlParts[index] || null,
+    };
+  }).filter((part) => part.from || part.date || part.text);
+
+  return parts.length ? { subject: subject || null, parts } : null;
+}
+
+function parseGmailForwardedPart(lines: string[]): Omit<GmailForwardedPart, 'index' | 'html'> {
+  const headers: Record<string, string> = {};
+  let currentHeader: string | null = null;
+  let bodyStart = 0;
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index] || '';
+
+    if (!line.trim()) {
+      bodyStart = index + 1;
+      break;
+    }
+
+    const match = line.match(/^([A-Za-z][A-Za-z-]*):\s*(.*)$/);
+    if (match) {
+      currentHeader = match[1].toLowerCase();
+      headers[currentHeader] = match[2].trim();
+      bodyStart = index + 1;
+      continue;
+    }
+
+    if (!currentHeader) {
+      bodyStart = index;
+      break;
+    }
+
+    headers[currentHeader] = `${headers[currentHeader]} ${line.trim()}`.trim();
+    bodyStart = index + 1;
+  }
+
+  return {
+    from: cleanForwardedHeader(headers.from),
+    to: cleanForwardedHeader(headers.to),
+    date: cleanForwardedHeader(headers.date),
+    subject: cleanForwardedHeader(headers.subject),
+    text: trimText(lines.slice(bodyStart).join('\n')),
+  };
+}
+
+function splitGmailForwardedHtml(html: string | null, expectedParts: number): string[] {
+  if (!html) return [];
+
+  const starts = [...html.matchAll(/<div\b[^>]*class="[^"]*\bgmail_attr\b[^"]*"[^>]*>/gi)]
+    .map((match) => match.index)
+    .filter((index): index is number => typeof index === 'number');
+
+  if (starts.length < expectedParts) return [];
+
+  return starts.slice(0, expectedParts).map((start, index) =>
+    html.slice(start, starts[index + 1] ?? html.length).trim(),
+  );
+}
+
+function cleanForwardedHeader(value: string | undefined): string | undefined {
+  return value
+    ?.replace(/\s+/g, ' ')
+    .replace(/<\s+/g, '<')
+    .replace(/\s+>/g, '>')
+    .trim() || undefined;
+}
+
+function nextNonBlankLine(lines: string[], start: number): number {
+  let index = start;
+  while (index < lines.length && !lines[index].trim()) index++;
+  return index;
+}
+
+function previousNonBlankLine(lines: string[], start: number): string | null {
+  for (let index = start; index >= 0; index--) {
+    const line = lines[index]?.trim();
+    if (line) return line;
+  }
+
+  return null;
+}
+
+function trimBlockLines(lines: string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+
+  while (start < end && !lines[start].trim()) start++;
+  while (end > start && (!lines[end - 1].trim() || /^-{5,}$/.test(lines[end - 1].trim()))) end--;
+
+  return lines.slice(start, end);
+}
+
+function trimText(text: string): string {
+  return text.replace(/^\s+|\s+$/g, '');
+}
+
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n?/g, '\n');
 }
 
 async function buildThreadKey(
@@ -256,6 +607,89 @@ async function buildThreadKey(
   }
 
   return { key: `message:${crypto.randomUUID()}`, basis: 'message' };
+}
+
+async function buildRegularDedupeKey(input: {
+  raw: ArrayBuffer;
+  subject: string | null;
+  fromAddr: string;
+  toAddr: string;
+  headers: Headers;
+}): Promise<string> {
+  const messageId = input.headers.get('message-id');
+  if (messageId) return `message-id:${messageId.trim().toLowerCase()}`;
+
+  const rawHash = await sha256Bytes(input.raw);
+  return [
+    'raw',
+    input.fromAddr.trim().toLowerCase(),
+    input.toAddr.trim().toLowerCase(),
+    normalizeSubject(input.subject) || '',
+    rawHash,
+  ].join(':');
+}
+
+async function idFromDedupeKey(dedupeKey: string): Promise<string> {
+  return sha256(dedupeKey);
+}
+
+function forwardedDateToIso(value: string | undefined): string | null {
+  if (!value) return null;
+
+  const normalized = value
+    .replace(/[\u00a0\u202f]/g, ' ')
+    .replace(/\bat\b/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const timestamp = Date.parse(normalized);
+
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
+function extractEmailAddress(value: string | undefined): string | null {
+  if (!value) return null;
+  const bracketed = value.match(/<([^<>@\s]+@[^<>\s]+)>/);
+  if (bracketed) return bracketed[1].trim().toLowerCase();
+
+  const plain = value.match(/\b[^@\s<>]+@[^@\s<>]+\b/);
+  return plain ? plain[0].trim().toLowerCase() : null;
+}
+
+function normalizeAddressish(value: string | undefined): string {
+  return (extractEmailAddress(value) || value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function normalizeDateish(value: string | undefined): string {
+  return forwardedDateToIso(value) || (value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function buildSyntheticRawEmail(input: {
+  from: string;
+  to: string;
+  date: string;
+  subject: string | null;
+  messageId: string;
+  text: string;
+  sourceMessageId: string | null;
+  forwardedIndex: number;
+}): string {
+  const headers = [
+    ['From', input.from],
+    ['To', input.to],
+    ['Date', input.date],
+    ['Subject', input.subject || '(no subject)'],
+    ['Message-ID', input.messageId],
+    ['X-Email-Save-Source-Message-ID', input.sourceMessageId || ''],
+    ['X-Email-Save-Forwarded-Index', String(input.forwardedIndex)],
+    ['MIME-Version', '1.0'],
+    ['Content-Type', 'text/plain; charset=utf-8'],
+  ];
+
+  return `${headers.map(([name, value]) => `${name}: ${value}`).join('\r\n')}\r\n\r\n${input.text}`;
+}
+
+function byteLength(value: ArrayBuffer | string): number {
+  return typeof value === 'string' ? encoder.encode(value).byteLength : value.byteLength;
 }
 
 function extractForwardedHeaders(body: string): ForwardedHeaders {
@@ -348,6 +782,11 @@ function clampLimit(value: string | null): number {
 
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', encoder.encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function sha256Bytes(value: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', value);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
