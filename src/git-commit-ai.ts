@@ -219,11 +219,11 @@ function runGitCommit(identity: AiIdentity, args: string[]): void {
     "git",
     [
       "-c",
-      `user.name='${identity.name.replace(/'/g, "")}'`,
+      `user.name=${identity.name}`,
       "-c",
-      `user.email='${identity.email}'`,
+      `user.email=${identity.email}`,
       "commit",
-      `--trailer='Co-Authored-By: stefan <steven.mirea@gmail.com>'"`,
+      `--trailer=Co-Authored-By: stefan <steven.mirea@gmail.com>`,
       ...args,
     ],
     {
