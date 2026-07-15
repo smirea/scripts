@@ -59,6 +59,12 @@ interface CatalogArgs {
   quiet: boolean;
 }
 
+interface LazyClusterRequest {
+  path: string;
+  params: JsonObject;
+  sections: string[];
+}
+
 if (import.meta.main) {
   runCli().catch(error => {
     console.error(error instanceof Error ? error.message : String(error));
@@ -142,16 +148,23 @@ async function runCatalog(args: CatalogArgs): Promise<void> {
 
   const token = env.COOKUNITY_ACCESS_TOKEN?.trim();
   if (!token) {
-    throw new Error(
-      'COOKUNITY_ACCESS_TOKEN is not set. Copy the Authorization bearer token from a signed-in CookUnity API request into .env.local.',
-    );
+    throw new Error(tokenRecoveryMessage('missing'));
   }
 
   const client = new CookUnityClient(token);
   const products = new Map<string, CatalogProduct>();
   const menu = await client.get(`/web/view/menu/${args.date}/clustered-results`);
   collectProducts(menu, products, ['Menu'], args.date);
+  const clusters = extractLazyClusters(menu);
+  log(args.quiet, `Fetching ${clusters.length} menu sections...`);
+  await mapConcurrent(clusters, args.concurrency, async cluster => {
+    const response = await client.get(withQuery(cluster.path, cluster.params));
+    collectProducts(response, products, cluster.sections, args.date);
+  });
   await collectSearchPages(client, args.date, products);
+  if (products.size === 0) {
+    throw new Error('CookUnity returned no products. The menu API response may have changed.');
+  }
   log(args.quiet, `Found ${products.size} unique items from the menu and search APIs.`);
 
   if (args.details) {
@@ -168,7 +181,7 @@ class CookUnityClient {
   readonly authorization: string;
 
   constructor(token: string) {
-    this.authorization = /^Bearer\s/i.test(token) ? token : `Bearer ${token}`;
+    this.authorization = token.replace(/^Bearer\s+/i, '');
   }
 
   async get(requestPath: string): Promise<unknown> {
@@ -186,7 +199,7 @@ class CookUnityClient {
     if (!response.ok) {
       const reason = apiErrorMessage(text);
       if (response.status === 401) {
-        throw new Error(`CookUnity rejected the access token (401). ${reason}`.trim());
+        throw new Error(tokenRecoveryMessage('invalid or expired', reason));
       }
       throw new Error(`CookUnity API returned ${response.status} for ${url}. ${reason}`.trim());
     }
@@ -267,6 +280,31 @@ function findProduct(
     match = parseProduct(record, sections, date);
   });
   return match;
+}
+
+function extractLazyClusters(root: unknown): LazyClusterRequest[] {
+  const body = asObject(root)?.body;
+  if (!Array.isArray(body)) return [];
+
+  const requests: LazyClusterRequest[] = [];
+  let sectionTitle: string | null = null;
+  for (const item of body) {
+    const attributes = asObject(asObject(item)?.attributes);
+    const header = asObject(asObject(attributes?.fullMenuHeader)?.attributes);
+    sectionTitle = readText(header?.title) ?? sectionTitle;
+    const anchor = readText(header?.anchor);
+    const lazy = asObject(asObject(attributes?.lazyCluster)?.attributes);
+    const path = readString(lazy?.path);
+    const params = asObject(lazy?.params);
+    if (!path || !params) continue;
+
+    requests.push({
+      path,
+      params,
+      sections: unique(['Menu', sectionTitle, anchor]),
+    });
+  }
+  return requests;
 }
 
 function walkObjects(
@@ -429,7 +467,13 @@ async function mapConcurrent<T>(
 function readText(value: unknown): string | null {
   if (typeof value === 'string') return value.trim() || null;
   const record = asObject(value);
-  return readString(record?.value) ?? readString(record?.text) ?? readString(record?.title);
+  if (!record) return null;
+  return (
+    readString(record.value) ??
+    readText(record.text) ??
+    readText(record.title) ??
+    readText(record.attributes)
+  );
 }
 
 function readString(value: unknown): string | null {
@@ -460,6 +504,16 @@ function unique(values: Array<string | null>): string[] {
   return [...new Set(values.map(value => value?.trim()).filter((value): value is string => Boolean(value)))];
 }
 
+function withQuery(pathname: string, params: JsonObject): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      query.set(key, String(value));
+    }
+  }
+  return `${pathname}?${query}`;
+}
+
 function parseOutputFormat(value: string): OutputFormat {
   if ((OUTPUT_FORMATS as readonly string[]).includes(value)) return value as OutputFormat;
   throw new Error(`Invalid output format: ${value}`);
@@ -472,6 +526,16 @@ function apiErrorMessage(body: string): string {
   } catch {
     return body.trim().slice(0, 300);
   }
+}
+
+function tokenRecoveryMessage(status: string, reason = ''): string {
+  const detail = reason ? ` (${reason})` : '';
+  return `CookUnity access token is ${status}${detail}.
+
+Refresh it with the signed-in CookUnity Chrome tab:
+1. Run /Users/stefan/code/chrome-browsergate/scripts/invoke get-session https://subscription.cookunity.com/menu --json
+2. Copy the token field into COOKUNITY_ACCESS_TOKEN in /Users/stefan/code/scripts/.env.local.
+3. Run the command again.`;
 }
 
 function assertDate(value: string): void {
