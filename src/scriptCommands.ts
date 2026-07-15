@@ -17,6 +17,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'anylist', source: 'src/anylist.ts' },
   { name: 'convex-manage', source: 'src/convex-manage.ts' },
   { name: 'google-maps', source: 'src/google-maps.ts' },
+  { name: 'cookunity', source: 'src/cookunity.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {

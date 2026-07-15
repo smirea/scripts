@@ -2,6 +2,7 @@
 import { z } from 'zod';
 
 const env = z.object({
+  COOKUNITY_ACCESS_TOKEN: z.string().optional(),
   WHOOP_CLIENT_ID: z.string(),
   WHOOP_CLIENT_SECRET: z.string(),
   WHOOP_REFRESH_TOKEN: z.string().optional(),
