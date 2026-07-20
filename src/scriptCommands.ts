@@ -20,6 +20,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'cookunity', source: 'src/cookunity.ts' },
   { name: 'bgstats', source: 'src/bgstats.ts' },
   { name: 'clocktracker', source: 'src/clocktracker.ts' },
+  { name: 'email-inbox', source: 'src/email-inbox.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {

@@ -23,6 +23,8 @@ const env = z.object({
   DEFAULT_AI_COMMITTER_EMAIL: z.string().optional(),
   ANYLIST_CREDENTIALS: z.string().regex(/.+@.+:.+/).optional(),
   ERA_FIT_FIREBASE_API_KEY: z.string().optional(),
+  EMAIL_INBOX_URL: z.url(),
+  EMAIL_INBOX_TOKEN: z.string(),
 }).parse(process.env);
 
 export default env;
