@@ -19,6 +19,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'google-maps', source: 'src/google-maps.ts' },
   { name: 'cookunity', source: 'src/cookunity.ts' },
   { name: 'bgstats', source: 'src/bgstats.ts' },
+  { name: 'clocktracker', source: 'src/clocktracker.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
