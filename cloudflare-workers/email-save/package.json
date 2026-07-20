@@ -10,11 +10,11 @@
     "migrate:remote": "wrangler d1 migrations apply email-save --remote"
   },
   "dependencies": {
-    "postal-mime": "^2.6.3"
+    "postal-mime": "^2.7.5"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250601.0",
-    "typescript": "^5.9.3",
-    "wrangler": "^4.104.0"
+    "@cloudflare/workers-types": "^5.20260719.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.112.0"
   }
 }
