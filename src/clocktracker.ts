@@ -33,6 +33,7 @@ const BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> 
   'clocktracker:name:wallace': 'D39F5057-56A8-45AC-B852-1A8AC025B322',
   'clocktracker:name:wayne': 'F6CB3865-D2ED-417B-96EA-512EDF16F2BB',
   'clocktracker:name:z.-bill': '41DEC3C1-EE9B-4E3E-9F1A-E374D34CE052',
+  'clocktracker:username:cygnets': '3F772AF2-C583-42FC-A9E5-140C8D47DC47',
   'clocktracker:8bde7e96-5a58-45fe-b0f6-4922fef647b2': 'F3A51F73-7745-4252-A031-B57C5E236B68',
   'clocktracker:93c739ff-3e6e-44f4-bce1-d91fa8196f75': '053BA30C-EC82-4B8D-A72C-D929242B9316',
   'clocktracker:f92cc15b-61e3-400c-8990-2a4c36307067': '6B21A7BC-F5A3-41D2-A137-13E600FF9F94',
@@ -333,7 +334,7 @@ function toBgStatsPlay(
 
 function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, string>): BgStatsPlayer[] {
   const tokens = game.grimoire.at(-1)?.tokens ?? [];
-  return [...tokens]
+  const players = [...tokens]
     .sort((left, right) => left.order - right.order)
     .flatMap(token => {
       const name = token.player?.display_name?.trim()
@@ -353,6 +354,30 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         team: titleCase(token.alignment),
       }];
     });
+
+  if (!game.is_storyteller) {
+    for (const rawName of [game.storyteller, ...game.co_storytellers]) {
+      const name = rawName?.trim();
+      if (!name) {
+        continue;
+      }
+      const sourcePlayerId = name.startsWith('@')
+        ? `clocktracker:username:${normalizeSourceId(name.slice(1))}`
+        : `clocktracker:name:${normalizeSourceId(name)}`;
+      if (players.some(player => player.sourcePlayerId === sourcePlayerId)) {
+        continue;
+      }
+      players.push({
+        name: mappedPlayerName(sourcePlayerId, name.replace(/^@/, ''), bgStatsPlayerNames),
+        sourcePlayerId,
+        winner: game.win_v2 === 'GOOD_WINS',
+        role: 'Storyteller',
+        team: 'Storyteller',
+      });
+    }
+  }
+
+  return players;
 }
 
 function ownerPlayer(
