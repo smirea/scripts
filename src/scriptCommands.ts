@@ -18,6 +18,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'convex-manage', source: 'src/convex-manage.ts' },
   { name: 'google-maps', source: 'src/google-maps.ts' },
   { name: 'cookunity', source: 'src/cookunity.ts' },
+  { name: 'bgstats', source: 'src/bgstats.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
