@@ -9,6 +9,9 @@ import { hideBin } from 'yargs/helpers';
 
 const API_BASE_URL = 'https://clocktracker.app';
 const OUTPUT_FORMATS = ['bgstats', 'table'] as const;
+const NEW_BG_STATS_PLAYER_NAME_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
+  'clocktracker:name:grant': 'Grant (austin, botc)',
+};
 const BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
   'clocktracker:name:amanda': 'C353A37E-86AB-4A2E-BF8F-61E43411AAAE',
   'clocktracker:name:anna': 'E5EE821E-D347-4104-A779-2F0D8E081285',
@@ -19,7 +22,6 @@ const BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> 
   'clocktracker:name:faith': '3BD1CFEA-8A53-4DD4-A1CC-2E6D52E68D77',
   'clocktracker:name:gabby': '946E0CA5-49A5-4B35-BD72-05725A5B84CC',
   'clocktracker:name:garret': '9B273A3A-BC8E-480D-85F9-7C585B45CABE',
-  'clocktracker:name:grant': 'EE1A9712-A23B-4D9E-8E65-64920F9E2911',
   'clocktracker:name:jay': 'B821BA7E-2847-4D95-BA2F-7A10FD79A887',
   'clocktracker:name:johnmark': 'D2F38D5B-6AFC-45C9-9396-A3915FE43E72',
   'clocktracker:name:michael': 'D3887D3F-8CD2-424E-83CB-1AE045A74337',
@@ -404,6 +406,10 @@ function mappedPlayerName(
   fallbackName: string,
   bgStatsPlayerNames: Map<string, string>,
 ): string {
+  const newPlayerName = NEW_BG_STATS_PLAYER_NAME_BY_CLOCKTRACKER_ID[clockTrackerId];
+  if (newPlayerName) {
+    return newPlayerName;
+  }
   const bgStatsUuid = BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID[clockTrackerId];
   if (!bgStatsUuid) {
     return fallbackName;
