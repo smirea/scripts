@@ -9,6 +9,34 @@ import { hideBin } from 'yargs/helpers';
 
 const API_BASE_URL = 'https://clocktracker.app';
 const OUTPUT_FORMATS = ['bgstats', 'table'] as const;
+const BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
+  'clocktracker:name:amanda': 'C353A37E-86AB-4A2E-BF8F-61E43411AAAE',
+  'clocktracker:name:anna': 'E5EE821E-D347-4104-A779-2F0D8E081285',
+  'clocktracker:name:ben-c': 'A83787E1-395F-449F-9C08-7386ED715627',
+  'clocktracker:name:brittany': 'D472C086-0778-48FB-A476-68FA011C72EC',
+  'clocktracker:name:dak': '60EAF59A-E459-49D0-9E56-6AA559F1BBE6',
+  'clocktracker:name:david-m': '6DA0F3E7-F0DC-436E-8159-FDB4B1DC37A3',
+  'clocktracker:name:faith': '3BD1CFEA-8A53-4DD4-A1CC-2E6D52E68D77',
+  'clocktracker:name:gabby': '946E0CA5-49A5-4B35-BD72-05725A5B84CC',
+  'clocktracker:name:garret': '9B273A3A-BC8E-480D-85F9-7C585B45CABE',
+  'clocktracker:name:grant': 'EE1A9712-A23B-4D9E-8E65-64920F9E2911',
+  'clocktracker:name:jay': 'B821BA7E-2847-4D95-BA2F-7A10FD79A887',
+  'clocktracker:name:johnmark': 'D2F38D5B-6AFC-45C9-9396-A3915FE43E72',
+  'clocktracker:name:michael': 'D3887D3F-8CD2-424E-83CB-1AE045A74337',
+  'clocktracker:name:neil': 'B9270D75-F3C4-43DD-9F6C-6B5EAE5D7E02',
+  'clocktracker:name:nick-f': '1233082F-1C16-4692-BA95-3C4E950701D4',
+  'clocktracker:name:philip': '13E59DBD-9ED4-4039-B215-80A8F28722CA',
+  'clocktracker:name:ryan-a': '4BE329E9-C69E-44AE-B12F-D724E7BA3ED6',
+  'clocktracker:name:sam-j': '7EE4B359-741F-43D8-8FC7-715D95BBDE67',
+  'clocktracker:name:sarah-rose': '54D713BB-75D3-4A48-AE28-D78C46621FB0',
+  'clocktracker:name:tony-b': '6BE04C48-90F4-4425-A940-7BEFE53D14C1',
+  'clocktracker:name:wallace': 'D39F5057-56A8-45AC-B852-1A8AC025B322',
+  'clocktracker:name:wayne': 'F6CB3865-D2ED-417B-96EA-512EDF16F2BB',
+  'clocktracker:name:z.-bill': '41DEC3C1-EE9B-4E3E-9F1A-E374D34CE052',
+  'clocktracker:8bde7e96-5a58-45fe-b0f6-4922fef647b2': 'F3A51F73-7745-4252-A031-B57C5E236B68',
+  'clocktracker:93c739ff-3e6e-44f4-bce1-d91fa8196f75': '053BA30C-EC82-4B8D-A72C-D929242B9316',
+  'clocktracker:f92cc15b-61e3-400c-8990-2a4c36307067': '6B21A7BC-F5A3-41D2-A137-13E600FF9F94',
+};
 
 type Alignment = 'GOOD' | 'EVIL' | 'NEUTRAL';
 type WinStatus = 'GOOD_WINS' | 'EVIL_WINS' | 'NOT_RECORDED';
@@ -74,6 +102,11 @@ interface BgStatsPlayer {
   team?: string;
 }
 
+interface BgStatsStoredPlayer {
+  uuid: string | null;
+  name: string | null;
+}
+
 interface BgStatsPlay {
   sourceName: string;
   sourcePlayId: string;
@@ -125,8 +158,9 @@ async function runCli(): Promise<void> {
 
   const since = parseSince(argv.since);
   const { profile, games } = await fetchClockTrackerData();
+  const bgStatsPlayerNames = readBgStatsPlayerNames();
   const filteredGames = games.filter(game => clockTrackerDate(game.date) >= since);
-  const plays = filteredGames.map(game => toBgStatsPlay(game, profile));
+  const plays = filteredGames.map(game => toBgStatsPlay(game, profile, bgStatsPlayerNames));
 
   printOutput(filteredGames, plays, profile, argv.format as OutputFormat);
 }
@@ -213,6 +247,36 @@ function runBrowserGate(browserGate: string, args: string[]): unknown {
   }
 }
 
+function readBgStatsPlayerNames(): Map<string, string> {
+  const result = spawnSync(process.execPath, [
+    '--no-env-file',
+    path.join(import.meta.dir, 'bgstats.ts'),
+    'read',
+    'players',
+    '--format=json',
+  ], {
+    encoding: 'utf8',
+    maxBuffer: 10_000_000,
+    timeout: 10_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `Could not read BG Stats players (exit code ${result.status ?? 'unknown'}).`);
+  }
+
+  try {
+    const players = JSON.parse(result.stdout) as BgStatsStoredPlayer[];
+    if (!Array.isArray(players)) {
+      throw new Error('Expected an array.');
+    }
+    return new Map(players.flatMap(player => player.uuid && player.name ? [[player.uuid, player.name]] : []));
+  } catch (error) {
+    throw new Error(`Could not parse BG Stats players: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function sessionHeaders(session: BrowserGateSession): Headers {
   const headers = new Headers({ Accept: 'application/json' });
   if (session.tokenType === 'cookie') {
@@ -236,11 +300,15 @@ async function fetchJson<T>(pathname: string, headers: Headers): Promise<T> {
   return await response.json() as T;
 }
 
-function toBgStatsPlay(game: ClockTrackerGame, profile: ClockTrackerProfile): BgStatsPlay {
-  const players = latestPlayers(game);
+function toBgStatsPlay(
+  game: ClockTrackerGame,
+  profile: ClockTrackerProfile,
+  bgStatsPlayerNames: Map<string, string>,
+): BgStatsPlay {
+  const players = latestPlayers(game, bgStatsPlayerNames);
   const owner = players.find(player => player.sourcePlayerId === `clocktracker:${profile.user_id}`);
   if (!owner) {
-    players.unshift(ownerPlayer(game, profile));
+    players.unshift(ownerPlayer(game, profile, bgStatsPlayerNames));
   }
 
   const location = game.location.trim()
@@ -263,7 +331,7 @@ function toBgStatsPlay(game: ClockTrackerGame, profile: ClockTrackerProfile): Bg
   };
 }
 
-function latestPlayers(game: ClockTrackerGame): BgStatsPlayer[] {
+function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, string>): BgStatsPlayer[] {
   const tokens = game.grimoire.at(-1)?.tokens ?? [];
   return [...tokens]
     .sort((left, right) => left.order - right.order)
@@ -274,11 +342,12 @@ function latestPlayers(game: ClockTrackerGame): BgStatsPlayer[] {
       if (!name) {
         return [];
       }
+      const sourcePlayerId = token.player_id
+        ? `clocktracker:${token.player_id}`
+        : `clocktracker:name:${normalizeSourceId(name)}`;
       return [{
-        name,
-        sourcePlayerId: token.player_id
-          ? `clocktracker:${token.player_id}`
-          : `clocktracker:name:${normalizeSourceId(name)}`,
+        name: mappedPlayerName(sourcePlayerId, name, bgStatsPlayerNames),
+        sourcePlayerId,
         winner: didAlignmentWin(token.alignment, game.win_v2),
         role: token.role?.name || undefined,
         team: titleCase(token.alignment),
@@ -286,18 +355,35 @@ function latestPlayers(game: ClockTrackerGame): BgStatsPlayer[] {
     });
 }
 
-function ownerPlayer(game: ClockTrackerGame, profile: ClockTrackerProfile): BgStatsPlayer {
+function ownerPlayer(
+  game: ClockTrackerGame,
+  profile: ClockTrackerProfile,
+  bgStatsPlayerNames: Map<string, string>,
+): BgStatsPlayer {
   const character = game.player_characters.at(-1);
   const alignment = game.is_storyteller ? undefined : character?.alignment;
+  const sourcePlayerId = `clocktracker:${profile.user_id}`;
   return {
-    name: profile.display_name,
-    sourcePlayerId: `clocktracker:${profile.user_id}`,
+    name: mappedPlayerName(sourcePlayerId, profile.display_name, bgStatsPlayerNames),
+    sourcePlayerId,
     winner: game.is_storyteller
       ? game.win_v2 === 'GOOD_WINS'
       : alignment != null && didAlignmentWin(alignment, game.win_v2),
     role: game.is_storyteller ? 'Storyteller' : character?.name || undefined,
     team: game.is_storyteller ? 'Storyteller' : alignment ? titleCase(alignment) : undefined,
   };
+}
+
+function mappedPlayerName(
+  clockTrackerId: string,
+  fallbackName: string,
+  bgStatsPlayerNames: Map<string, string>,
+): string {
+  const bgStatsUuid = BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID[clockTrackerId];
+  if (!bgStatsUuid) {
+    return fallbackName;
+  }
+  return bgStatsPlayerNames.get(bgStatsUuid) ?? fallbackName;
 }
 
 function didAlignmentWin(alignment: Alignment, result: WinStatus): boolean {
