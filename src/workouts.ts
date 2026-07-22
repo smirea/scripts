@@ -15,6 +15,11 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
+import {
+  logWorkouts,
+  readLocalWorkoutsSnapshot,
+  type WorkoutLogDefinition,
+} from './workoutsLocal';
 
 const SOURCE_PATH = 'api://macrofactor/workouts';
 const FIREBASE_PROJECT_ID = 'sbs-diet-app';
@@ -41,17 +46,38 @@ const FIREBASE_AUTH_CONFIGS = [
 ] as const;
 const WORKOUTS_EXERCISE_NAME_BY_ID: Record<string, string> = {
   '1a05c6f170d8802ba26bf25efbec5e68': 'Dumbbell Overhead Press',
+  '1a05c6f170d88058a3a0c07e098a9605': 'Smith Machine Bench Press',
+  '1a05c6f170d88060bbffeeb9acaa3c80': 'Seated Dumbbell Overhead Press',
   '1a05c6f170d8806ab70ee93a5c79d733': 'Dumbbell Bench Press',
+  '1a05c6f170d8806b911acf558c5af4f6': '45° Incline Dumbbell Press',
   '1a05c6f170d8807c9f16f226db24074d': 'Barbell Bench Press',
   '1a05c6f170d8809da1e7fbc50ae7575b': 'Incline Barbell Bench Press',
-  '1a05c6f170d880df946bdd6f42f0901c': 'Cable Fly',
+  '1a05c6f170d880a5b43fe13bcb1b6f3a': 'Push-Up',
+  '1a05c6f170d880df946bdd6f42f0901c': 'Horizontal Cable Fly',
+  '1a05c6f170d880e28b6bfbd0e217fcbc': 'Standing Dumbbell Lateral Raise',
+  '1a15c6f170d8800d8fc9d2c235673bf6': 'Overhand Grip Cable Lat Pulldown',
   '1a15c6f170d880148cade872878baf4c': 'Prone Dumbbell Scapular Retraction',
-  '1a15c6f170d88014a710f8ada9a1e94a': 'Face Pull',
+  '1a15c6f170d88014a710f8ada9a1e94a': 'Cable Face Pull',
+  '1a15c6f170d8801d9337dba3dcb34a88': 'Cable Straight Bar Triceps Pushdown',
+  '1a15c6f170d880308073fc37f580cda4': 'Cable Bar Straight Arm Lat Pulldown',
+  '1a15c6f170d880479d38c49a76cb6b10': 'Cable Rope Triceps Pushdown',
+  '1a15c6f170d88048b1ccfe9a74551d08': 'Neutral Grip Cable Row',
+  '1a15c6f170d8804c9235c935d487bda8': 'Single Arm Cable Biceps Curl (Facing Toward Machine)',
+  '1a15c6f170d8804cbd9afa04567bd5f7': 'Smith Machine Shrug',
+  '1a15c6f170d8804d834cef49a7b23f12': 'Pec Deck Fly',
+  '1a15c6f170d880868c06f216e31047c3': 'Standing Dumbbell Hammer Curl',
   '1a15c6f170d8809b94d8f668bf45a229': 'Landmine Row',
-  '1a15c6f170d880a19fdfee37bb2e5ee3': 'Machine Shoulder Press',
+  '1a15c6f170d8809bba44ff563ead6a65': 'Cable Straight Bar Biceps Curl',
+  '1a15c6f170d880a19fdfee37bb2e5ee3': 'Neutral Grip Pin-Loaded Machine Shoulder Press',
   '1a15c6f170d880a2ac20d8a1281d1d37': 'Chest-Supported T-Bar Row',
+  '1a15c6f170d880b08845d6f0fe186dd1': 'Pin-Loaded Machine Preacher Curl',
+  '1a15c6f170d880b1a93bc62261c8706b': 'Cable Shoulder External Rotation With Arm At Side',
   '1a15c6f170d880b2a97ec3d948120f99': 'Lat Pulldown',
+  '1a15c6f170d880b49e09fcbcd061fbdb': 'Incline Dumbbell Biceps Curl',
   '1a15c6f170d880d7b8cbf608580aaa50': 'Concentration Curl',
+  '1a15c6f170d880db8633e3bec8b7e8fe': 'Neutral Grip Machine Rear Delt Fly',
+  '1a15c6f170d880e8ad58cebec203e231': 'Cable Rope Overhead Triceps Extension',
+  '1a15c6f170d880f1ba5ef781b583618a': 'Standing Dumbbell Biceps Curl',
   '1a15c6f170d880f3b564c407768a11ac': 'Dumbbell Skull Crusher',
   '1a25c6f170d8800a86efdcb6f902b9a9': 'Smith Machine Back Squat',
   '1a25c6f170d8802ea9b9ce71cd9d3d67': 'Leg Press',
@@ -62,9 +88,13 @@ const WORKOUTS_EXERCISE_NAME_BY_ID: Record<string, string> = {
   '1a35c6f170d880bebc64f4dce0d5f5f1': 'Romanian Deadlift',
   '1a35c6f170d880cdb0ded0d7ed778004': 'Standing Cable Crunch',
   '1a45c6f170d880fabcebd578763b9c46': 'Plank',
+  '1a55c6f170d88031b658c6e278a82a88': 'Single Arm Elbow-In Dumbbell Row',
   '1b15c6f170d88066b8c7cbfb822f1045': 'V-Bar Triceps Pushdown',
+  '1b15c6f170d880fa97f2f6bce5cfa350': 'Single Arm Underhand Grip Cable Triceps Pushdown',
   '1b25c6f170d8801a9fa3c2dd66d17fa4': 'Overhead Cable Triceps Extension',
+  '25c5c6f170d88043b068f3225ed86f77': 'Seated Plate-Loaded Machine Triceps Dip',
   '2835c6f170d8809b876be6b88319b977': 'Plate-Loaded Ab Crunch',
+  '2965c6f170d880fcbe4ef2971006df0a': 'Cable Front Raise',
   '2a15c6f170d8805aaf68ef29976580f7': 'Smith Machine Underhand Row',
   '2ab5c6f170d88056b4b7ecef4d1ae9b4': 'Low Pulley Face Pull',
   '2ab5c6f170d880839baed369debc0459': 'Chest-Supported Dumbbell Row',
@@ -237,6 +267,12 @@ interface CreateProgramCommandArgs {
   dryRun: boolean;
 }
 
+interface LogWorkoutCommandArgs {
+  file: string;
+  activate: boolean;
+  dryRun: boolean;
+}
+
 interface WorkoutSource {
   runtimeType: string | null;
   programId: string | null;
@@ -396,6 +432,28 @@ async function runCli(): Promise<void> {
             }),
         runCreateProgramCommand
       )
+      .command<LogWorkoutCommandArgs>(
+        'workout log <file>',
+        'Log completed Workouts sessions from JSON',
+        builder =>
+          builder
+            .positional('file', {
+              type: 'string',
+              demandOption: true,
+              describe: 'JSON workout log file, or - to read from stdin',
+            })
+            .option('activate', {
+              type: 'boolean',
+              default: false,
+              describe: 'Set the logged program as the active program',
+            })
+            .option('dry-run', {
+              type: 'boolean',
+              default: false,
+              describe: 'Validate and print generated workout history without changing local data',
+            }),
+        runLogWorkoutCommand
+      )
       .help()
       .version(false)
       .wrap(process.stdout.columns ?? 80)
@@ -421,16 +479,35 @@ async function runWorkoutHistoryCommand(args: WorkoutHistoryCommandArgs): Promis
     start: args.start,
     end: args.end,
   });
-  const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
-  const [profileDocument, historyDocuments] = await Promise.all([
-    client.getUserDocument('profiles/workout', 'Workouts profile request failed'),
-    client.listUserCollection('workoutHistory', 'Workouts history request failed', WORKOUT_HISTORY_PAGE_SIZE),
-  ]);
+  let profileDocument: Record<string, unknown> | null;
+  let historyDocuments: FirestoreListedDocument[];
+  let activeProgramDocument: Record<string, unknown> | null = null;
+
+  try {
+    const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+    [profileDocument, historyDocuments] = await Promise.all([
+      client.getUserDocument('profiles/workout', 'Workouts profile request failed'),
+      client.listUserCollection('workoutHistory', 'Workouts history request failed', WORKOUT_HISTORY_PAGE_SIZE),
+    ]);
+    const activeProgramId = parseOptionalString(profileDocument?.activeProgramId);
+    activeProgramDocument = activeProgramId
+      ? await client.getUserDocument(
+          `trainingProgram/${activeProgramId}`,
+          `Workouts program request failed for ${activeProgramId}`
+        )
+      : null;
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Firebase App Check token is invalid')) {
+      throw error;
+    }
+    const snapshot = await readLocalWorkoutsSnapshot();
+    profileDocument = snapshot.profile;
+    historyDocuments = snapshot.history;
+    const activeProgramId = parseOptionalString(profileDocument?.activeProgramId);
+    activeProgramDocument = snapshot.programs.find(program => program.id === activeProgramId)?.data ?? null;
+  }
   const workoutProfile = parseWorkoutProfile(profileDocument);
   const activeProgramId = workoutProfile?.activeProgramId ?? null;
-  const activeProgramDocument = activeProgramId
-    ? await client.getUserDocument(`trainingProgram/${activeProgramId}`, `Workouts program request failed for ${activeProgramId}`)
-    : null;
   const activeProgram = activeProgramId ? parseTrainingProgram(activeProgramId, activeProgramDocument) : null;
   const report = buildWorkoutsReport({
     workoutProfile,
@@ -446,6 +523,94 @@ async function runWorkoutHistoryCommand(args: WorkoutHistoryCommandArgs): Promis
     outputPath: args.output,
     pretty: args.pretty,
   });
+}
+
+async function runLogWorkoutCommand(args: LogWorkoutCommandArgs): Promise<void> {
+  const definition = parseWorkoutLogDefinition(await readProgramDefinition(args.file));
+  const result = await logWorkouts(definition, {
+    activate: args.activate,
+    dryRun: args.dryRun,
+  });
+  if (args.dryRun) {
+    return;
+  }
+
+  process.stdout.write(
+    `${result.workoutIds.length} workouts queued for ${definition.program}${
+      args.activate ? ' and set active' : ''
+    }. Workouts was opened to sync them.\nBackup: ${result.backupPath}\n`
+  );
+}
+
+function parseWorkoutLogDefinition(value: unknown): WorkoutLogDefinition {
+  const input = asRecord(value);
+  const program = parseOptionalString(input?.program);
+  if (!input || !program || !Array.isArray(input.workouts) || input.workouts.length === 0) {
+    throw new Error('Workout log must include a program and at least one workout.');
+  }
+
+  return {
+    program,
+    workouts: input.workouts.map((workoutValue, workoutIndex) => {
+      const workout = asRecord(workoutValue);
+      const name = parseOptionalString(workout?.name);
+      if (!workout || !name || !Array.isArray(workout.exercises) || workout.exercises.length === 0) {
+        throw new Error(`Workout ${workoutIndex + 1} must include a name and exercises.`);
+      }
+      const startTime = parseOptionalString(workout.startTime);
+      if (startTime && Number.isNaN(Date.parse(startTime))) {
+        throw new Error(`${name} startTime must be a valid ISO date/time.`);
+      }
+      const durationMinutes =
+        workout.durationMinutes == null
+          ? undefined
+          : parseNumberInRange(workout.durationMinutes, `${name} durationMinutes`, 1);
+
+      return {
+        name,
+        startTime: startTime ?? undefined,
+        durationMinutes,
+        exercises: workout.exercises.map((exerciseValue, exerciseIndex) => {
+          const exercise = asRecord(exerciseValue);
+          if (!exercise || !Array.isArray(exercise.sets) || exercise.sets.length === 0) {
+            throw new Error(`${name} exercise ${exerciseIndex + 1} must include sets.`);
+          }
+          return {
+            name: parseOptionalString(exercise.name) ?? undefined,
+            sets: exercise.sets.map((setValue, setIndex) => {
+              const set = asRecord(setValue);
+              if (!set) {
+                throw new Error(`${name} exercise ${exerciseIndex + 1} set ${setIndex + 1} is invalid.`);
+              }
+              return {
+                reps: parsePositiveInteger(
+                  set.reps,
+                  `${name} exercise ${exerciseIndex + 1} set ${setIndex + 1} reps`
+                ),
+                weightLb:
+                  set.weightLb == null
+                    ? null
+                    : parseNumberInRange(
+                        set.weightLb,
+                        `${name} exercise ${exerciseIndex + 1} set ${setIndex + 1} weightLb`,
+                        0
+                      ),
+                rir:
+                  set.rir == null
+                    ? null
+                    : parseIntegerInRange(
+                        set.rir,
+                        `${name} exercise ${exerciseIndex + 1} set ${setIndex + 1} RIR`,
+                        0,
+                        10
+                      ),
+              };
+            }),
+          };
+        }),
+      };
+    }),
+  };
 }
 
 async function runCreateProgramCommand(args: CreateProgramCommandArgs): Promise<void> {
@@ -617,6 +782,15 @@ function parseIntegerInRange(value: unknown, label: string, minimum: number, max
   if (parsed == null || !Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
     const range = maximum === Number.MAX_SAFE_INTEGER ? `at least ${minimum}` : `between ${minimum} and ${maximum}`;
     throw new Error(`${label} must be an integer ${range}.`);
+  }
+  return parsed;
+}
+
+function parseNumberInRange(value: unknown, label: string, minimum: number, maximum = Number.MAX_VALUE): number {
+  const parsed = parseNumberLike(value);
+  if (parsed == null || parsed < minimum || parsed > maximum) {
+    const range = maximum === Number.MAX_VALUE ? `at least ${minimum}` : `between ${minimum} and ${maximum}`;
+    throw new Error(`${label} must be a number ${range}.`);
   }
   return parsed;
 }
