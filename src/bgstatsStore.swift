@@ -71,6 +71,12 @@ struct RecordResult: Encodable {
     let createdPlayers: [String]
 }
 
+struct SyncResult: Encodable {
+    let playUuid: String
+    let action: String
+    let createdPlayers: [String]
+}
+
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data("\(message)\n".utf8))
     exit(1)
@@ -88,6 +94,16 @@ func quitApp() {
     }
     if applications.contains(where: { !$0.isTerminated }) {
         fail("BG Stats did not quit within 15 seconds.")
+    }
+}
+
+func activateApp() {
+    guard let application = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        .first(where: { !$0.isTerminated }) else {
+        fail("BG Stats is not running.")
+    }
+    if !application.activate(options: [.activateAllWindows]) {
+        fail("BG Stats could not be activated.")
     }
 }
 
@@ -313,20 +329,13 @@ func existingPlay(
     return nil
 }
 
-func recordPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> RecordResult {
-    if let existing = try existingPlay(
-        sourceName: input.sourceName,
-        sourcePlayId: input.sourcePlayId,
-        uuid: input.uuid,
-        context: context
-    ) {
-        guard let uuid = existing.value(forKey: "uuid") as? String else {
-            throw NSError(domain: "bgstats", code: 5, userInfo: [NSLocalizedDescriptionKey: "The matching play has no UUID."])
-        }
-        return RecordResult(playUuid: uuid, alreadyExists: true, createdPlayers: [])
-    }
-
-    let now = Date()
+func applyPlayInput(
+    _ input: PlayInput,
+    to play: NSManagedObject,
+    context: NSManagedObjectContext,
+    now: Date,
+    preserveLocationAndDuration: Bool
+) throws -> [String] {
     let playDate = try parseDate(input.playDate)
     let calendar = Calendar.current
     let dateParts = calendar.dateComponents([.year, .month, .day, .weekday], from: playDate)
@@ -336,22 +345,24 @@ func recordPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> R
     }
 
     let game = try findOrCreateGame(input.game, context: context, now: now)
-    let location = try input.location.map { try findOrCreateLocation(name: $0.name, context: context, now: now) }
-    let play = insert("Play", into: context)
-    let playUuid = input.uuid ?? uppercasedUuid()
-    setSyncIdentity(play, uuid: playUuid, now: now)
+    play.setValue(now, forKey: "modificationDateTime")
+    play.setValue(nil, forKey: "lastCloudSync")
     play.setValue(playDate, forKey: "playDateTime")
-    play.setValue(now, forKey: "entryDateTime")
     play.setValue(year * 10_000 + month * 100 + day, forKey: "playDateYmd")
     play.setValue(month, forKey: "playMonth")
     play.setValue(weekday, forKey: "playWeekday")
-    play.setValue(input.durationMin ?? 0, forKey: "duration")
+    if !preserveLocationAndDuration {
+        let location = try input.location.map {
+            try findOrCreateLocation(name: $0.name, context: context, now: now)
+        }
+        play.setValue(input.durationMin ?? 0, forKey: "duration")
+        play.setValue(location, forKey: "playLocation")
+    }
     play.setValue(input.comments, forKey: "comments")
     play.setValue(input.board, forKey: "board")
     play.setValue(input.players.count, forKey: "playerCount")
     play.setValue(input.players.contains(where: { $0.winner == true }) ? 1 : 0, forKey: "manualWinner")
     play.setValue(game, forKey: "playedGame")
-    play.setValue(location, forKey: "playLocation")
     let metadata: [String: Any] = [
         "bgstatsCli": [
             "sourceName": input.sourceName,
@@ -360,6 +371,11 @@ func recordPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> R
     ]
     let metadataData = try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys])
     play.setValue(String(decoding: metadataData, as: UTF8.self), forKey: "metaData")
+
+    let existingScores = play.mutableSetValue(forKey: "scores").allObjects.compactMap { $0 as? NSManagedObject }
+    for score in existingScores {
+        context.delete(score)
+    }
 
     var createdPlayers: [String] = []
     for (index, playerInput) in input.players.enumerated() {
@@ -386,16 +402,86 @@ func recordPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> R
         score.setValue("{}", forKey: "metaData")
     }
 
+    return createdPlayers
+}
+
+func createPlay(
+    _ input: PlayInput,
+    context: NSManagedObjectContext,
+    now: Date
+) throws -> (String, [String]) {
+    let play = insert("Play", into: context)
+    let playUuid = input.uuid ?? uppercasedUuid()
+    setSyncIdentity(play, uuid: playUuid, now: now)
+    play.setValue(now, forKey: "entryDateTime")
+    let createdPlayers = try applyPlayInput(
+        input,
+        to: play,
+        context: context,
+        now: now,
+        preserveLocationAndDuration: false
+    )
+    return (playUuid, createdPlayers)
+}
+
+func recordPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> RecordResult {
+    if let existing = try existingPlay(
+        sourceName: input.sourceName,
+        sourcePlayId: input.sourcePlayId,
+        uuid: input.uuid,
+        context: context
+    ) {
+        guard let uuid = existing.value(forKey: "uuid") as? String else {
+            throw NSError(domain: "bgstats", code: 5, userInfo: [NSLocalizedDescriptionKey: "The matching play has no UUID."])
+        }
+        return RecordResult(playUuid: uuid, alreadyExists: true, createdPlayers: [])
+    }
+
+    let (playUuid, createdPlayers) = try createPlay(input, context: context, now: Date())
     try context.save()
     return RecordResult(playUuid: playUuid, alreadyExists: false, createdPlayers: createdPlayers)
 }
 
+func syncPlay(_ input: PlayInput, context: NSManagedObjectContext) throws -> SyncResult {
+    let existing = try existingPlay(
+        sourceName: input.sourceName,
+        sourcePlayId: input.sourcePlayId,
+        uuid: input.uuid,
+        context: context
+    )
+    let now = Date()
+    if let existing {
+        guard let uuid = existing.value(forKey: "uuid") as? String else {
+            throw NSError(domain: "bgstats", code: 7, userInfo: [NSLocalizedDescriptionKey: "The matching play has no UUID."])
+        }
+        let createdPlayers = try applyPlayInput(
+            input,
+            to: existing,
+            context: context,
+            now: now,
+            preserveLocationAndDuration: true
+        )
+        return SyncResult(playUuid: uuid, action: "updated", createdPlayers: createdPlayers)
+    }
+    if let uuid = input.uuid {
+        throw NSError(
+            domain: "bgstats",
+            code: 8,
+            userInfo: [NSLocalizedDescriptionKey: "Could not find mapped BG Stats play \(uuid)."]
+        )
+    }
+    let (uuid, createdPlayers) = try createPlay(input, context: context, now: now)
+    return SyncResult(playUuid: uuid, action: "created", createdPlayers: createdPlayers)
+}
+
 let arguments = CommandLine.arguments
 guard arguments.count >= 2 else {
-    fail("Expected quit-app or record.")
+    fail("Expected activate-app, quit-app, record, or sync.")
 }
 
 switch arguments[1] {
+case "activate-app":
+    activateApp()
 case "quit-app":
     quitApp()
 case "record":
@@ -409,6 +495,24 @@ case "record":
             try recordPlay(input, context: context)
         }
         let data = try JSONEncoder().encode(result)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    } catch {
+        fail(error.localizedDescription)
+    }
+case "sync":
+    guard arguments.count == 4 else {
+        fail("sync requires a database path and model path.")
+    }
+    do {
+        let inputs = try JSONDecoder().decode([PlayInput].self, from: FileHandle.standardInput.readDataToEndOfFile())
+        let context = try loadContext(databasePath: arguments[2], modelPath: arguments[3])
+        let results = try context.performAndWait {
+            let values = try inputs.map { try syncPlay($0, context: context) }
+            try context.save()
+            return values
+        }
+        let data = try JSONEncoder().encode(results)
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
     } catch {

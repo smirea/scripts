@@ -15,6 +15,8 @@ const DEFAULT_SOURCE_NAME = 'bgstats-cli';
 const BG_STATS_BUNDLE_ID = 'nl.vissering.BoardGameStats';
 const BG_STATS_APP_NAME = 'BG Stats';
 const DEFAULT_SYNC_TIMEOUT_SECONDS = 60;
+const RECENT_SYNC_MAX_AGE_MS = 10 * 60 * 1000;
+const CLOUD_SYNC_COOLDOWN_MS = 65_000;
 
 type ReadEntity = (typeof READ_ENTITIES)[number];
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
@@ -148,6 +150,12 @@ interface RecordResult {
   createdPlayers: string[];
 }
 
+interface SyncResult {
+  playUuid: string;
+  action: 'created' | 'updated';
+  createdPlayers: string[];
+}
+
 if (import.meta.main) {
   runCli().catch(error => {
     console.error(error instanceof Error ? error.message : String(error));
@@ -246,6 +254,51 @@ async function runCli(): Promise<void> {
           return;
         }
         await recordPlayDirectly(input, {
+          databasePath: argv.database,
+          sourceName: argv.sourceName,
+          sync: argv.sync,
+          syncTimeoutSeconds: argv.syncTimeout,
+        });
+      },
+    )
+    .command(
+      'sync plays [input]',
+      'Make source-backed plays authoritative in BG Stats.',
+      command => command
+        .positional('input', {
+          type: 'string',
+          default: '-',
+          describe: 'JSON file containing one play or an array of plays, or - to read stdin.',
+        })
+        .option('database', {
+          type: 'string',
+          default: defaultDatabasePath(),
+          describe: 'Path to the BG Stats Core Data SQLite database.',
+        })
+        .option('sync', {
+          type: 'boolean',
+          default: true,
+          describe: 'Open, sync, and close BG Stats before and after updating the store.',
+        })
+        .option('sync-timeout', {
+          type: 'number',
+          default: DEFAULT_SYNC_TIMEOUT_SECONDS,
+          describe: 'Seconds to wait for each BG Stats Cloud Sync.',
+        })
+        .option('source-name', {
+          type: 'string',
+          describe: 'Override the source name for every supplied play.',
+        })
+        .example(
+          '$0 sync plays clocktracker.json',
+          'Update matched plays in place and record new source plays in one guarded batch.',
+        ),
+      async argv => {
+        if (!Number.isFinite(argv.syncTimeout) || argv.syncTimeout < 1) {
+          throw new Error('--sync-timeout must be at least 1 second.');
+        }
+        const inputs = (await readPlayInputs(argv.input)).map(value => playInputSchema.parse(value));
+        await syncPlaysDirectly(inputs, {
           databasePath: argv.database,
           sourceName: argv.sourceName,
           sync: argv.sync,
@@ -535,7 +588,7 @@ function printRecords(entity: ReadEntity, records: object[], format: OutputForma
   }));
 }
 
-async function readPlayInput(inputPath: string): Promise<unknown> {
+async function readJsonInput(inputPath: string): Promise<unknown> {
   const text = inputPath === '-'
     ? await Bun.stdin.text()
     : readFileSync(path.resolve(inputPath), 'utf8');
@@ -543,20 +596,33 @@ async function readPlayInput(inputPath: string): Promise<unknown> {
     throw new Error('No play JSON was provided. Pass a file or pipe one JSON object to stdin.');
   }
   try {
-    const parsed = JSON.parse(text) as unknown;
-    if (Array.isArray(parsed)) {
-      if (parsed.length !== 1) {
-        throw new Error('write plays currently accepts exactly one play at a time.');
-      }
-      return parsed[0];
-    }
-    return parsed;
+    return JSON.parse(text) as unknown;
   } catch (error) {
     if (error instanceof SyntaxError) {
       throw new Error(`Invalid JSON: ${error.message}`);
     }
     throw error;
   }
+}
+
+async function readPlayInput(inputPath: string): Promise<unknown> {
+  const parsed = await readJsonInput(inputPath);
+  if (!Array.isArray(parsed)) {
+    return parsed;
+  }
+  if (parsed.length !== 1) {
+    throw new Error('write plays currently accepts exactly one play at a time.');
+  }
+  return parsed[0];
+}
+
+async function readPlayInputs(inputPath: string): Promise<unknown[]> {
+  const parsed = await readJsonInput(inputPath);
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+  if (values.length === 0) {
+    throw new Error('No plays were provided.');
+  }
+  return values;
 }
 
 function openPlayForReview(input: PlayInput, sourceNameOverride?: string): void {
@@ -583,9 +649,16 @@ async function recordPlayDirectly(
 ): Promise<void> {
   const databasePath = path.resolve(options.databasePath);
   const payload = createRecordPayload(input, options.sourceName);
+  let postSyncNotBefore: number | undefined;
 
   if (options.sync) {
-    await syncAndCloseBgStats('before recording', options.syncTimeoutSeconds);
+    await syncAndCloseBgStats(
+      'before recording',
+      options.syncTimeoutSeconds,
+      true,
+      () => isCloudSyncComplete(databasePath),
+    );
+    postSyncNotBefore = Date.now() + CLOUD_SYNC_COOLDOWN_MS;
   } else if (isBgStatsRunning()) {
     throw new Error('BG Stats must be closed before a direct write. Quit it or omit --no-sync.');
   }
@@ -607,7 +680,13 @@ async function recordPlayDirectly(
 
   if (options.sync) {
     try {
-      await syncAndCloseBgStats('after recording', options.syncTimeoutSeconds);
+      await syncAndCloseBgStats(
+        'after recording',
+        options.syncTimeoutSeconds,
+        false,
+        () => isCloudSyncComplete(databasePath),
+        postSyncNotBefore,
+      );
       assertPlayCloudSynced(databasePath, result.playUuid);
     } catch (error) {
       throw new Error(
@@ -624,7 +703,77 @@ async function recordPlayDirectly(
   process.stdout.write(`Backup: ${backupPath}\n`);
 }
 
-function createRecordPayload(input: PlayInput, sourceNameOverride?: string): object {
+async function syncPlaysDirectly(
+  inputs: PlayInput[],
+  options: {
+    databasePath: string;
+    sourceName?: string;
+    sync: boolean;
+    syncTimeoutSeconds: number;
+  },
+): Promise<void> {
+  const databasePath = path.resolve(options.databasePath);
+  const payloads = inputs
+    .map(input => createRecordPayload(input, options.sourceName))
+    .sort((left, right) => left.playDate.localeCompare(right.playDate));
+  const sourceKeys = payloads.map(payload => `${payload.sourceName}\0${payload.sourcePlayId}`);
+  if (new Set(sourceKeys).size !== sourceKeys.length) {
+    throw new Error('The sync input contains duplicate source play identities.');
+  }
+
+  let postSyncNotBefore: number | undefined;
+  if (options.sync) {
+    await syncAndCloseBgStats(
+      'before source sync',
+      options.syncTimeoutSeconds,
+      true,
+      () => isCloudSyncComplete(databasePath),
+    );
+    postSyncNotBefore = Date.now() + CLOUD_SYNC_COOLDOWN_MS;
+  } else if (isBgStatsRunning()) {
+    throw new Error('BG Stats must be closed before a direct write. Quit it or omit --no-sync.');
+  }
+
+  assertNoPendingCloudSync(databasePath);
+  const backupPath = backupDatabase(databasePath);
+  let results: SyncResult[];
+  try {
+    results = runStoreHelper<SyncResult[]>(['sync', databasePath, defaultModelPath()], payloads);
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)} Backup preserved at ${backupPath}.`);
+  }
+
+  if (options.sync) {
+    try {
+      await syncAndCloseBgStats(
+        'after source sync',
+        options.syncTimeoutSeconds,
+        false,
+        () => isCloudSyncComplete(databasePath),
+        postSyncNotBefore,
+      );
+      for (const result of results) {
+        assertPlayCloudSynced(databasePath, result.playUuid);
+      }
+    } catch (error) {
+      throw new Error(
+        `The plays were updated locally, but post-write sync verification failed: `
+        + `${error instanceof Error ? error.message : String(error)} Backup preserved at ${backupPath}.`,
+      );
+    }
+  }
+
+  const created = results.filter(result => result.action === 'created').length;
+  const updated = results.length - created;
+  const createdPlayers = [...new Set(results.flatMap(result => result.createdPlayers))];
+  process.stdout.write(`Synced ${results.length} plays: ${updated} updated, ${created} created.\n`);
+  if (createdPlayers.length > 0) {
+    process.stdout.write(`Created players: ${createdPlayers.join(', ')}\n`);
+  }
+  process.stdout.write(`Backup: ${backupPath}\n`);
+}
+
+function createRecordPayload(input: PlayInput, sourceNameOverride?: string) {
   const sourceName = sourceNameOverride ?? input.sourceName ?? DEFAULT_SOURCE_NAME;
   if (!sourceName.trim()) {
     throw new Error('--source-name must not be empty.');
@@ -663,6 +812,17 @@ function createRecordPayload(input: PlayInput, sourceNameOverride?: string): obj
 }
 
 function assertNoPendingCloudSync(databasePath: string): void {
+  const pending = pendingCloudSync(databasePath);
+  if (pending.length > 0) {
+    throw new Error(`BG Stats still has unsynced local data (${pending.join(', ')}); no write was attempted.`);
+  }
+}
+
+function isCloudSyncComplete(databasePath: string): boolean {
+  return pendingCloudSync(databasePath).length === 0;
+}
+
+function pendingCloudSync(databasePath: string): string[] {
   const database = new Database(databasePath, { readonly: true, strict: true });
   try {
     database.run('PRAGMA query_only = ON');
@@ -673,7 +833,7 @@ function assertNoPendingCloudSync(databasePath: string): void {
       ['plays', 'ZPLAY'],
       ['players', 'ZPLAYER'],
     ] as const;
-    const pending = entities.flatMap(([name, table]) => {
+    return entities.flatMap(([name, table]) => {
       const row = database.query(`
         SELECT COUNT(*) AS count
         FROM ${table}
@@ -683,9 +843,6 @@ function assertNoPendingCloudSync(databasePath: string): void {
       `).get() as { count: number };
       return row.count > 0 ? [`${row.count} ${name}`] : [];
     });
-    if (pending.length > 0) {
-      throw new Error(`BG Stats still has unsynced local data (${pending.join(', ')}); no write was attempted.`);
-    }
   } finally {
     database.close();
   }
@@ -738,12 +895,21 @@ function assertPlayCloudSynced(databasePath: string, playUuid: string): void {
   }
 }
 
-async function syncAndCloseBgStats(phase: string, timeoutSeconds: number): Promise<void> {
+async function syncAndCloseBgStats(
+  phase: string,
+  timeoutSeconds: number,
+  acceptRecentSync: boolean,
+  isComplete?: () => boolean,
+  notBefore?: number,
+): Promise<void> {
   if (isBgStatsRunning()) {
     quitBgStats();
   }
+  while (notBefore != null && Date.now() < notBefore) {
+    await Bun.sleep(Math.min(30_000, notBefore - Date.now()));
+  }
   const previousMarker = readCloudSyncMarker();
-  const launched = spawnSync('open', ['-g', '-a', BG_STATS_APP_NAME], {
+  const launched = spawnSync('open', ['-a', BG_STATS_APP_NAME], {
     encoding: 'utf8',
     timeout: 10_000,
   });
@@ -756,19 +922,38 @@ async function syncAndCloseBgStats(phase: string, timeoutSeconds: number): Promi
 
   try {
     await waitFor(() => isBgStatsRunning(), 15_000, 'BG Stats did not finish launching.');
-    await waitFor(
-      () => {
-        const marker = readCloudSyncMarker();
-        return marker != null && marker !== previousMarker;
-      },
-      timeoutSeconds * 1000,
-      `BG Stats Cloud Sync did not finish ${phase} within ${timeoutSeconds} seconds.`,
-    );
+    runStoreHelper(['activate-app']);
+    if (isComplete && !isComplete()) {
+      await waitFor(
+        isComplete,
+        timeoutSeconds * 1000,
+        `BG Stats Cloud Sync did not finish ${phase} within ${timeoutSeconds} seconds.`,
+      );
+    } else if (acceptRecentSync && isRecentSyncMarker(previousMarker)) {
+      await Bun.sleep(5_000);
+    } else {
+      await waitFor(
+        () => {
+          const marker = readCloudSyncMarker();
+          return marker != null && marker !== previousMarker;
+        },
+        timeoutSeconds * 1000,
+        `BG Stats Cloud Sync did not finish ${phase} within ${timeoutSeconds} seconds.`,
+      );
+    }
   } finally {
     if (isBgStatsRunning()) {
       quitBgStats();
     }
   }
+}
+
+function isRecentSyncMarker(marker: string | null): boolean {
+  if (!marker) {
+    return false;
+  }
+  const timestamp = Date.parse(marker);
+  return Number.isFinite(timestamp) && Date.now() - timestamp <= RECENT_SYNC_MAX_AGE_MS;
 }
 
 function readCloudSyncMarker(): string | null {

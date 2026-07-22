@@ -40,6 +40,13 @@ const BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> 
   'clocktracker:93c739ff-3e6e-44f4-bce1-d91fa8196f75': '053BA30C-EC82-4B8D-A72C-D929242B9316',
   'clocktracker:f92cc15b-61e3-400c-8990-2a4c36307067': '6B21A7BC-F5A3-41D2-A137-13E600FF9F94',
 };
+const BG_STATS_PLAY_UUID_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
+  '6be0e7c2-424d-4e89-a22f-425642f8c9a9': 'A7CE1AA7-9C18-4768-A70C-F586D72BD6D2',
+  'f17178e8-5a8d-40bf-8cb8-5a9b65ea859d': '3F321DBB-6015-441D-91E3-4CB690C8F455',
+  '7ad4b28b-6557-4c02-9626-a3f2d9f38883': '1C36BAF8-7BE4-4BDF-B38A-0F2DCA4F993C',
+  'c53fd20e-a489-4e9c-8a99-11bf412a43b3': '51D03995-4105-4D4D-A8BD-154E9B880208',
+  '6c6fc0a8-143e-42c9-b258-6e88207234a4': '590299F6-06C8-49AE-926F-C43F95D0FE9D',
+};
 
 type Alignment = 'GOOD' | 'EVIL' | 'NEUTRAL';
 type WinStatus = 'GOOD_WINS' | 'EVIL_WINS' | 'NOT_RECORDED';
@@ -112,6 +119,7 @@ interface BgStatsStoredPlayer {
 }
 
 interface BgStatsPlay {
+  uuid?: string;
   sourceName: string;
   sourcePlayId: string;
   playDate: string;
@@ -149,8 +157,23 @@ async function runCli(): Promise<void> {
       default: 'bgstats',
       describe: 'Output BG Stats-compatible JSON or a human-readable table.',
     })
+    .option('write', {
+      type: 'boolean',
+      default: false,
+      describe: 'Make these ClockTracker games authoritative in BG Stats.',
+    })
+    .option('sync-timeout', {
+      type: 'number',
+      default: 60,
+      describe: 'Seconds to wait for each BG Stats Cloud Sync when using --write.',
+    })
+    .option('database', {
+      type: 'string',
+      describe: 'Override the BG Stats database path when using --write.',
+    })
     .example('$0 --since 2026-07-01', 'Read games since July 1 as BG Stats JSON.')
     .example('$0 --format table', 'Show games from the past week in a table.')
+    .example('$0 --write', 'Update existing source plays and record new ones in BG Stats.')
     .strict()
     .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
@@ -166,6 +189,13 @@ async function runCli(): Promise<void> {
   const filteredGames = games.filter(game => clockTrackerDate(game.date) >= since);
   const plays = filteredGames.map(game => toBgStatsPlay(game, profile, bgStatsPlayerNames));
 
+  if (argv.write) {
+    if (!Number.isFinite(argv.syncTimeout) || argv.syncTimeout < 1) {
+      throw new Error('--sync-timeout must be at least 1 second.');
+    }
+    writeBgStatsPlays(plays, argv.syncTimeout, argv.database);
+    return;
+  }
   printOutput(filteredGames, plays, profile, argv.format as OutputFormat);
 }
 
@@ -320,6 +350,7 @@ function toBgStatsPlay(
     || (game.location_type === 'ONLINE' ? 'Online' : '');
 
   return {
+    uuid: BG_STATS_PLAY_UUID_BY_CLOCKTRACKER_ID[game.id],
     sourceName: 'clocktracker.app',
     sourcePlayId: game.id,
     playDate: `${clockTrackerDate(game.date)} 00:00:00`,
@@ -333,6 +364,39 @@ function toBgStatsPlay(
     },
     players,
   };
+}
+
+function writeBgStatsPlays(plays: BgStatsPlay[], syncTimeout: number, databasePath?: string): void {
+  if (plays.length === 0) {
+    process.stdout.write('No ClockTracker games matched --since; BG Stats was not changed.\n');
+    return;
+  }
+  const args = [
+    '--no-env-file',
+    path.join(import.meta.dir, 'bgstats.ts'),
+    'sync',
+    'plays',
+    '-',
+    '--sync-timeout',
+    String(syncTimeout),
+  ];
+  if (databasePath) {
+    args.push('--database', databasePath);
+  }
+  const orderedPlays = [...plays].sort((left, right) => left.playDate.localeCompare(right.playDate));
+  const result = spawnSync(process.execPath, args, {
+    encoding: 'utf8',
+    input: JSON.stringify(orderedPlays),
+    maxBuffer: 10_000_000,
+    timeout: syncTimeout * 2_000 + 90_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `BG Stats sync failed with exit code ${result.status ?? 'unknown'}.`);
+  }
+  process.stdout.write(result.stdout);
 }
 
 function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, string>): BgStatsPlayer[] {
