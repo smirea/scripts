@@ -67,6 +67,9 @@ interface ClockTrackerProfile {
 interface ClockTrackerCharacter {
   name: string;
   alignment: Alignment;
+  role?: {
+    type?: string;
+  } | null;
 }
 
 interface ClockTrackerToken {
@@ -76,6 +79,7 @@ interface ClockTrackerToken {
   alignment: Alignment;
   role?: {
     name: string;
+    type?: string;
   } | null;
   player?: {
     username: string;
@@ -417,7 +421,7 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         ...mappedPlayerIdentity(sourcePlayerId, name, bgStatsPlayerNames),
         sourcePlayerId,
         winner: didAlignmentWin(token.alignment, game.win_v2),
-        role: token.role?.name || undefined,
+        role: bgStatsRoles(token.alignment, token.role?.type, token.role?.name),
         team: titleCase(token.alignment),
       }];
     });
@@ -438,7 +442,7 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         ...mappedPlayerIdentity(sourcePlayerId, name.replace(/^@/, ''), bgStatsPlayerNames),
         sourcePlayerId,
         winner: game.win_v2 === 'GOOD_WINS',
-        role: 'Storyteller',
+        role: '_storyteller',
         team: 'Storyteller',
       });
     }
@@ -461,7 +465,9 @@ function ownerPlayer(
     winner: game.is_storyteller
       ? game.win_v2 === 'GOOD_WINS'
       : alignment != null && didAlignmentWin(alignment, game.win_v2),
-    role: game.is_storyteller ? 'Storyteller' : character?.name || undefined,
+    role: game.is_storyteller
+      ? '_storyteller'
+      : bgStatsRoles(alignment, character?.role?.type, character?.name),
     team: game.is_storyteller ? 'Storyteller' : alignment ? titleCase(alignment) : undefined,
   };
 }
@@ -521,7 +527,32 @@ function clockTrackerDate(value: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
     throw new Error(`ClockTracker returned an invalid game date: ${value}`);
   }
-  return date;
+  const [year, month, day] = date.split('-').map(Number);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  if (
+    parsed.getUTCFullYear() !== year
+    || parsed.getUTCMonth() !== month - 1
+    || parsed.getUTCDate() !== day
+  ) {
+    throw new Error(`ClockTracker returned an invalid game date: ${value}`);
+  }
+  // Austin Saturday sessions recorded after midnight belong to the preceding game day.
+  if (parsed.getUTCDay() !== 0) {
+    return date;
+  }
+  parsed.setUTCDate(parsed.getUTCDate() - 1);
+  return parsed.toISOString().slice(0, 10);
+}
+
+function bgStatsRoles(alignment?: string, section?: string, character?: string): string | undefined {
+  const roles = [alignment, section].flatMap(value => {
+    const normalized = value?.trim().toLowerCase();
+    return normalized ? [`_${normalized}`] : [];
+  });
+  if (character?.trim()) {
+    roles.push(character.trim());
+  }
+  return roles.length > 0 ? roles.join('／') : undefined;
 }
 
 function normalizeSourceId(value: string): string {

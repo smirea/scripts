@@ -362,6 +362,9 @@ func applyPlayInput(
     play.setValue(input.board, forKey: "board")
     play.setValue(input.players.count, forKey: "playerCount")
     play.setValue(input.players.contains(where: { $0.winner == true }) ? 1 : 0, forKey: "manualWinner")
+    if input.game.noPoints == true {
+        play.setValue(3, forKey: "scoringSetting")
+    }
     play.setValue(game, forKey: "playedGame")
     let metadata: [String: Any] = [
         "bgstatsCli": [
