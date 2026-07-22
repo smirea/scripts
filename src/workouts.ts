@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import yargs from 'yargs';
@@ -17,7 +17,8 @@ import {
 
 const SOURCE_PATH = 'api://macrofactor/workouts';
 const FIREBASE_PROJECT_ID = 'sbs-diet-app';
-const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
+const FIRESTORE_DOCUMENTS_PATH = `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents`;
+const FIRESTORE_BASE_URL = `https://firestore.googleapis.com/v1/${FIRESTORE_DOCUMENTS_PATH}`;
 const TOKEN_REFRESH_MARGIN_MS = 60_000;
 const MICROS_PER_SECOND = 1_000_000;
 const SECONDS_PER_DAY = 24 * 60 * 60;
@@ -132,6 +133,16 @@ interface FirestoreListDocumentsResponse {
   nextPageToken?: string;
 }
 
+interface FirestoreValue {
+  nullValue?: null;
+  booleanValue?: boolean;
+  integerValue?: string;
+  doubleValue?: number;
+  stringValue?: string;
+  arrayValue?: { values?: FirestoreValue[] };
+  mapValue?: { fields?: Record<string, FirestoreValue> };
+}
+
 interface FirestoreListedDocument {
   id: string;
   data: Record<string, unknown>;
@@ -187,6 +198,27 @@ interface TrainingProgram {
   dayCount: number;
   days: unknown[];
   workoutHistoryIds: string[];
+}
+
+interface ProgramDefinition extends Record<string, unknown> {
+  name: string;
+  days: unknown[];
+}
+
+interface WorkoutHistoryCommandArgs {
+  days: number;
+  start?: string;
+  end?: string;
+  limit?: number;
+  format: string;
+  output?: string;
+  pretty: boolean;
+}
+
+interface CreateProgramCommandArgs {
+  file: string;
+  activate: boolean;
+  dryRun: boolean;
 }
 
 interface WorkoutSource {
@@ -280,88 +312,238 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    const args = await yargs(hideBin(process.argv))
+    await yargs(hideBin(process.argv))
       .scriptName('workouts')
       .strict()
-      .option('days', {
-        alias: ['d'],
-        type: 'number',
-        default: 30,
-        describe: 'Lookback window in days when --start is not set',
-      })
-      .option('start', {
-        type: 'string',
-        describe: 'Start date/time in ISO format (e.g. 2026-02-01 or 2026-02-01T00:00:00Z)',
-      })
-      .option('end', {
-        type: 'string',
-        describe: 'End date/time in ISO format',
-      })
-      .option('limit', {
-        alias: ['l'],
-        type: 'number',
-        describe: 'Maximum number of workouts to return',
-      })
-      .option('format', {
-        alias: ['f'],
-        type: 'string',
-        choices: OUTPUT_FORMATS,
-        default: 'table',
-        describe: 'Output format',
-      })
-      .option('output', {
-        alias: ['o'],
-        type: 'string',
-        describe: 'Write output to this file path',
-      })
-      .option('pretty', {
-        type: 'boolean',
-        default: true,
-        describe: 'Pretty-print JSON output',
-      })
+      .command<WorkoutHistoryCommandArgs>(
+        '$0',
+        'List workout history',
+        builder =>
+          builder
+            .option('days', {
+              alias: ['d'],
+              type: 'number',
+              default: 30,
+              describe: 'Lookback window in days when --start is not set',
+            })
+            .option('start', {
+              type: 'string',
+              describe: 'Start date/time in ISO format (e.g. 2026-02-01 or 2026-02-01T00:00:00Z)',
+            })
+            .option('end', {
+              type: 'string',
+              describe: 'End date/time in ISO format',
+            })
+            .option('limit', {
+              alias: ['l'],
+              type: 'number',
+              describe: 'Maximum number of workouts to return',
+            })
+            .option('format', {
+              alias: ['f'],
+              type: 'string',
+              choices: OUTPUT_FORMATS,
+              default: 'table',
+              describe: 'Output format',
+            })
+            .option('output', {
+              alias: ['o'],
+              type: 'string',
+              describe: 'Write output to this file path',
+            })
+            .option('pretty', {
+              type: 'boolean',
+              default: true,
+              describe: 'Pretty-print JSON output',
+            }),
+        runWorkoutHistoryCommand
+      )
+      .command<CreateProgramCommandArgs>(
+        'program create <file>',
+        'Create a training program from a JSON definition',
+        builder =>
+          builder
+            .positional('file', {
+              type: 'string',
+              demandOption: true,
+              describe: 'JSON program file, or - to read from stdin',
+            })
+            .option('activate', {
+              type: 'boolean',
+              default: false,
+              describe: 'Make the new program active',
+            })
+            .option('dry-run', {
+              type: 'boolean',
+              default: false,
+              describe: 'Validate and print the program without creating it',
+            }),
+        runCreateProgramCommand
+      )
       .help()
+      .version(false)
+      .wrap(process.stdout.columns ?? 80)
+      .fail((message, error) => {
+        throw error ?? new Error(message);
+      })
       .parseAsync();
-
-    if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
-      throw new Error('--limit must be a positive number.');
-    }
-
-    const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
-    const window = resolveWindow({
-      days: args.days,
-      start: args.start,
-      end: args.end,
-    });
-    const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
-    const [profileDocument, historyDocuments] = await Promise.all([
-      client.getUserDocument('profiles/workout', 'Workouts profile request failed'),
-      client.listUserCollection('workoutHistory', 'Workouts history request failed', WORKOUT_HISTORY_PAGE_SIZE),
-    ]);
-    const workoutProfile = parseWorkoutProfile(profileDocument);
-    const activeProgramId = workoutProfile?.activeProgramId ?? null;
-    const activeProgramDocument = activeProgramId
-      ? await client.getUserDocument(`trainingProgram/${activeProgramId}`, `Workouts program request failed for ${activeProgramId}`)
-      : null;
-    const activeProgram = activeProgramId ? parseTrainingProgram(activeProgramId, activeProgramDocument) : null;
-    const report = buildWorkoutsReport({
-      workoutProfile,
-      activeProgram,
-      historyDocuments,
-      window,
-      limit: args.limit,
-    });
-
-    renderOutput({
-      report,
-      format: parseOutputFormat(args.format),
-      outputPath: args.output,
-      pretty: args.pretty,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
     process.exit(1);
   }
+}
+
+async function runWorkoutHistoryCommand(args: WorkoutHistoryCommandArgs): Promise<void> {
+  if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
+    throw new Error('--limit must be a positive number.');
+  }
+
+  const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
+  const window = resolveWindow({
+    days: args.days,
+    start: args.start,
+    end: args.end,
+  });
+  const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+  const [profileDocument, historyDocuments] = await Promise.all([
+    client.getUserDocument('profiles/workout', 'Workouts profile request failed'),
+    client.listUserCollection('workoutHistory', 'Workouts history request failed', WORKOUT_HISTORY_PAGE_SIZE),
+  ]);
+  const workoutProfile = parseWorkoutProfile(profileDocument);
+  const activeProgramId = workoutProfile?.activeProgramId ?? null;
+  const activeProgramDocument = activeProgramId
+    ? await client.getUserDocument(`trainingProgram/${activeProgramId}`, `Workouts program request failed for ${activeProgramId}`)
+    : null;
+  const activeProgram = activeProgramId ? parseTrainingProgram(activeProgramId, activeProgramDocument) : null;
+  const report = buildWorkoutsReport({
+    workoutProfile,
+    activeProgram,
+    historyDocuments,
+    window,
+    limit: args.limit,
+  });
+
+  renderOutput({
+    report,
+    format: parseOutputFormat(args.format),
+    outputPath: args.output,
+    pretty: args.pretty,
+  });
+}
+
+async function runCreateProgramCommand(args: CreateProgramCommandArgs): Promise<void> {
+  const program = parseProgramDefinition(await readProgramDefinition(args.file));
+  const id = createFirestoreDocumentId();
+
+  if (!args.dryRun) {
+    const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
+    const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+    await client.createTrainingProgram(id, program, args.activate);
+  }
+
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        id,
+        name: program.name,
+        activated: args.activate && !args.dryRun,
+        dryRun: args.dryRun,
+        program,
+      },
+      null,
+      2
+    )}\n`
+  );
+}
+
+async function readProgramDefinition(file: string): Promise<unknown> {
+  const text = file === '-' || file === '' ? await Bun.stdin.text() : readFileSync(path.resolve(file), 'utf8');
+  if (!text.trim()) {
+    throw new Error('Program definition is empty.');
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Program definition is not valid JSON: ${message}`);
+  }
+}
+
+function parseProgramDefinition(value: unknown): ProgramDefinition {
+  const input = asRecord(value);
+  if (!input) {
+    throw new Error('Program definition must be a JSON object.');
+  }
+
+  const name = parseOptionalString(input.name);
+  if (!name) {
+    throw new Error('Program definition must include a non-empty name.');
+  }
+  if (!Array.isArray(input.days) || input.days.length === 0) {
+    throw new Error('Program definition must include at least one day.');
+  }
+  if (input.days.some(day => !asRecord(day))) {
+    throw new Error('Every program day must be a JSON object.');
+  }
+  if (input.numCycles != null) {
+    const numCycles = parseNumberLike(input.numCycles);
+    if (numCycles == null || !Number.isInteger(numCycles) || numCycles <= 0) {
+      throw new Error('numCycles must be a positive integer.');
+    }
+  }
+  for (const key of ['runIndefinitely', 'isPeriodized']) {
+    if (input[key] != null && typeof input[key] !== 'boolean') {
+      throw new Error(`${key} must be a boolean.`);
+    }
+  }
+
+  const { id: _id, dayCount: _dayCount, workoutHistoryIds: _workoutHistoryIds, ...program } = input;
+  return {
+    ...program,
+    name,
+    days: input.days,
+    workoutCycleCompletions: [],
+  };
+}
+
+function createFirestoreDocumentId(): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(20));
+  return Array.from(bytes, byte => alphabet[byte % alphabet.length]).join('');
+}
+
+function serializeFirestoreFields(fields: Record<string, unknown>): Record<string, FirestoreValue> {
+  return Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, serializeFirestoreValue(value)]));
+}
+
+function serializeFirestoreValue(value: unknown): FirestoreValue {
+  if (value == null) {
+    return { nullValue: null };
+  }
+  if (typeof value === 'string') {
+    return { stringValue: value };
+  }
+  if (typeof value === 'boolean') {
+    return { booleanValue: value };
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error('Program definition contains a non-finite number.');
+    }
+    return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  }
+  if (Array.isArray(value)) {
+    const values = value.map(serializeFirestoreValue);
+    return values.length ? { arrayValue: { values } } : { arrayValue: {} };
+  }
+  const record = asRecord(value);
+  if (record) {
+    const fields = serializeFirestoreFields(record);
+    return Object.keys(fields).length ? { mapValue: { fields } } : { mapValue: {} };
+  }
+  throw new Error(`Program definition contains an unsupported ${typeof value} value.`);
 }
 
 function renderOutput(options: {
@@ -1229,6 +1411,50 @@ class WorkoutsApiClient {
     } while (pageToken);
 
     return documents;
+  }
+
+  async createTrainingProgram(
+    id: string,
+    program: ProgramDefinition,
+    activate: boolean
+  ): Promise<void> {
+    const token = await this.getIdToken();
+    const userDocumentPath = `${FIRESTORE_DOCUMENTS_PATH}/users/${this.session.userId}`;
+    const writes: Record<string, unknown>[] = [
+      {
+        update: {
+          name: `${userDocumentPath}/trainingProgram/${id}`,
+          fields: serializeFirestoreFields(program),
+        },
+        currentDocument: { exists: false },
+      },
+    ];
+
+    if (activate) {
+      writes.push({
+        update: {
+          name: `${userDocumentPath}/profiles/workout`,
+          fields: {
+            activeProgramId: { stringValue: id },
+          },
+        },
+        updateMask: { fieldPaths: ['activeProgramId'] },
+        currentDocument: { exists: true },
+      });
+    }
+
+    const response = await fetch(`${FIRESTORE_BASE_URL}:commit`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ writes }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Workouts program creation failed: ${await formatError(response)}`);
+    }
   }
 
   private async getIdToken(): Promise<string> {
