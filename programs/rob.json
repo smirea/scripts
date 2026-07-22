@@ -1,0 +1,197 @@
+{
+  "name": "rob",
+  "cycles": 7,
+  "color": "Yellow",
+  "icon": "Extension",
+  "days": [
+    {
+      "name": "shoulders",
+      "exercises": [
+        {
+          "name": "Seated Dumbbell Overhead Press",
+          "notes": "Logged loads (lb): 20×12, 22.5×12, 22.5×10, 22.5×8. Increase weight each set.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Standing Dumbbell Lateral Raise",
+          "notes": "Logged loads (lb): 12.5×12, 12.5×10, 12.5×8, 15×6.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Neutral Grip Pin-Loaded Machine Shoulder Press",
+          "notes": "Narrow grip. Explosive half raise; do not lock out. Starting loads (lb): 80, 90, 95, 100.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Shoulder External Rotation With Arm At Side",
+          "notes": "Keep elbow locked and move like opening a sliding door. Logged: 5×15, 10×12, 10×10.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Front Raise",
+          "notes": "Use a straight bar. Logged loads (lb): 10×12, 15×10, 20×8.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Smith Machine Shrug",
+          "notes": "Failure finisher. Logged: 45 lb×16, 55 lb×13, 60 lb×10.",
+          "sets": [
+            { "type": "failure" },
+            { "type": "failure" },
+            { "type": "failure" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chest",
+      "exercises": [
+        {
+          "name": "45° Incline Dumbbell Press",
+          "notes": "Recent starting loads (lb): 30, 45, 50, 55. Increase weight each set.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Smith Machine Bench Press",
+          "notes": "Explosive half lift; do not lock out. Recent starting loads (lb): 105, 125, 145, 155.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Pec Deck Fly",
+          "notes": "Lean forward. Recent starting loads (lb): 75, 85, 100, 120.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Horizontal Cable Fly",
+          "notes": "Perform from a decline bench angle. Logged starting loads (lb): 15, 20, 25, 30.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Push-Up",
+          "notes": "Failure finisher. Recent reps: 13, 11, 8.",
+          "sets": [
+            { "type": "failure" },
+            { "type": "failure" },
+            { "type": "failure" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "biceps",
+      "exercises": [
+        {
+          "name": "Standing Dumbbell Biceps Curl",
+          "notes": "Starting loads (lb): 15, 17.5, 20, 22.5.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Pin-Loaded Machine Preacher Curl",
+          "notes": "Use the new preacher curl station. Recent load: 50 lb for all sets.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Standing Dumbbell Hammer Curl",
+          "notes": "Starting loads (lb): 12.5, 15, 20, 25.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Incline Dumbbell Biceps Curl",
+          "notes": "Starting loads (lb): 15, 15, 17.5, 20.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Single Arm Cable Biceps Curl (Facing Toward Machine)",
+          "notes": "High-cable curl. Starting loads (lb): 10, 15, 20, 25.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Straight Bar Biceps Curl",
+          "notes": "Face backward with the straight bar between the legs. Use one load for all failure sets; historical load was 20–30 lb.",
+          "sets": [
+            { "type": "failure" },
+            { "type": "failure" },
+            { "type": "failure" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "triceps",
+      "exercises": [
+        {
+          "name": "Dumbbell Skull Crusher",
+          "notes": "Perform on an incline bench. Logged 20 lb dumbbells×12; later sets used a 40 lb barbell.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Rope Triceps Pushdown",
+          "notes": "Starting loads (lb): 35, 40, 40, 45.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Rope Overhead Triceps Extension",
+          "notes": "Starting loads (lb): 20, 25, 30, 35.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Straight Bar Triceps Pushdown",
+          "notes": "Starting loads (lb): 30, 40, 45, 50.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Single Arm Underhand Grip Cable Triceps Pushdown",
+          "notes": "Logged at 10 lb for 11, 8, and 6 reps.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Seated Plate-Loaded Machine Triceps Dip",
+          "notes": "Failure finisher. Logged: 80 lb×20, 105 lb×20.",
+          "sets": [
+            { "type": "failure" },
+            { "type": "failure" }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "back",
+      "exercises": [
+        {
+          "name": "Neutral Grip Cable Row",
+          "notes": "Starting loads (lb): 100, 115, 130, 145.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Overhand Grip Cable Lat Pulldown",
+          "notes": "Starting loads (lb): 104, 110, 120, 130.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Single Arm Elbow-In Dumbbell Row",
+          "notes": "Brace on a bench. Starting loads (lb): 27.5, 35, 45, 50.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Neutral Grip Machine Rear Delt Fly",
+          "notes": "Starting loads (lb): 60, 87.5, 90, 100.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Face Pull",
+          "notes": "Starting loads (lb): 20, 25, 30, 35.",
+          "sets": [12, 10, 8, 6]
+        },
+        {
+          "name": "Cable Bar Straight Arm Lat Pulldown",
+          "notes": "Failure finisher. Logged: 35 lb×20, 40 lb×16, 40 lb×13.",
+          "sets": [
+            { "type": "failure" },
+            { "type": "failure" },
+            { "type": "failure" }
+          ]
+        }
+      ]
+    }
+  ]
+}
