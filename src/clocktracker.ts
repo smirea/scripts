@@ -98,6 +98,7 @@ interface ClockTrackerGame {
 }
 
 interface BgStatsPlayer {
+  uuid?: string;
   name: string;
   sourcePlayerId: string;
   winner: boolean;
@@ -349,7 +350,7 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         ? `clocktracker:${token.player_id}`
         : `clocktracker:name:${normalizeSourceId(name)}`;
       return [{
-        name: mappedPlayerName(sourcePlayerId, name, bgStatsPlayerNames),
+        ...mappedPlayerIdentity(sourcePlayerId, name, bgStatsPlayerNames),
         sourcePlayerId,
         winner: didAlignmentWin(token.alignment, game.win_v2),
         role: token.role?.name || undefined,
@@ -370,7 +371,7 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         continue;
       }
       players.push({
-        name: mappedPlayerName(sourcePlayerId, name.replace(/^@/, ''), bgStatsPlayerNames),
+        ...mappedPlayerIdentity(sourcePlayerId, name.replace(/^@/, ''), bgStatsPlayerNames),
         sourcePlayerId,
         winner: game.win_v2 === 'GOOD_WINS',
         role: 'Storyteller',
@@ -391,7 +392,7 @@ function ownerPlayer(
   const alignment = game.is_storyteller ? undefined : character?.alignment;
   const sourcePlayerId = `clocktracker:${profile.user_id}`;
   return {
-    name: mappedPlayerName(sourcePlayerId, profile.display_name, bgStatsPlayerNames),
+    ...mappedPlayerIdentity(sourcePlayerId, profile.display_name, bgStatsPlayerNames),
     sourcePlayerId,
     winner: game.is_storyteller
       ? game.win_v2 === 'GOOD_WINS'
@@ -401,20 +402,23 @@ function ownerPlayer(
   };
 }
 
-function mappedPlayerName(
+function mappedPlayerIdentity(
   clockTrackerId: string,
   fallbackName: string,
   bgStatsPlayerNames: Map<string, string>,
-): string {
+): Pick<BgStatsPlayer, 'name' | 'uuid'> {
   const newPlayerName = NEW_BG_STATS_PLAYER_NAME_BY_CLOCKTRACKER_ID[clockTrackerId];
   if (newPlayerName) {
-    return newPlayerName;
+    return { name: newPlayerName };
   }
-  const bgStatsUuid = BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID[clockTrackerId];
-  if (!bgStatsUuid) {
-    return fallbackName;
+  const uuid = BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID[clockTrackerId];
+  if (!uuid) {
+    return { name: fallbackName };
   }
-  return bgStatsPlayerNames.get(bgStatsUuid) ?? fallbackName;
+  return {
+    uuid,
+    name: bgStatsPlayerNames.get(uuid) ?? fallbackName,
+  };
 }
 
 function didAlignmentWin(alignment: Alignment, result: WinStatus): boolean {

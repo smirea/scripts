@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { Database } from 'bun:sqlite';
@@ -12,6 +12,9 @@ const READ_ENTITIES = ['games', 'plays', 'players'] as const;
 const OUTPUT_FORMATS = ['json', 'table'] as const;
 const APPLE_REFERENCE_DATE_UNIX_SECONDS = 978_307_200;
 const DEFAULT_SOURCE_NAME = 'bgstats-cli';
+const BG_STATS_BUNDLE_ID = 'nl.vissering.BoardGameStats';
+const BG_STATS_APP_NAME = 'BG Stats';
+const DEFAULT_SYNC_TIMEOUT_SECONDS = 60;
 
 type ReadEntity = (typeof READ_ENTITIES)[number];
 type OutputFormat = (typeof OUTPUT_FORMATS)[number];
@@ -139,6 +142,12 @@ const playInputSchema = z.object({
 
 type PlayInput = z.infer<typeof playInputSchema>;
 
+interface RecordResult {
+  playUuid: string;
+  alreadyExists: boolean;
+  createdPlayers: string[];
+}
+
 if (import.meta.main) {
   runCli().catch(error => {
     console.error(error instanceof Error ? error.message : String(error));
@@ -192,17 +201,32 @@ async function runCli(): Promise<void> {
     )
     .command(
       'write plays [input]',
-      'Open one completed play in BG Stats for confirmation and import.',
+      'Record one completed play directly in BG Stats.',
       command => command
         .positional('input', {
           type: 'string',
           default: '-',
           describe: 'JSON file containing one play, or - to read stdin.',
         })
-        .option('open', {
+        .option('database', {
+          type: 'string',
+          default: defaultDatabasePath(),
+          describe: 'Path to the BG Stats Core Data SQLite database.',
+        })
+        .option('review', {
+          type: 'boolean',
+          default: false,
+          describe: 'Open the play in the BG Stats confirmation screen instead of recording it headlessly.',
+        })
+        .option('sync', {
           type: 'boolean',
           default: true,
-          describe: 'Open the generated import link in BG Stats; use --no-open to print it instead.',
+          describe: 'Open, sync, and close BG Stats before and after a direct write.',
+        })
+        .option('sync-timeout', {
+          type: 'number',
+          default: DEFAULT_SYNC_TIMEOUT_SECONDS,
+          describe: 'Seconds to wait for each BG Stats Cloud Sync.',
         })
         .option('source-name', {
           type: 'string',
@@ -210,26 +234,23 @@ async function runCli(): Promise<void> {
         })
         .example(
           '$0 write plays play.json',
-          'The JSON must contain game.name and a players array; playDate defaults to now.',
+          'Sync BG Stats, record one play, sync it to the cloud, and close the app.',
         ),
       async argv => {
+        if (!Number.isFinite(argv.syncTimeout) || argv.syncTimeout < 1) {
+          throw new Error('--sync-timeout must be at least 1 second.');
+        }
         const input = playInputSchema.parse(await readPlayInput(argv.input));
-        const payload = createImportPayload(input, argv.sourceName);
-        const url = `bgstats://app.bgstatsapp.com/createPlay.html?data=${encodeURIComponent(JSON.stringify(payload))}`;
-
-        if (!argv.open) {
-          process.stdout.write(`${url}\n`);
+        if (argv.review) {
+          openPlayForReview(input, argv.sourceName);
           return;
         }
-
-        const result = spawnSync('open', [url], { stdio: 'inherit' });
-        if (result.error) {
-          throw result.error;
-        }
-        if (result.status !== 0) {
-          throw new Error(`Could not open BG Stats (exit code ${result.status ?? 'unknown'}).`);
-        }
-        process.stdout.write('Opened BG Stats to confirm and import the play.\n');
+        await recordPlayDirectly(input, {
+          databasePath: argv.database,
+          sourceName: argv.sourceName,
+          sync: argv.sync,
+          syncTimeoutSeconds: argv.syncTimeout,
+        });
       },
     )
     .strict()
@@ -536,6 +557,306 @@ async function readPlayInput(inputPath: string): Promise<unknown> {
     }
     throw error;
   }
+}
+
+function openPlayForReview(input: PlayInput, sourceNameOverride?: string): void {
+  const payload = createImportPayload(input, sourceNameOverride);
+  const url = `bgstats://app.bgstatsapp.com/createPlay.html?data=${encodeURIComponent(JSON.stringify(payload))}`;
+  const result = spawnSync('open', [url], { stdio: 'inherit' });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`Could not open BG Stats (exit code ${result.status ?? 'unknown'}).`);
+  }
+  process.stdout.write('Opened BG Stats to confirm and import the play.\n');
+}
+
+async function recordPlayDirectly(
+  input: PlayInput,
+  options: {
+    databasePath: string;
+    sourceName?: string;
+    sync: boolean;
+    syncTimeoutSeconds: number;
+  },
+): Promise<void> {
+  const databasePath = path.resolve(options.databasePath);
+  const payload = createRecordPayload(input, options.sourceName);
+
+  if (options.sync) {
+    await syncAndCloseBgStats('before recording', options.syncTimeoutSeconds);
+  } else if (isBgStatsRunning()) {
+    throw new Error('BG Stats must be closed before a direct write. Quit it or omit --no-sync.');
+  }
+
+  assertNoPendingCloudSync(databasePath);
+  const backupPath = backupDatabase(databasePath);
+  let result: RecordResult;
+  try {
+    result = runStoreHelper<RecordResult>(['record', databasePath, defaultModelPath()], payload);
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)} Backup preserved at ${backupPath}.`);
+  }
+
+  if (result.alreadyExists) {
+    process.stdout.write(`Play ${result.playUuid} was already recorded; no data was changed.\n`);
+    process.stdout.write(`Backup: ${backupPath}\n`);
+    return;
+  }
+
+  if (options.sync) {
+    try {
+      await syncAndCloseBgStats('after recording', options.syncTimeoutSeconds);
+      assertPlayCloudSynced(databasePath, result.playUuid);
+    } catch (error) {
+      throw new Error(
+        `Play ${result.playUuid} is recorded locally, but post-write sync verification failed: `
+        + `${error instanceof Error ? error.message : String(error)} Backup preserved at ${backupPath}.`,
+      );
+    }
+  }
+
+  process.stdout.write(`Recorded play ${result.playUuid}.\n`);
+  if (result.createdPlayers.length > 0) {
+    process.stdout.write(`Created players: ${result.createdPlayers.join(', ')}\n`);
+  }
+  process.stdout.write(`Backup: ${backupPath}\n`);
+}
+
+function createRecordPayload(input: PlayInput, sourceNameOverride?: string): object {
+  const sourceName = sourceNameOverride ?? input.sourceName ?? DEFAULT_SOURCE_NAME;
+  if (!sourceName.trim()) {
+    throw new Error('--source-name must not be empty.');
+  }
+  return {
+    uuid: input.uuid,
+    sourceName,
+    sourcePlayId: input.sourcePlayId ?? input.uuid ?? crypto.randomUUID(),
+    playDate: input.playDate ?? new Date().toISOString(),
+    durationMin: input.durationMin ?? undefined,
+    comments: input.comments ?? undefined,
+    board: input.board ?? undefined,
+    location: typeof input.location === 'string'
+      ? { name: input.location }
+      : input.location ?? undefined,
+    game: {
+      uuid: input.game.uuid,
+      name: input.game.name,
+      bggId: input.game.bggId ?? undefined,
+      highestWins: input.game.highestWins,
+      highestScoreWins: input.game.highestScoreWins,
+      noPoints: input.game.noPoints,
+    },
+    players: input.players.map(player => ({
+      uuid: player.uuid,
+      name: player.name,
+      sourcePlayerId: player.sourcePlayerId,
+      startPlayer: player.startPlayer ?? false,
+      winner: player.winner ?? false,
+      score: player.score ?? undefined,
+      rank: player.rank ?? undefined,
+      role: player.role ?? undefined,
+      team: player.team ?? undefined,
+    })),
+  };
+}
+
+function assertNoPendingCloudSync(databasePath: string): void {
+  const database = new Database(databasePath, { readonly: true, strict: true });
+  try {
+    database.run('PRAGMA query_only = ON');
+    assertBgStatsDatabase(database);
+    const entities = [
+      ['games', 'ZGAME'],
+      ['locations', 'ZLOCATION'],
+      ['plays', 'ZPLAY'],
+      ['players', 'ZPLAYER'],
+    ] as const;
+    const pending = entities.flatMap(([name, table]) => {
+      const row = database.query(`
+        SELECT COUNT(*) AS count
+        FROM ${table}
+        WHERE ZMODIFICATIONDATETIME IS NULL
+           OR ZLASTCLOUDSYNC IS NULL
+           OR ZMODIFICATIONDATETIME > ZLASTCLOUDSYNC
+      `).get() as { count: number };
+      return row.count > 0 ? [`${row.count} ${name}`] : [];
+    });
+    if (pending.length > 0) {
+      throw new Error(`BG Stats still has unsynced local data (${pending.join(', ')}); no write was attempted.`);
+    }
+  } finally {
+    database.close();
+  }
+}
+
+function backupDatabase(databasePath: string): string {
+  const home = process.env.HOME;
+  if (!home) {
+    throw new Error('HOME is not set.');
+  }
+  const backupDirectory = path.join(home, 'Library', 'Application Support', 'bgstats-cli', 'backups');
+  mkdirSync(backupDirectory, { recursive: true });
+  const timestamp = new Date().toISOString().replaceAll(/[-:.]/g, '');
+  const backupPath = path.join(backupDirectory, `Model-${timestamp}.sqlite`);
+  if (existsSync(backupPath)) {
+    throw new Error(`Refusing to overwrite existing backup ${backupPath}.`);
+  }
+  const escapedBackupPath = backupPath.replaceAll("'", "''");
+  const result = spawnSync('sqlite3', [databasePath, `.backup '${escapedBackupPath}'`], {
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `Could not back up the BG Stats database (exit code ${result.status ?? 'unknown'}).`);
+  }
+  return backupPath;
+}
+
+function assertPlayCloudSynced(databasePath: string, playUuid: string): void {
+  const database = new Database(databasePath, { readonly: true, strict: true });
+  try {
+    const row = database.query(`
+      SELECT
+        ZLASTCLOUDSYNC AS lastCloudSync,
+        ZMODIFICATIONDATETIME AS modificationDate
+      FROM ZPLAY
+      WHERE ZUUID = ?
+    `).get(playUuid) as { lastCloudSync: number | null; modificationDate: number | null } | null;
+    if (!row) {
+      throw new Error(`BG Stats did not retain recorded play ${playUuid}. The backup was preserved.`);
+    }
+    if (row.lastCloudSync == null || row.modificationDate == null || row.lastCloudSync < row.modificationDate) {
+      throw new Error(`Play ${playUuid} is recorded locally but Cloud Sync did not confirm it.`);
+    }
+  } finally {
+    database.close();
+  }
+}
+
+async function syncAndCloseBgStats(phase: string, timeoutSeconds: number): Promise<void> {
+  if (isBgStatsRunning()) {
+    quitBgStats();
+  }
+  const previousMarker = readCloudSyncMarker();
+  const launched = spawnSync('open', ['-g', '-a', BG_STATS_APP_NAME], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  if (launched.error) {
+    throw launched.error;
+  }
+  if (launched.status !== 0) {
+    throw new Error(launched.stderr.trim() || `Could not open ${BG_STATS_APP_NAME}.`);
+  }
+
+  try {
+    await waitFor(() => isBgStatsRunning(), 15_000, 'BG Stats did not finish launching.');
+    await waitFor(
+      () => {
+        const marker = readCloudSyncMarker();
+        return marker != null && marker !== previousMarker;
+      },
+      timeoutSeconds * 1000,
+      `BG Stats Cloud Sync did not finish ${phase} within ${timeoutSeconds} seconds.`,
+    );
+  } finally {
+    if (isBgStatsRunning()) {
+      quitBgStats();
+    }
+  }
+}
+
+function readCloudSyncMarker(): string | null {
+  const result = spawnSync('/usr/bin/plutil', [
+    '-extract',
+    'LastSuccessfulCloudSync',
+    'raw',
+    '-o',
+    '-',
+    defaultPreferencesPath(),
+  ], {
+    encoding: 'utf8',
+    timeout: 3_000,
+  });
+  if (result.error) {
+    if ('code' in result.error && result.error.code === 'ETIMEDOUT') {
+      throw new Error('macOS blocked access to BG Stats data. Allow access to data from other apps, then retry.');
+    }
+    throw result.error;
+  }
+  return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null;
+}
+
+function isBgStatsRunning(): boolean {
+  const result = spawnSync('pgrep', ['-f', 'Board Game Stats\\.app/Board Game Stats$'], {
+    encoding: 'utf8',
+    timeout: 3_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  return result.status === 0;
+}
+
+function quitBgStats(): void {
+  runStoreHelper(['quit-app']);
+}
+
+function runStoreHelper<T = void>(arguments_: string[], input?: unknown): T {
+  const result = spawnSync('swift', [defaultStoreHelperPath(), ...arguments_], {
+    encoding: 'utf8',
+    input: input == null ? undefined : JSON.stringify(input),
+    maxBuffer: 10_000_000,
+    timeout: 60_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || `The BG Stats store helper failed (exit code ${result.status ?? 'unknown'}).`);
+  }
+  return (result.stdout.trim() ? JSON.parse(result.stdout) : undefined) as T;
+}
+
+async function waitFor(check: () => boolean, timeoutMs: number, errorMessage: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) {
+      return;
+    }
+    await Bun.sleep(500);
+  }
+  throw new Error(errorMessage);
+}
+
+function defaultModelPath(): string {
+  return '/Applications/BG Stats.app/Wrapper/Board Game Stats.app/Model.momd';
+}
+
+function defaultStoreHelperPath(): string {
+  return path.join(import.meta.dir, 'bgstatsStore.swift');
+}
+
+function defaultPreferencesPath(): string {
+  const home = process.env.HOME;
+  if (!home) {
+    throw new Error('HOME is not set.');
+  }
+  return path.join(
+    home,
+    'Library',
+    'Containers',
+    BG_STATS_BUNDLE_ID,
+    'Data',
+    'Library',
+    'Preferences',
+    `${BG_STATS_BUNDLE_ID}.plist`,
+  );
 }
 
 function createImportPayload(input: PlayInput, sourceNameOverride?: string): object {
