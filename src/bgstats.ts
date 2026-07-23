@@ -112,6 +112,7 @@ const gameInputSchema = z.object({
   highestWins: z.boolean().optional(),
   highestScoreWins: z.boolean().optional(),
   noPoints: z.boolean().optional(),
+  usesTeams: z.boolean().optional(),
 }).passthrough();
 
 const playerInputSchema = z.object({
@@ -796,6 +797,7 @@ function createRecordPayload(input: PlayInput, sourceNameOverride?: string) {
       highestWins: input.game.highestWins,
       highestScoreWins: input.game.highestScoreWins,
       noPoints: input.game.noPoints,
+      usesTeams: input.game.usesTeams,
     },
     players: input.players.map(player => ({
       uuid: player.uuid,
@@ -1061,6 +1063,7 @@ function createImportPayload(input: PlayInput, sourceNameOverride?: string): obj
       bggId: input.game.bggId ?? undefined,
       highestWins: input.game.highestWins ?? input.game.highestScoreWins,
       noPoints: input.game.noPoints,
+      usesTeams: input.game.usesTeams,
     },
     players: input.players.map(player => ({
       name: player.name,

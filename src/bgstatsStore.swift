@@ -12,6 +12,7 @@ struct PlayInput: Decodable {
         let highestWins: Bool?
         let highestScoreWins: Bool?
         let noPoints: Bool?
+        let usesTeams: Bool?
     }
 
     struct LocationInput: Decodable {
@@ -175,6 +176,12 @@ func findOrCreateGame(
         existing = try fetchOne("Game", in: context, predicate: NSPredicate(format: "name ==[cd] %@", input.name))
     }
     if let existing {
+        if let usesTeams = input.usesTeams,
+           existing.value(forKey: "usesTeams") as? Bool != usesTeams {
+            existing.setValue(usesTeams, forKey: "usesTeams")
+            existing.setValue(now, forKey: "modificationDateTime")
+            existing.setValue(nil, forKey: "lastCloudSync")
+        }
         return existing
     }
 
@@ -184,6 +191,7 @@ func findOrCreateGame(
     game.setValue(input.bggId ?? 0, forKey: "bggId")
     game.setValue(input.highestWins ?? input.highestScoreWins, forKey: "highestScoreWins")
     game.setValue(input.noPoints, forKey: "noPoints")
+    game.setValue(input.usesTeams, forKey: "usesTeams")
     game.setValue("{}", forKey: "metaData")
     return game
 }
@@ -362,6 +370,7 @@ func applyPlayInput(
     play.setValue(input.board, forKey: "board")
     play.setValue(input.players.count, forKey: "playerCount")
     play.setValue(input.players.contains(where: { $0.winner == true }) ? 1 : 0, forKey: "manualWinner")
+    play.setValue(input.game.usesTeams ?? false, forKey: "usesTeams")
     if input.game.noPoints == true {
         play.setValue(3, forKey: "scoringSetting")
     }

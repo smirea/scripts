@@ -134,6 +134,7 @@ interface BgStatsPlay {
     name: string;
     sourceGameId: string;
     noPoints: boolean;
+    usesTeams: boolean;
   };
   players: BgStatsPlayer[];
 }
@@ -346,12 +347,20 @@ function toBgStatsPlay(
   const players = latestPlayers(game, bgStatsPlayerNames);
   const owner = players.find(player => player.sourcePlayerId === `clocktracker:${profile.user_id}`);
   if (!owner) {
-    players.unshift(ownerPlayer(game, profile, bgStatsPlayerNames));
+    const fallbackOwner = ownerPlayer(game, profile, bgStatsPlayerNames);
+    if (fallbackOwner.role === '_storyteller') {
+      players.unshift(fallbackOwner);
+    } else {
+      players.push(fallbackOwner);
+    }
   }
 
-  const location = game.location.trim()
+  const locationName = game.location.trim()
     || game.community_name.trim()
     || (game.location_type === 'ONLINE' ? 'Online' : '');
+  const location = locationName && game.location_type === 'IN_PERSON'
+    ? austinLocationName(locationName)
+    : locationName;
 
   return {
     uuid: BG_STATS_PLAY_UUID_BY_CLOCKTRACKER_ID[game.id],
@@ -365,6 +374,7 @@ function toBgStatsPlay(
       name: 'Blood on the Clocktower',
       sourceGameId: 'clocktracker:blood-on-the-clocktower',
       noPoints: true,
+      usesTeams: true,
     },
     players,
   };
@@ -405,7 +415,7 @@ function writeBgStatsPlays(plays: BgStatsPlay[], syncTimeout: number, databasePa
 
 function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, string>): BgStatsPlayer[] {
   const tokens = game.grimoire.at(-1)?.tokens ?? [];
-  const players = [...tokens]
+  const seatedPlayers = [...tokens]
     .sort((left, right) => left.order - right.order)
     .flatMap(token => {
       const name = token.player?.display_name?.trim()
@@ -422,10 +432,11 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         sourcePlayerId,
         winner: didAlignmentWin(token.alignment, game.win_v2),
         role: bgStatsRoles(token.alignment, token.role?.type, token.role?.name),
-        team: titleCase(token.alignment),
+        team: bgStatsTeam(token.alignment),
       }];
     });
 
+  const storytellers: BgStatsPlayer[] = [];
   if (!game.is_storyteller) {
     for (const rawName of [game.storyteller, ...game.co_storytellers]) {
       const name = rawName?.trim();
@@ -435,20 +446,20 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
       const sourcePlayerId = name.startsWith('@')
         ? `clocktracker:username:${normalizeSourceId(name.slice(1))}`
         : `clocktracker:name:${normalizeSourceId(name)}`;
-      if (players.some(player => player.sourcePlayerId === sourcePlayerId)) {
+      if (seatedPlayers.some(player => player.sourcePlayerId === sourcePlayerId)) {
         continue;
       }
-      players.push({
+      storytellers.push({
         ...mappedPlayerIdentity(sourcePlayerId, name.replace(/^@/, ''), bgStatsPlayerNames),
         sourcePlayerId,
         winner: game.win_v2 === 'GOOD_WINS',
         role: '_storyteller',
-        team: 'Storyteller',
+        team: '0',
       });
     }
   }
 
-  return players;
+  return [...storytellers, ...seatedPlayers];
 }
 
 function ownerPlayer(
@@ -468,7 +479,7 @@ function ownerPlayer(
     role: game.is_storyteller
       ? '_storyteller'
       : bgStatsRoles(alignment, character?.role?.type, character?.name),
-    team: game.is_storyteller ? 'Storyteller' : alignment ? titleCase(alignment) : undefined,
+    team: game.is_storyteller ? '0' : bgStatsTeam(alignment),
   };
 }
 
@@ -483,7 +494,7 @@ function mappedPlayerIdentity(
   }
   const uuid = BG_STATS_PLAYER_UUID_BY_CLOCKTRACKER_ID[clockTrackerId];
   if (!uuid) {
-    return { name: fallbackName };
+    return { name: austinPlayerName(fallbackName) };
   }
   return {
     uuid,
@@ -514,7 +525,7 @@ function printOutput(
       date: clockTrackerDate(game.date),
       script: game.script,
       role: me?.role ?? '',
-      team: me?.team ?? '',
+      team: me?.team === '0' ? 'Storyteller' : me?.team === '1' ? 'Evil' : me?.team === '2' ? 'Good' : '',
       result: game.win_v2 === 'NOT_RECORDED' ? '' : me?.winner ? 'Win' : 'Loss',
       players: play.players.length,
       location: play.location ?? '',
@@ -545,20 +556,28 @@ function clockTrackerDate(value: string): string {
 }
 
 function bgStatsRoles(alignment?: string, section?: string, character?: string): string | undefined {
-  const roles = [alignment, section].flatMap(value => {
+  const roles = character?.trim() ? [character.trim()] : [];
+  roles.push(...[alignment, section].flatMap(value => {
     const normalized = value?.trim().toLowerCase();
     return normalized ? [`_${normalized}`] : [];
-  });
-  if (character?.trim()) {
-    roles.push(character.trim());
-  }
+  }));
   return roles.length > 0 ? roles.join('／') : undefined;
+}
+
+function bgStatsTeam(alignment?: Alignment): string | undefined {
+  return alignment === 'EVIL' ? '1' : alignment === 'GOOD' ? '2' : undefined;
+}
+
+function austinLocationName(value: string): string {
+  const name = value.trim();
+  return /^🇺🇸\s*Austin:\s*/iu.test(name) ? name : `🇺🇸 Austin: ${name}`;
+}
+
+function austinPlayerName(value: string): string {
+  const name = value.trim();
+  return /\(austin,\s*botc\)$/iu.test(name) ? name : `${name} (austin, botc)`;
 }
 
 function normalizeSourceId(value: string): string {
   return value.trim().toLowerCase().replaceAll(/\s+/g, '-');
-}
-
-function titleCase(value: string): string {
-  return value.charAt(0) + value.slice(1).toLowerCase();
 }
