@@ -8,6 +8,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 const API_BASE_URL = 'https://clocktracker.app';
+const BROWSER_GATE_HEALTH_URL = 'http://127.0.0.1:17373/health';
 const OUTPUT_FORMATS = ['bgstats', 'table'] as const;
 const NEW_BG_STATS_PLAYER_NAME_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
   'clocktracker:name:grant': 'Grant (austin, botc)',
@@ -219,24 +220,35 @@ async function fetchClockTrackerData(): Promise<{
   profile: ClockTrackerProfile;
   games: ClockTrackerGame[];
 }> {
-  const session = getBrowserGateSession();
-  const headers = sessionHeaders(session);
-  const profile = await fetchJson<ClockTrackerProfile>('/api/settings', headers);
-  if (!profile?.user_id || !profile.username || !profile.display_name) {
-    throw new Error('ClockTracker returned an unexpected profile response.');
+  const browserGate = browserGatePath();
+  await ensureBrowserGateConnection(browserGate);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const session = getBrowserGateSession(browserGate);
+    const headers = sessionHeaders(session);
+    try {
+      const profile = await fetchJson<ClockTrackerProfile>('/api/settings', headers);
+      if (!profile?.user_id || !profile.username || !profile.display_name) {
+        throw new Error('ClockTracker returned an unexpected profile response.');
+      }
+      const games = await fetchJson<ClockTrackerGame[]>(
+        `/api/user/${encodeURIComponent(profile.username)}/games`,
+        headers,
+      );
+      if (!Array.isArray(games)) {
+        throw new Error('ClockTracker returned an unexpected games response.');
+      }
+      return { profile, games };
+    } catch (error) {
+      if (attempt === 0 && error instanceof Error && error.message.includes('401 Unauthorized')) {
+        continue;
+      }
+      throw error;
+    }
   }
-  const games = await fetchJson<ClockTrackerGame[]>(
-    `/api/user/${encodeURIComponent(profile.username)}/games`,
-    headers,
-  );
-  if (!Array.isArray(games)) {
-    throw new Error('ClockTracker returned an unexpected games response.');
-  }
-  return { profile, games };
+  throw new Error('ClockTracker authentication failed.');
 }
 
-function getBrowserGateSession(): BrowserGateSession {
-  const browserGate = browserGatePath();
+function getBrowserGateSession(browserGate: string): BrowserGateSession {
   const tabs = runBrowserGate(browserGate, ['tabs', 'list', '--json']) as {
     tabs?: Array<{ url?: string }>;
   };
@@ -257,6 +269,59 @@ function getBrowserGateSession(): BrowserGateSession {
     throw new Error('BrowserGate did not return a ClockTracker session.');
   }
   return session as BrowserGateSession;
+}
+
+async function ensureBrowserGateConnection(browserGate: string): Promise<void> {
+  try {
+    runBrowserGate(browserGate, ['tabs', 'list', '--json']);
+    return;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/extension is not connected|local Browser Gate bridge/iu.test(message)) {
+      throw error;
+    }
+  }
+
+  openChrome(API_BASE_URL);
+  if (await waitForBrowserGateConnection(30_000)) {
+    return;
+  }
+
+  throw new Error(
+    'BrowserGate did not connect after Chrome was opened. Enable or reload Browser Gate in chrome://extensions and retry.',
+  );
+}
+
+function openChrome(url: string): void {
+  const result = spawnSync('open', ['-g', '-a', 'Google Chrome', url], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(result.stderr.trim() || 'Could not open Google Chrome.');
+  }
+}
+
+async function waitForBrowserGateConnection(timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(BROWSER_GATE_HEALTH_URL, {
+        signal: AbortSignal.timeout(500),
+      });
+      if (response.ok) {
+        const health = await response.json() as { extensionConnected?: boolean };
+        if (health.extensionConnected) {
+          return true;
+        }
+      }
+    } catch {}
+    await Bun.sleep(500);
+  }
+  return false;
 }
 
 function browserGatePath(): string {

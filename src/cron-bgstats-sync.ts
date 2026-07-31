@@ -176,14 +176,14 @@ function readClockTrackerPlays(since: string): ClockTrackerPlay[] {
     '--since',
     since,
     '--format=bgstats',
-  ], 'ClockTracker');
+  ], 'ClockTracker', 120_000);
 }
 
-function runJsonArrayCommand<T>(args: string[], name: string): T[] {
+function runJsonArrayCommand<T>(args: string[], name: string, timeout = 60_000): T[] {
   const result = spawnSync(process.execPath, args, {
     encoding: 'utf8',
     maxBuffer: 10_000_000,
-    timeout: 60_000,
+    timeout,
   });
   assertCommandSucceeded(result, name);
   try {
