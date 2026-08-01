@@ -125,6 +125,7 @@ const playerInputSchema = z.object({
   rank: z.number().int().positive().nullish(),
   role: z.string().nullish(),
   team: z.string().nullish(),
+  teamRole: z.string().nullish(),
 }).passthrough();
 
 const playInputSchema = z.object({
@@ -809,6 +810,7 @@ function createRecordPayload(input: PlayInput, sourceNameOverride?: string) {
       rank: player.rank ?? undefined,
       role: player.role ?? undefined,
       team: player.team ?? undefined,
+      teamRole: player.teamRole ?? undefined,
     })),
   };
 }
@@ -1074,6 +1076,7 @@ function createImportPayload(input: PlayInput, sourceNameOverride?: string): obj
       rank: player.rank ?? undefined,
       role: player.role ?? undefined,
       team: player.team ?? undefined,
+      teamRole: player.teamRole ?? undefined,
     })),
   };
 }

@@ -29,6 +29,7 @@ struct PlayInput: Decodable {
         let rank: Int?
         let role: String?
         let team: String?
+        let teamRole: String?
     }
 
     enum Score: Decodable {
@@ -103,9 +104,7 @@ func activateApp() {
         .first(where: { !$0.isTerminated }) else {
         fail("BG Stats is not running.")
     }
-    if !application.activate(options: [.activateAllWindows]) {
-        fail("BG Stats could not be activated.")
-    }
+    _ = application.activate(options: [.activateAllWindows])
 }
 
 func loadContext(databasePath: String, modelPath: String) throws -> NSManagedObjectContext {
@@ -410,6 +409,7 @@ func applyPlayInput(
         score.setValue(playerInput.rank ?? 0, forKey: "rank")
         score.setValue(playerInput.role, forKey: "role")
         score.setValue(playerInput.team, forKey: "team")
+        score.setValue(playerInput.teamRole, forKey: "teamRole")
         score.setValue(index + 1, forKey: "seatOrder")
         score.setValue("{}", forKey: "metaData")
     }

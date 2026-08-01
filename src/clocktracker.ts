@@ -9,6 +9,8 @@ import { hideBin } from 'yargs/helpers';
 
 const API_BASE_URL = 'https://clocktracker.app';
 const BROWSER_GATE_HEALTH_URL = 'http://127.0.0.1:17373/health';
+const TRACKER_USERNAME = 'cygnets';
+const IMPORT_COMMENT = 'imported from clocktracker.app';
 const OUTPUT_FORMATS = ['bgstats', 'table'] as const;
 const NEW_BG_STATS_PLAYER_NAME_BY_CLOCKTRACKER_ID: Readonly<Record<string, string>> = {
   'clocktracker:name:grant': 'Grant (austin, botc)',
@@ -116,6 +118,7 @@ interface BgStatsPlayer {
   winner: boolean;
   role?: string;
   team?: string;
+  teamRole?: string;
 }
 
 interface BgStatsStoredPlayer {
@@ -230,14 +233,24 @@ async function fetchClockTrackerData(): Promise<{
       if (!profile?.user_id || !profile.username || !profile.display_name) {
         throw new Error('ClockTracker returned an unexpected profile response.');
       }
-      const games = await fetchJson<ClockTrackerGame[]>(
+      const personalGames = await fetchJson<ClockTrackerGame[]>(
         `/api/user/${encodeURIComponent(profile.username)}/games`,
         headers,
       );
-      if (!Array.isArray(games)) {
+      const trackedGames = profile.username === TRACKER_USERNAME
+        ? personalGames
+        : await fetchJson<ClockTrackerGame[]>(
+            `/api/user/${encodeURIComponent(TRACKER_USERNAME)}/games`,
+            headers,
+            60_000,
+          );
+      if (!Array.isArray(personalGames) || !Array.isArray(trackedGames)) {
         throw new Error('ClockTracker returned an unexpected games response.');
       }
-      return { profile, games };
+      return {
+        profile,
+        games: mergeTrackedGames(profile, personalGames, trackedGames),
+      };
     } catch (error) {
       if (attempt === 0 && error instanceof Error && error.message.includes('401 Unauthorized')) {
         continue;
@@ -249,19 +262,9 @@ async function fetchClockTrackerData(): Promise<{
 }
 
 function getBrowserGateSession(browserGate: string): BrowserGateSession {
-  const tabs = runBrowserGate(browserGate, ['tabs', 'list', '--json']) as {
-    tabs?: Array<{ url?: string }>;
-  };
-  const clockTrackerTab = tabs.tabs?.find(tab => {
-    try {
-      return new URL(tab.url ?? '').hostname === 'clocktracker.app';
-    } catch {
-      return false;
-    }
-  });
   const session = runBrowserGate(browserGate, [
     'get-session',
-    clockTrackerTab?.url ?? API_BASE_URL,
+    API_BASE_URL,
     '--json',
   ]) as Partial<BrowserGateSession>;
 
@@ -333,7 +336,7 @@ function browserGatePath(): string {
 }
 
 function runBrowserGate(browserGate: string, args: string[]): unknown {
-  const result = spawnSync(browserGate, args, {
+  const result = spawnSync(process.execPath, [browserGate, ...args], {
     encoding: 'utf8',
     maxBuffer: 1_000_000,
     timeout: 25_000,
@@ -349,6 +352,96 @@ function runBrowserGate(browserGate: string, args: string[]): unknown {
   } catch {
     throw new Error('BrowserGate returned invalid JSON.');
   }
+}
+
+function mergeTrackedGames(
+  profile: ClockTrackerProfile,
+  personalGames: ClockTrackerGame[],
+  trackedGames: ClockTrackerGame[],
+): ClockTrackerGame[] {
+  const relevantTrackedGames = trackedGames.filter(game => gameIncludesProfile(game, profile));
+  const trackedByFingerprint = new Map(
+    relevantTrackedGames.map(game => [gameFingerprint(game), game]),
+  );
+  const personalFingerprints = new Set(personalGames.map(game => gameFingerprint(game)));
+  return [
+    ...personalGames.map(game => enrichPersonalGame(game, trackedByFingerprint.get(gameFingerprint(game)))),
+    ...relevantTrackedGames
+      .filter(game => !personalFingerprints.has(gameFingerprint(game)))
+      .map(normalizeTrackedGame),
+  ];
+}
+
+function enrichPersonalGame(
+  game: ClockTrackerGame,
+  trackedGame?: ClockTrackerGame,
+): ClockTrackerGame {
+  if (!trackedGame?.is_storyteller || game.storyteller?.trim()) {
+    return game;
+  }
+  return {
+    ...game,
+    storyteller: `@${TRACKER_USERNAME}`,
+    co_storytellers: [...new Set([...game.co_storytellers, ...trackedGame.co_storytellers])],
+  };
+}
+
+function normalizeTrackedGame(game: ClockTrackerGame): ClockTrackerGame {
+  if (!game.is_storyteller) {
+    return game;
+  }
+  return {
+    ...game,
+    storyteller: `@${TRACKER_USERNAME}`,
+    is_storyteller: false,
+  };
+}
+
+function gameIncludesProfile(game: ClockTrackerGame, profile: ClockTrackerProfile): boolean {
+  const profileNames = new Set([
+    normalizeSourceId(profile.display_name),
+    normalizeSourceId(profile.username),
+  ]);
+  const matchesProfile = (value?: string | null) => {
+    const normalized = normalizeSourceId(value?.replace(/^@/, '') ?? '');
+    return normalized.length > 0 && profileNames.has(normalized);
+  };
+  if ([game.storyteller, ...game.co_storytellers].some(matchesProfile)) {
+    return true;
+  }
+  return (game.grimoire.at(-1)?.tokens ?? []).some(token => {
+    if (token.player_id === profile.user_id) {
+      return true;
+    }
+    return !token.player_id && [
+      token.player?.display_name,
+      token.player_name,
+      token.player?.username,
+    ].some(matchesProfile);
+  });
+}
+
+function gameFingerprint(game: ClockTrackerGame): string {
+  const players = [...(game.grimoire.at(-1)?.tokens ?? [])]
+    .sort((left, right) => left.order - right.order)
+    .map(token => [
+      normalizeSourceId(
+        token.player?.display_name
+          || token.player_name
+          || token.player?.username
+          || '',
+      ),
+      normalizeSourceId(token.role?.name ?? ''),
+      token.alignment,
+    ].join(':'))
+    .join('|');
+  return [
+    clockTrackerDate(game.date),
+    normalizeSourceId(game.script),
+    normalizeSourceId(game.location),
+    game.win_v2,
+    players,
+  ].join('\0');
 }
 
 function readBgStatsPlayerNames(): Map<string, string> {
@@ -393,10 +486,10 @@ function sessionHeaders(session: BrowserGateSession): Headers {
   return headers;
 }
 
-async function fetchJson<T>(pathname: string, headers: Headers): Promise<T> {
+async function fetchJson<T>(pathname: string, headers: Headers, timeoutMs = 20_000): Promise<T> {
   const response = await fetch(new URL(pathname, API_BASE_URL), {
     headers,
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     throw new Error(`ClockTracker request failed: ${response.status} ${response.statusText}`);
@@ -409,7 +502,7 @@ function toBgStatsPlay(
   profile: ClockTrackerProfile,
   bgStatsPlayerNames: Map<string, string>,
 ): BgStatsPlay {
-  const players = latestPlayers(game, bgStatsPlayerNames);
+  const players = latestPlayers(game, profile, bgStatsPlayerNames);
   const owner = players.find(player => player.sourcePlayerId === `clocktracker:${profile.user_id}`);
   if (!owner) {
     const fallbackOwner = ownerPlayer(game, profile, bgStatsPlayerNames);
@@ -432,7 +525,7 @@ function toBgStatsPlay(
     sourceName: 'clocktracker.app',
     sourcePlayId: game.id,
     playDate: `${clockTrackerDate(game.date)} 00:00:00`,
-    comments: game.notes.trim() || undefined,
+    comments: IMPORT_COMMENT,
     board: game.script.trim() || undefined,
     location: location || undefined,
     game: {
@@ -478,7 +571,11 @@ function writeBgStatsPlays(plays: BgStatsPlay[], syncTimeout: number, databasePa
   process.stdout.write(result.stdout);
 }
 
-function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, string>): BgStatsPlayer[] {
+function latestPlayers(
+  game: ClockTrackerGame,
+  profile: ClockTrackerProfile,
+  bgStatsPlayerNames: Map<string, string>,
+): BgStatsPlayer[] {
   const tokens = game.grimoire.at(-1)?.tokens ?? [];
   const seatedPlayers = [...tokens]
     .sort((left, right) => left.order - right.order)
@@ -491,13 +588,16 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
       }
       const sourcePlayerId = token.player_id
         ? `clocktracker:${token.player_id}`
-        : `clocktracker:name:${normalizeSourceId(name)}`;
+        : participantMatchesProfile(name, profile)
+          ? `clocktracker:${profile.user_id}`
+          : `clocktracker:name:${normalizeSourceId(name)}`;
       return [{
         ...mappedPlayerIdentity(sourcePlayerId, name, bgStatsPlayerNames),
         sourcePlayerId,
         winner: didAlignmentWin(token.alignment, game.win_v2),
         role: bgStatsRoles(token.alignment, token.role?.type, token.role?.name),
         team: bgStatsTeam(token.alignment),
+        teamRole: bgStatsTeamRole(token.alignment),
       }];
     });
 
@@ -508,9 +608,11 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
       if (!name) {
         continue;
       }
-      const sourcePlayerId = name.startsWith('@')
-        ? `clocktracker:username:${normalizeSourceId(name.slice(1))}`
-        : `clocktracker:name:${normalizeSourceId(name)}`;
+      const sourcePlayerId = participantMatchesProfile(name, profile)
+        ? `clocktracker:${profile.user_id}`
+        : name.startsWith('@')
+          ? `clocktracker:username:${normalizeSourceId(name.slice(1))}`
+          : `clocktracker:name:${normalizeSourceId(name)}`;
       if (seatedPlayers.some(player => player.sourcePlayerId === sourcePlayerId)) {
         continue;
       }
@@ -520,6 +622,7 @@ function latestPlayers(game: ClockTrackerGame, bgStatsPlayerNames: Map<string, s
         winner: game.win_v2 === 'GOOD_WINS',
         role: '_storyteller',
         team: '0',
+        teamRole: 'storyteller',
       });
     }
   }
@@ -545,6 +648,7 @@ function ownerPlayer(
       ? '_storyteller'
       : bgStatsRoles(alignment, character?.role?.type, character?.name),
     team: game.is_storyteller ? '0' : bgStatsTeam(alignment),
+    teamRole: game.is_storyteller ? 'storyteller' : bgStatsTeamRole(alignment),
   };
 }
 
@@ -633,6 +737,10 @@ function bgStatsTeam(alignment?: Alignment): string | undefined {
   return alignment === 'EVIL' ? '1' : alignment === 'GOOD' ? '2' : undefined;
 }
 
+function bgStatsTeamRole(alignment?: Alignment): string | undefined {
+  return alignment === 'EVIL' ? 'evil' : alignment === 'GOOD' ? 'good' : undefined;
+}
+
 function austinLocationName(value: string): string {
   const name = value.trim();
   return /^🇺🇸\s*Austin:\s*/iu.test(name) ? name : `🇺🇸 Austin: ${name}`;
@@ -645,4 +753,10 @@ function austinPlayerName(value: string): string {
 
 function normalizeSourceId(value: string): string {
   return value.trim().toLowerCase().replaceAll(/\s+/g, '-');
+}
+
+function participantMatchesProfile(value: string, profile: ClockTrackerProfile): boolean {
+  const normalized = normalizeSourceId(value.replace(/^@/, ''));
+  return normalized === normalizeSourceId(profile.display_name)
+    || normalized === normalizeSourceId(profile.username);
 }
