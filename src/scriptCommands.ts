@@ -22,6 +22,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'clocktracker', source: 'src/clocktracker.ts' },
   { name: 'cron-bgstats-sync', source: 'src/cron-bgstats-sync.ts' },
   { name: 'email-inbox', source: 'src/email-inbox.ts' },
+  { name: 'sms-inbox', source: 'src/sms-inbox.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {

@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sms-inbox",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-24",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sms-inbox",
+      "database_id": "f0b40be2-484e-4760-b8c9-f256ca31d8c4",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
