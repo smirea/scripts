@@ -38,6 +38,7 @@ if (import.meta.main) {
       process.exit(0);
     }
 
+    assertGeminiAvailable();
     const stagedDiff = getStagedDiff();
     if (!stagedDiff.trim()) {
       throw new Error(
@@ -168,6 +169,12 @@ function getStagedDiff(): string {
   const result = spawnSync("git", ["diff", "--cached"], { encoding: "utf8" });
   handleSpawnErrors(result, "git diff --cached");
   return result.stdout ?? "";
+}
+
+function assertGeminiAvailable(): void {
+  if (!Bun.which("gemini")) {
+    throw new Error("Gemini CLI is required when no commit message is provided.");
+  }
 }
 
 function buildPrompt(stagedDiff: string): string {
