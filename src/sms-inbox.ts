@@ -3,6 +3,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import env from './env';
+import { failWithFullHelp } from './utils/yargs';
 
 interface MessageRow {
   id: string;
@@ -107,11 +108,8 @@ async function run(): Promise<void> {
     .strict()
     .demandCommand(1, 'Choose a command.')
     .recommendCommands()
-    .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 }

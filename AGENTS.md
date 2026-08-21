@@ -2,7 +2,7 @@
 
 - Run `src/setup.ts` to (re)create command wrappers for scripts. Add new scripts to `src/scriptCommands.ts`
 - when making a new script try using `src/utils/createScript.ts` and use bun headers and make the file executable
-- use `yargs` for arg management, always use `.help()` and `.strict()` arg parsing and proper reasonable arg types, remove the --version and allow the text to wrap to the terminal dimensions. write descriptions for each argument where not obvious
+- use `yargs` for arg management, always use `.help()`, `.strict()`, and `failWithFullHelp` from `src/utils/yargs` so invalid arguments and missing commands show the full relevant help, including for nested subcommands. use proper reasonable arg types, remove `--version` and allow the text to wrap to the terminal dimensions. write descriptions for each argument where not obvious
 - if interactivity is desired see how other scripts in this repo do it and use the same libs
 - read project environment variables directly from `src/env.ts` (default `env` object) only; do not add other env parsing/loading utilities. keep system vars (like `HOME`/`SHELL`) on `process.env`. when env keys change, run `env-manager ts` to regenerate `src/env.ts`
 

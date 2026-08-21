@@ -7,6 +7,7 @@ import { hideBin } from 'yargs/helpers';
 
 import env from './env';
 import { renderCsvRecords, renderTableRecords, type CsvValue } from './utils/output';
+import { failWithFullHelp } from './utils/yargs';
 
 const API_BASE_URL = 'https://subscription.cookunity.com/sdui-service';
 const API_VERSION = '1.25.0';
@@ -131,11 +132,8 @@ async function runCli(): Promise<void> {
     .strictCommands()
     .demandCommand(1, 'Choose a CookUnity command.')
     .recommendCommands()
-    .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 }

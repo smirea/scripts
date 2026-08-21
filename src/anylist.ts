@@ -11,6 +11,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import env from './env';
+import { failWithFullHelp } from './utils/yargs';
 
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const CREDENTIAL_KEY = 'ANYLIST_CREDENTIALS';
@@ -245,6 +246,7 @@ async function runCli(): Promise<void> {
         .demandCommand(1),
       async () => undefined)
     .demandCommand(1)
+    .fail(failWithFullHelp)
     .help();
 
   await cli.parse();
@@ -913,7 +915,7 @@ function formatMutationResult(value: MutationResult): string {
 
 if (import.meta.main) {
   runCli().catch(error => {
-    console.error(error);
+    console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   });
 }

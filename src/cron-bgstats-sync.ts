@@ -8,6 +8,8 @@ import { format, isValid, parseISO, subDays } from 'date-fns';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
+import { failWithFullHelp } from './utils/yargs';
+
 const SOURCE_NAME = 'clocktracker.app';
 const DEFAULT_LOOKBACK_DAYS = 30;
 const DEFAULT_SYNC_TIMEOUT_SECONDS = 60;
@@ -96,11 +98,8 @@ async function runCli(): Promise<void> {
     .strictCommands()
     .demandCommand(1, 'Choose run or install.')
     .recommendCommands()
-    .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 }

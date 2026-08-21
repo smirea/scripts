@@ -3,6 +3,7 @@ import yargs, { type Argv } from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import env from './env';
+import { failWithFullHelp } from './utils/yargs';
 
 const PLACES_BASE_URL = 'https://places.googleapis.com/v1';
 const DEFAULT_LIMIT = 20;
@@ -158,11 +159,8 @@ async function run(): Promise<void> {
 		.strict()
 		.demandCommand(1, 'Choose a command.')
 		.recommendCommands()
-		.showHelpOnFail(false)
 		.wrap(process.stdout.columns || 100)
-		.fail((message, error) => {
-			throw error ?? new Error(message);
-		})
+		.fail(failWithFullHelp)
 		.help()
 		.parseAsync();
 }

@@ -15,6 +15,7 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
+import { failWithFullHelp } from './utils/yargs';
 import {
   logWorkouts,
   readLocalWorkoutsSnapshot,
@@ -457,9 +458,7 @@ async function runCli(): Promise<void> {
       .help()
       .version(false)
       .wrap(process.stdout.columns ?? 80)
-      .fail((message, error) => {
-        throw error ?? new Error(message);
-      })
+      .fail(failWithFullHelp)
       .parseAsync();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -9,10 +9,14 @@ import type { Argv, ArgumentsCamelCase } from "yargs";
 import { hideBin } from "yargs/helpers";
 
 import { formatTabularRows } from "./utils/tabular";
+import { failWithFullHelp } from "./utils/yargs";
 
 const home = requireEnv("HOME");
 
-void runCli();
+void runCli().catch(error => {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exit(1);
+});
 
 interface WorktreeEntry {
   path: string;
@@ -109,6 +113,7 @@ async function runCli(): Promise<void> {
           console.log(target);
         })
     )
+    .fail(failWithFullHelp)
     .help()
     .wrap(100)
     .parseAsync();

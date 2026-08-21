@@ -8,6 +8,8 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { z } from 'zod';
 
+import { failWithFullHelp } from './utils/yargs';
+
 const READ_ENTITIES = ['games', 'plays', 'players'] as const;
 const OUTPUT_FORMATS = ['json', 'table'] as const;
 const APPLE_REFERENCE_DATE_UNIX_SECONDS = 978_307_200;
@@ -312,11 +314,8 @@ async function runCli(): Promise<void> {
     .strictCommands()
     .demandCommand(1, 'Choose a BG Stats command.')
     .recommendCommands()
-    .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 }

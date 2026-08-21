@@ -3,6 +3,7 @@ import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
 import { createScript } from '../utils/createScript';
+import { failWithFullHelp } from '../utils/yargs';
 import { mealPlanCommand } from './commands/mealplan';
 import { printFoodCommand } from './commands/print-food';
 import { trackCommand } from './commands/track';
@@ -21,8 +22,7 @@ async function runCliWithErrorFormatting(): Promise<void> {
 }
 
 async function runCli(): Promise<void> {
-  const args = hideBin(process.argv);
-  const parser = yargs(args)
+  await yargs(hideBin(process.argv))
     .scriptName('era-fit')
     .version(false)
     .strict()
@@ -31,15 +31,7 @@ async function runCli(): Promise<void> {
     .command(mealPlanCommand)
     .command(trackCommand)
     .demandCommand(1, 'Choose an Era Fit command.')
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
-    .help();
-
-  if (args.length === 0) {
-    parser.showHelp();
-    return;
-  }
-
-  await parser.parseAsync();
+    .fail(failWithFullHelp)
+    .help()
+    .parseAsync();
 }

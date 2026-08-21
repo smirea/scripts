@@ -4,6 +4,8 @@ import type { SpawnSyncReturns } from "node:child_process";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
+import { failWithFullHelp } from "./utils/yargs";
+
 const DEFAULT_OWNER = "smirea";
 const DEFAULT_AI_USER = "smirea-ai";
 const DEFAULT_DAYS = 365;
@@ -158,6 +160,7 @@ async function parseCliArgs(): Promise<CliArgs> {
       default: true,
       describe: "Start gh auth login when either account is not already available",
     })
+    .fail(failWithFullHelp)
     .help()
     .wrap(100)
     .parseAsync();

@@ -22,6 +22,7 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
+import { failWithFullHelp } from './utils/yargs';
 
 const BASE_URL = 'https://api.prod.whoop.com/developer/v2';
 const AUTH_URL = 'https://api.prod.whoop.com/oauth/oauth2/auth';
@@ -221,6 +222,7 @@ async function runCli(): Promise<void> {
         type: 'string',
         describe: 'Manually set WHOOP_REFRESH_TOKEN in .env.local before fetching data',
       })
+      .fail(failWithFullHelp)
       .help()
       .parseAsync();
 

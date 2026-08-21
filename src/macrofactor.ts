@@ -17,6 +17,7 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
+import { failWithFullHelp } from './utils/yargs';
 
 const SOURCE_PATH = 'cache://macrofactor/firestore';
 const MACROFACTOR_APP_BUNDLE_ID = 'com.sbs.diet';
@@ -595,6 +596,7 @@ async function runCli(): Promise<void> {
         describe: 'MacroFactor app warm mode: auto opens when stale or missing docs, open always opens, none never opens',
       })
       .version(false)
+      .fail(failWithFullHelp)
       .help()
       .parseAsync();
 

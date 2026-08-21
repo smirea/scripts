@@ -7,6 +7,8 @@ import { format, isValid, parseISO, subDays } from 'date-fns';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 
+import { failWithFullHelp } from './utils/yargs';
+
 const API_BASE_URL = 'https://clocktracker.app';
 const BROWSER_GATE_HEALTH_URL = 'http://127.0.0.1:17373/health';
 const TRACKER_USERNAME = 'cygnets';
@@ -184,11 +186,8 @@ async function runCli(): Promise<void> {
     .example('$0 --format table', 'Show games from the past week in a table.')
     .example('$0 --write', 'Update existing source plays and record new ones in BG Stats.')
     .strict()
-    .showHelpOnFail(false)
     .wrap(process.stdout.columns || 100)
-    .fail((message, error) => {
-      throw error ?? new Error(message);
-    })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 

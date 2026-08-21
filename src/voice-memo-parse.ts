@@ -20,6 +20,7 @@ import path from "node:path";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import env from "./env";
+import { failWithFullHelp } from "./utils/yargs";
 
 const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const APP_NAME = "Voice Memos";
@@ -291,6 +292,7 @@ async function parseCliArgs(): Promise<CliArgs> {
       default: DEFAULT_HIGHLIGHTS_MODEL,
       describe: "Gemini model used to generate _overview.md highlights",
     })
+    .fail(failWithFullHelp)
     .help()
     .parseAsync();
 

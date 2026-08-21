@@ -9,6 +9,8 @@ import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
 import { hideBin } from "yargs/helpers";
 
+import { failWithFullHelp } from "./utils/yargs";
+
 const composeFile = `services:
   backend:
     image: ghcr.io/get-convex/convex-backend:latest
@@ -128,6 +130,7 @@ async function main() {
       (argv: ArgumentsCamelCase<IdOptions>) => openDashboard(argv.id),
     )
     .demandCommand(1, "Choose a command.")
+    .fail(failWithFullHelp)
     .help()
     .wrap(process.stdout.columns || 100)
     .parseAsync();
