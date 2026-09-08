@@ -23,6 +23,8 @@ const env = z.object({
   EMAIL_INBOX_TOKEN: z.string(),
   SMS_INBOX_URL: z.url(),
   SMS_INBOX_TOKEN: z.string(),
+  AIRBNB_SESSION_COOKIE: z.string().optional(),
+  AIRBNB_API_KEY: z.string().optional(),
 }).parse(process.env);
 
 export default env;
