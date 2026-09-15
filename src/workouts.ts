@@ -16,6 +16,7 @@ import {
 } from './utils/output';
 import { failWithFullHelp } from './utils/yargs';
 import {
+  createLocalProgram,
   logWorkouts,
   readLocalWorkoutsSnapshot,
   type WorkoutLogDefinition,
@@ -243,7 +244,7 @@ interface ProgramExerciseDefinition {
 
 interface ProgramDayDefinition {
   name: string;
-  exercises: ProgramExerciseDefinition[];
+  blocks: { exercises: ProgramExerciseDefinition[] }[];
 }
 
 interface ProgramDefinition {
@@ -625,7 +626,19 @@ async function runCreateProgramCommand(args: CreateProgramCommandArgs): Promise<
   }
 
   const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
-  const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+  let client: WorkoutsApiClient;
+  try {
+    client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes('Firebase App Check token is invalid')) {
+      throw error;
+    }
+    const backupPath = await createLocalProgram(programId, document, args.activate);
+    process.stdout.write(
+      `Program ${programId}: ${program.name} queued${args.activate ? ' and set active' : ''}. Workouts was opened to sync it.\nBackup: ${backupPath}\n`
+    );
+    return;
+  }
   await client.setUserDocument(
     `trainingProgram/${programId}`,
     document,
@@ -659,7 +672,7 @@ async function readProgramDefinition(file: string): Promise<unknown> {
   }
 }
 
-function parseProgramDefinition(value: unknown): ProgramDefinition {
+export function parseProgramDefinition(value: unknown): ProgramDefinition {
   const input = asRecord(value);
   if (!input) {
     throw new Error('Program definition must be a JSON object.');
@@ -694,15 +707,29 @@ function parseProgramDay(value: unknown, dayIndex: number): ProgramDayDefinition
   if (!name) {
     throw new Error(`Day ${dayIndex + 1} must include a non-empty name.`);
   }
-  if (!Array.isArray(input.exercises)) {
-    throw new Error(`${name} must include an exercises array.`);
+  if (input.blocks != null && input.exercises != null) {
+    throw new Error(`${name} must use either blocks or exercises, not both.`);
+  }
+  const blocks = input.blocks ?? (Array.isArray(input.exercises)
+    ? input.exercises.map(exercise => ({ exercises: [exercise] }))
+    : null);
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    throw new Error(`${name} must include a non-empty blocks or exercises array.`);
   }
 
   return {
     name,
-    exercises: input.exercises.map((exercise, exerciseIndex) =>
-      parseProgramExercise(exercise, name, exerciseIndex)
-    ),
+    blocks: blocks.map((value, blockIndex) => {
+      const block = asRecord(value);
+      if (!Array.isArray(block?.exercises) || block.exercises.length === 0) {
+        throw new Error(`${name} block ${blockIndex + 1} must include a non-empty exercises array.`);
+      }
+      return {
+        exercises: block.exercises.map((exercise, exerciseIndex) =>
+          parseProgramExercise(exercise, `${name} block ${blockIndex + 1}`, exerciseIndex)
+        ),
+      };
+    }),
   };
 }
 
@@ -1344,7 +1371,7 @@ function parseDateArg(value: string, label: string): number {
 }
 
 
-function buildTrainingProgramDocument(program: ProgramDefinition, programId: string): Record<string, unknown> {
+export function buildTrainingProgramDocument(program: ProgramDefinition, programId: string): Record<string, unknown> {
   return {
     id: programId,
     name: program.name,
@@ -1360,12 +1387,10 @@ function buildTrainingProgramDocument(program: ProgramDefinition, programId: str
       return {
         id: dayId,
         name: day.name,
-        blocks: [
-          {
-            id: crypto.randomUUID(),
-            exercises: day.exercises.map(exercise => buildProgramExerciseDocument(exercise)),
-          },
-        ],
+        blocks: day.blocks.map(block => ({
+          id: crypto.randomUUID(),
+          exercises: block.exercises.map(exercise => buildProgramExerciseDocument(exercise)),
+        })),
       };
     }),
   };
@@ -1380,7 +1405,7 @@ function buildProgramExerciseDocument(exercise: ProgramExerciseDefinition): Reco
     periodizedTargets: {
       runtimeType: 'simple',
       value: {
-        overrideRestTimers: false,
+        overrideRestTimers: exercise.sets.some(set => set.restSeconds != null),
         sets: exercise.sets.map(set => ({
           setType: set.type,
           log: {

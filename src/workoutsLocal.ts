@@ -146,6 +146,39 @@ export async function readLocalWorkoutsSnapshot(): Promise<LocalWorkoutsSnapshot
   }
 }
 
+export async function createLocalProgram(
+  programId: string,
+  document: Record<string, unknown>,
+  activate: boolean
+): Promise<string> {
+  assertWorkoutsIsClosed();
+  const stores = resolveWorkoutsStores();
+  const snapshot = await readLocalWorkoutsSnapshot();
+  const backupPath = backupWorkoutsStores(stores);
+  const writes = [{
+    path: `users/${snapshot.userId}/trainingProgram/${programId}`,
+    merge: false,
+    data: document,
+  }];
+  if (activate) {
+    writes.push({
+      path: `users/${snapshot.userId}/profiles/workout`,
+      merge: true,
+      data: { activeProgramId: programId },
+    });
+  }
+  const temporaryRoot = mkdtempSync(path.join(tmpdir(), 'workouts-program-'));
+  try {
+    const operationsPath = path.join(temporaryRoot, 'operations.json');
+    writeFileSync(operationsPath, JSON.stringify({ writes }));
+    queueFirestoreWrites(stores.firestorePath, snapshot.userId, operationsPath);
+  } finally {
+    rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+  Bun.spawnSync({ cmd: ['open', '-a', 'Workouts'], stdout: 'ignore', stderr: 'ignore' });
+  return backupPath;
+}
+
 export async function logWorkouts(
   definition: WorkoutLogDefinition,
   options: { activate: boolean; dryRun: boolean }

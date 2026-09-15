@@ -1,0 +1,387 @@
+{
+  "name": "3 day upper",
+  "days": [
+    {
+      "name": "A — Push",
+      "exercises": [
+        {
+          "name": "Barbell Bench Press",
+          "notes": "Alternative: chest press machine. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "Neutral Grip Pin-Loaded Machine Shoulder Press",
+          "notes": "Alternative: seated dumbbell press. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "45° Incline Dumbbell Press",
+          "notes": "When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "Cable Straight Bar Triceps Pushdown",
+          "notes": "When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "B — Pull",
+      "exercises": [
+        {
+          "name": "Overhand Grip Cable Lat Pulldown",
+          "notes": "Alternative: neutral-grip lat pulldown. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "Neutral Grip Cable Row",
+          "notes": "Seated cable row. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "Neutral Grip Machine Rear Delt Fly",
+          "notes": "Alternative: cable face pull. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        },
+        {
+          "name": "Cable Straight Bar Biceps Curl",
+          "notes": "Alternative: EZ-bar curl. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "restSeconds": 75
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "C — Shoulders + arms",
+      "blocks": [
+        {
+          "exercises": [
+            {
+              "name": "Neutral Grip Pin-Loaded Machine Shoulder Press",
+              "notes": "Use slightly less weight than on Day A. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+              "sets": [
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "exercises": [
+            {
+              "name": "Chest-Supported Dumbbell Row",
+              "notes": "Alternative: single-arm dumbbell row. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+              "sets": [
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "exercises": [
+            {
+              "name": "Standing Dumbbell Lateral Raise",
+              "notes": "Alternative: lateral raise machine. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+              "sets": [
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "exercises": [
+            {
+              "name": "Cable Straight Bar Triceps Pushdown",
+              "notes": "Superset with cable curl: perform one pushdown set, then one curl set, then rest about 75 seconds. Repeat for 3 rounds. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+              "sets": [
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 0
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 0
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 0
+                }
+              ]
+            },
+            {
+              "name": "Cable Straight Bar Biceps Curl",
+              "notes": "Superset with pushdown: perform after each pushdown set, then rest about 75 seconds. When all 3 sets hit 12 reps, add 5 lb next time. Repeat on the same three training days each week; aim for about 30 minutes per session.",
+              "sets": [
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                },
+                {
+                  "reps": [
+                    8,
+                    12
+                  ],
+                  "restSeconds": 75
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
