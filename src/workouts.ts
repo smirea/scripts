@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-import * as XLSX from 'xlsx';
 
 import env from './env';
 import {
@@ -100,6 +99,9 @@ const WORKOUTS_EXERCISE_NAME_BY_ID: Record<string, string> = {
   '2ab5c6f170d88056b4b7ecef4d1ae9b4': 'Low Pulley Face Pull',
   '2ab5c6f170d880839baed369debc0459': 'Chest-Supported Dumbbell Row',
 };
+const WORKOUTS_EXERCISE_ID_BY_NAME: Record<string, string> = Object.fromEntries(
+  Object.entries(WORKOUTS_EXERCISE_NAME_BY_ID).map(([id, name]) => [name.toLowerCase(), id])
+);
 const SUMMARY_COLUMNS = [
   'date',
   'time',
@@ -234,6 +236,7 @@ interface ProgramSetDefinition {
 
 interface ProgramExerciseDefinition {
   name: string;
+  exerciseId: string | null;
   notes: string | null;
   sets: ProgramSetDefinition[];
 }
@@ -264,8 +267,8 @@ interface WorkoutHistoryCommandArgs {
 
 interface CreateProgramCommandArgs {
   file: string;
-  output?: string;
   dryRun: boolean;
+  activate: boolean;
 }
 
 interface LogWorkoutCommandArgs {
@@ -413,7 +416,7 @@ async function runCli(): Promise<void> {
       )
       .command<CreateProgramCommandArgs>(
         'program create <file>',
-        'Create an importable MacroFactor Workouts program from JSON',
+        'Create a MacroFactor Workouts program via the Firestore API',
         builder =>
           builder
             .positional('file', {
@@ -421,15 +424,15 @@ async function runCli(): Promise<void> {
               demandOption: true,
               describe: 'JSON program file, or - to read from stdin',
             })
-            .option('output', {
-              alias: ['o'],
-              type: 'string',
-              describe: 'Output .xlsx path (defaults to the program name)',
+            .option('activate', {
+              type: 'boolean',
+              default: false,
+              describe: 'Set the created program as the active program',
             })
             .option('dry-run', {
               type: 'boolean',
               default: false,
-              describe: 'Validate and print the normalized program without writing a file',
+              describe: 'Validate and print the normalized program without creating it',
             }),
         runCreateProgramCommand
       )
@@ -614,18 +617,32 @@ function parseWorkoutLogDefinition(value: unknown): WorkoutLogDefinition {
 
 async function runCreateProgramCommand(args: CreateProgramCommandArgs): Promise<void> {
   const program = parseProgramDefinition(await readProgramDefinition(args.file));
+  const programId = crypto.randomUUID();
+  const document = buildTrainingProgramDocument(program, programId);
   if (args.dryRun) {
     process.stdout.write(`${JSON.stringify(program, null, 2)}\n`);
     return;
   }
 
-  const outputPath = path.resolve(args.output ?? `${toSafeFileName(program.name)}.xlsx`);
-  if (path.extname(outputPath).toLowerCase() !== '.xlsx') {
-    throw new Error('--output must use the .xlsx extension.');
+  const credentials = parseMacrofactorCredentials(env.MACROFACTOR_CREDENTIALS);
+  const client = await WorkoutsApiClient.login(credentials.email, credentials.password);
+  await client.setUserDocument(
+    `trainingProgram/${programId}`,
+    document,
+    `Workouts program create failed for ${programId}`
+  );
+  if (args.activate) {
+    await client.setUserDocument(
+      'profiles/workout',
+      { activeProgramId: programId },
+      'Workouts profile update failed',
+      ['activeProgramId']
+    );
   }
 
-  writeProgramWorkbook(program, outputPath);
-  process.stdout.write(`${outputPath}\n`);
+  process.stdout.write(
+    `Created program ${programId}: ${program.name}${args.activate ? ' (activated)' : ''}\n`
+  );
 }
 
 async function readProgramDefinition(file: string): Promise<unknown> {
@@ -705,6 +722,7 @@ function parseProgramExercise(value: unknown, dayName: string, exerciseIndex: nu
 
   return {
     name,
+    exerciseId: parseOptionalString(input.exerciseId),
     notes: parseOptionalString(input.notes),
     sets: input.sets.map((set, setIndex) => parseProgramSet(set, `${dayName}: ${name} set ${setIndex + 1}`)),
   };
@@ -792,85 +810,6 @@ function parseNumberInRange(value: unknown, label: string, minimum: number, maxi
     throw new Error(`${label} must be a number ${range}.`);
   }
   return parsed;
-}
-
-function toSafeFileName(value: string): string {
-  return value
-    .trim()
-    .replace(/[^a-z0-9._-]+/gi, '-')
-    .replace(/^-+|-+$/g, '') || 'program';
-}
-
-function writeProgramWorkbook(program: ProgramDefinition, outputPath: string): void {
-  const maxSetCount = Math.max(...program.days.flatMap(day => day.exercises.map(exercise => exercise.sets.length)), 1);
-  const columnCount = 3 + maxSetCount * 4;
-  const rows: (string | number | null)[][] = [
-    padProgramRow(
-      [
-        `Program: ${program.name}`,
-        `Cycles: ${program.cycles}`,
-        `Deload: ${program.deload}`,
-        `Color: ${program.color}`,
-        `Icon: ${program.icon}`,
-      ],
-      columnCount
-    ),
-    padProgramRow(['Block 1'], columnCount),
-    [
-      'Cycle 1',
-      'Exercise',
-      'Notes',
-      ...Array.from({ length: maxSetCount }, (_, index) => [
-        `Set ${index + 1} Type`,
-        `Set ${index + 1} Rep Range`,
-        `Set ${index + 1} RIR`,
-        `Set ${index + 1} Rest`,
-      ]).flat(),
-    ],
-  ];
-  const merges: XLSX.Range[] = [];
-
-  for (const day of program.days) {
-    if (day.exercises.length === 0) {
-      rows.push(padProgramRow(['Rest'], columnCount));
-      continue;
-    }
-
-    const startRow = rows.length;
-    for (const [exerciseIndex, exercise] of day.exercises.entries()) {
-      const setCells = Array.from({ length: maxSetCount }, (_, setIndex) => {
-        const set = exercise.sets[setIndex];
-        if (!set) {
-          return [null, null, null, null];
-        }
-        const repRange =
-          set.minReps == null || set.maxReps == null ? null : `${set.minReps} - ${set.maxReps}`;
-        return [set.type, repRange, set.rir, set.restSeconds];
-      }).flat();
-      rows.push([exerciseIndex === 0 ? day.name : null, exercise.name, exercise.notes, ...setCells]);
-    }
-    const endRow = rows.length - 1;
-    if (endRow > startRow) {
-      merges.push({ s: { r: startRow, c: 0 }, e: { r: endRow, c: 0 } });
-    }
-  }
-
-  const workbook = XLSX.utils.book_new();
-  const worksheet = XLSX.utils.aoa_to_sheet(rows);
-  worksheet['!merges'] = merges;
-  worksheet['!cols'] = [
-    { wch: 18 },
-    { wch: 46 },
-    { wch: 58 },
-    ...Array.from({ length: maxSetCount * 4 }, (_, index) => ({ wch: index % 4 === 1 ? 18 : 14 })),
-  ];
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Training Programs');
-  mkdirSync(path.dirname(outputPath), { recursive: true });
-  XLSX.writeFile(workbook, outputPath, { compression: true });
-}
-
-function padProgramRow(values: (string | number | null)[], length: number): (string | number | null)[] {
-  return [...values, ...Array.from({ length: Math.max(0, length - values.length) }, () => null)];
 }
 
 function renderOutput(options: {
@@ -1404,6 +1343,116 @@ function parseDateArg(value: string, label: string): number {
   return timestamp / 1000;
 }
 
+
+function buildTrainingProgramDocument(program: ProgramDefinition, programId: string): Record<string, unknown> {
+  return {
+    id: programId,
+    name: program.name,
+    color: program.color.trim().toLowerCase(),
+    icon: program.icon.trim().toLowerCase(),
+    numCycles: program.cycles,
+    runIndefinitely: true,
+    isPeriodized: false,
+    deload: program.deload,
+    workoutCycleCompletions: {},
+    days: program.days.map(day => {
+      const dayId = crypto.randomUUID();
+      return {
+        id: dayId,
+        name: day.name,
+        blocks: [
+          {
+            id: crypto.randomUUID(),
+            exercises: day.exercises.map(exercise => buildProgramExerciseDocument(exercise)),
+          },
+        ],
+      };
+    }),
+  };
+}
+
+function buildProgramExerciseDocument(exercise: ProgramExerciseDefinition): Record<string, unknown> {
+  const exerciseId = exercise.exerciseId ?? resolveExerciseIdByName(exercise.name);
+  return {
+    id: crypto.randomUUID(),
+    exerciseId,
+    note: exercise.notes ?? '',
+    periodizedTargets: {
+      runtimeType: 'simple',
+      value: {
+        overrideRestTimers: false,
+        sets: exercise.sets.map(set => ({
+          setType: set.type,
+          log: {
+            id: crypto.randomUUID(),
+            minFullReps: set.minReps,
+            maxFullReps: set.maxReps,
+            rir: set.rir,
+            restTimer: secondsToMicros(set.restSeconds),
+            durationSeconds: null,
+            distance: null,
+          },
+        })),
+      },
+    },
+  };
+}
+
+function resolveExerciseIdByName(name: string): string {
+  const id = WORKOUTS_EXERCISE_ID_BY_NAME[name.trim().toLowerCase()];
+  if (!id) {
+    throw new Error(`Unknown exercise "${name}". Pass exerciseId or use a name from the Workouts catalog.`);
+  }
+  return id;
+}
+
+function secondsToMicros(value: number | null): number | null {
+  return value == null ? null : value * MICROS_PER_SECOND;
+}
+
+function encodeFirestoreValue(value: unknown): Record<string, unknown> {
+  if (value === null) {
+    return { nullValue: null };
+  }
+  if (typeof value === 'string') {
+    return { stringValue: value };
+  }
+  if (typeof value === 'boolean') {
+    return { booleanValue: value };
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new Error(`Cannot encode non-finite number ${value} for Firestore.`);
+    }
+    return Number.isInteger(value)
+      ? { integerValue: String(value) }
+      : { doubleValue: value };
+  }
+  if (Array.isArray(value)) {
+    return {
+      arrayValue: {
+        values: value.map(encodeFirestoreValue),
+      },
+    };
+  }
+  if (typeof value === 'object') {
+    return {
+      mapValue: {
+        fields: encodeFirestoreFields(value as Record<string, unknown>),
+      },
+    };
+  }
+  throw new Error(`Unsupported Firestore value type: ${typeof value}`);
+}
+
+function encodeFirestoreFields(fields: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    result[key] = encodeFirestoreValue(value);
+  }
+  return result;
+}
+
 function parseMacrofactorCredentials(value: string | undefined): { email: string; password: string } {
   const raw = value?.trim();
   if (!raw) {
@@ -1738,6 +1787,34 @@ class WorkoutsApiClient {
     } while (pageToken);
 
     return documents;
+  }
+
+  async setUserDocument(
+    pathSuffix: string,
+    data: Record<string, unknown>,
+    errorLabel: string,
+    fieldPaths?: string[]
+  ): Promise<void> {
+    const token = await this.getIdToken();
+    const url = new URL(`${FIRESTORE_BASE_URL}/users/${this.session.userId}/${pathSuffix}`);
+    if (fieldPaths) {
+      for (const fieldPath of fieldPaths) {
+        url.searchParams.append('updateMask.fieldPaths', fieldPath);
+      }
+    }
+
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ fields: encodeFirestoreFields(data) }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`${errorLabel}: ${await formatError(response)}`);
+    }
   }
 
   private async getIdToken(): Promise<string> {
