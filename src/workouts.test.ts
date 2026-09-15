@@ -43,3 +43,26 @@ test('rejects ambiguous or empty program blocks', () => {
     expect(() => parseProgramDefinition({ name: 'Invalid', days: [day] })).toThrow();
   }
 });
+
+test('serializes the native app schema instead of display labels', () => {
+  const document = buildTrainingProgramDocument(parseProgramDefinition(program), 'test-program');
+  expect(document).toMatchObject({ deload: null, expanded: false });
+  const days = document.days as any[];
+  const notes = document.programExerciseIdToNote as Record<string, { note: string; updatedAt: string }>;
+  for (const day of days) {
+    expect(day.gymId).toBeNull();
+    for (const block of day.blocks) {
+      for (const exercise of block.exercises) {
+        expect(exercise).not.toHaveProperty('note');
+        expect(notes[exercise.id]?.note).toContain('add 5 lb');
+        expect(notes[exercise.id]?.updatedAt).toBe(document.updatedAt as string);
+        expect(exercise.periodizedTargets.deload).toBeNull();
+        expect(exercise.periodizedTargets.value.isSkipped).toBe(false);
+        for (const set of exercise.periodizedTargets.value.sets) {
+          expect(set.setType).toBe('standard');
+          expect(set.log).not.toHaveProperty('id');
+        }
+      }
+    }
+  }
+});

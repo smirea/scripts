@@ -160,13 +160,17 @@ export async function createLocalProgram(
     merge: false,
     data: document,
   }];
-  if (activate) {
-    writes.push({
-      path: `users/${snapshot.userId}/profiles/workout`,
-      merge: true,
-      data: { activeProgramId: programId },
-    });
-  }
+  const libraryIds = Array.isArray(snapshot.profile?.workoutLibraryIds)
+    ? snapshot.profile.workoutLibraryIds.filter((id): id is string => typeof id === 'string')
+    : [];
+  writes.push({
+    path: `users/${snapshot.userId}/profiles/workout`,
+    merge: true,
+    data: {
+      workoutLibraryIds: [...new Set([...libraryIds, programId])],
+      ...(activate ? { activeProgramId: programId } : {}),
+    },
+  });
   const temporaryRoot = mkdtempSync(path.join(tmpdir(), 'workouts-program-'));
   try {
     const operationsPath = path.join(temporaryRoot, 'operations.json');

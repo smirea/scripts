@@ -51,7 +51,8 @@ const WORKOUTS_EXERCISE_NAME_BY_ID: Record<string, string> = {
   '1a05c6f170d88060bbffeeb9acaa3c80': 'Seated Dumbbell Overhead Press',
   '1a05c6f170d8806ab70ee93a5c79d733': 'Dumbbell Bench Press',
   '1a05c6f170d8806b911acf558c5af4f6': '45° Incline Dumbbell Press',
-  '1a05c6f170d8807c9f16f226db24074d': 'Barbell Bench Press',
+  '1a05c6f170d8807c9f16f226db24074d': 'Close Grip Bench Press',
+  '1a05c6f170d8807cbae8c6f25fc1a3be': 'Pin-Loaded Machine Chest Press',
   '1a05c6f170d8809da1e7fbc50ae7575b': 'Incline Barbell Bench Press',
   '1a05c6f170d880a5b43fe13bcb1b6f3a': 'Push-Up',
   '1a05c6f170d880df946bdd6f42f0901c': 'Horizontal Cable Fly',
@@ -644,14 +645,19 @@ async function runCreateProgramCommand(args: CreateProgramCommandArgs): Promise<
     document,
     `Workouts program create failed for ${programId}`
   );
-  if (args.activate) {
-    await client.setUserDocument(
-      'profiles/workout',
-      { activeProgramId: programId },
-      'Workouts profile update failed',
-      ['activeProgramId']
-    );
-  }
+  const profile = await client.getUserDocument('profiles/workout', 'Workouts profile request failed');
+  const libraryIds = Array.isArray(profile?.workoutLibraryIds)
+    ? profile.workoutLibraryIds.filter((id): id is string => typeof id === 'string')
+    : [];
+  await client.setUserDocument(
+    'profiles/workout',
+    {
+      workoutLibraryIds: [...new Set([...libraryIds, programId])],
+      ...(args.activate ? { activeProgramId: programId } : {}),
+    },
+    'Workouts profile update failed',
+    ['workoutLibraryIds', ...(args.activate ? ['activeProgramId'] : [])]
+  );
 
   process.stdout.write(
     `Created program ${programId}: ${program.name}${args.activate ? ' (activated)' : ''}\n`
@@ -1372,6 +1378,11 @@ function parseDateArg(value: string, label: string): number {
 
 
 export function buildTrainingProgramDocument(program: ProgramDefinition, programId: string): Record<string, unknown> {
+  if (program.deload.toLowerCase() !== 'none') {
+    throw new Error('Only programs without a deload are supported.');
+  }
+  const updatedAt = new Date().toISOString();
+  const programExerciseIdToNote: Record<string, { note: string; updatedAt: string }> = {};
   return {
     id: programId,
     name: program.name,
@@ -1380,16 +1391,26 @@ export function buildTrainingProgramDocument(program: ProgramDefinition, program
     numCycles: program.cycles,
     runIndefinitely: true,
     isPeriodized: false,
-    deload: program.deload,
+    deload: null,
+    expanded: false,
+    updatedAt,
+    programExerciseIdToNote,
     workoutCycleCompletions: {},
     days: program.days.map(day => {
       const dayId = crypto.randomUUID();
       return {
         id: dayId,
         name: day.name,
+        gymId: null,
         blocks: day.blocks.map(block => ({
           id: crypto.randomUUID(),
-          exercises: block.exercises.map(exercise => buildProgramExerciseDocument(exercise)),
+          exercises: block.exercises.map(exercise => {
+            const document = buildProgramExerciseDocument(exercise);
+            if (exercise.notes) {
+              programExerciseIdToNote[document.id as string] = { note: exercise.notes, updatedAt };
+            }
+            return document;
+          }),
         })),
       };
     }),
@@ -1401,15 +1422,15 @@ function buildProgramExerciseDocument(exercise: ProgramExerciseDefinition): Reco
   return {
     id: crypto.randomUUID(),
     exerciseId,
-    note: exercise.notes ?? '',
     periodizedTargets: {
       runtimeType: 'simple',
+      deload: null,
       value: {
+        isSkipped: false,
         overrideRestTimers: exercise.sets.some(set => set.restSeconds != null),
         sets: exercise.sets.map(set => ({
-          setType: set.type,
+          setType: set.type.replace(/ Set$/, '').toLowerCase(),
           log: {
-            id: crypto.randomUUID(),
             minFullReps: set.minReps,
             maxFullReps: set.maxReps,
             rir: set.rir,
