@@ -19,3 +19,6 @@ dist
 
 # other
 .DS_Store
+
+# Local command defaults
+/defaults.ts

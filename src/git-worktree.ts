@@ -1,15 +1,13 @@
 #!/usr/bin/env bun
+import { createCli } from "./utils/yargs";
 import { confirm, isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import path from "node:path";
-import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
-import { hideBin } from "yargs/helpers";
 
 import { formatTabularRows } from "./utils/tabular";
-import { failWithFullHelp } from "./utils/yargs";
 
 const home = requireEnv("HOME");
 
@@ -39,9 +37,7 @@ interface RepoInfo {
 }
 
 async function runCli(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName("git-worktree")
-    .strict()
+  await createCli("git-worktree")
     .command(
       "add <branch>",
       "Add a worktree for a branch",
@@ -113,9 +109,6 @@ async function runCli(): Promise<void> {
           console.log(target);
         })
     )
-    .fail(failWithFullHelp)
-    .help()
-    .wrap(100)
     .parseAsync();
 }
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { createCli } from "./utils/yargs";
 import { intro, note, outro } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import {
@@ -17,10 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import yargs from "yargs";
-import { hideBin } from "yargs/helpers";
 import env from "./env";
-import { failWithFullHelp } from "./utils/yargs";
 
 const APPLE_REFERENCE_UNIX_SECONDS = 978307200;
 const APP_NAME = "Voice Memos";
@@ -258,9 +256,7 @@ async function parseCliArgs(): Promise<CliArgs> {
   const home = requireEnv("HOME");
   const defaultOutDir = path.join(home, "Documents", "voice-memos", "captains-log");
 
-  const parsed = await yargs(hideBin(process.argv))
-    .scriptName("voice-memo-parse")
-    .strict()
+  const parsed = await createCli("voice-memo-parse")
     .option("folder", {
       type: "string",
       default: DEFAULT_FOLDER,
@@ -292,8 +288,6 @@ async function parseCliArgs(): Promise<CliArgs> {
       default: DEFAULT_HIGHLIGHTS_MODEL,
       describe: "Gemini model used to generate _overview.md highlights",
     })
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 
   if (!Number.isFinite(parsed["sync-timeout-ms"]) || parsed["sync-timeout-ms"] <= 0) {

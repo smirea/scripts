@@ -1,14 +1,12 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { Database } from 'bun:sqlite';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 import { z } from 'zod';
 
-import { failWithFullHelp } from './utils/yargs';
 
 const READ_ENTITIES = ['games', 'plays', 'players'] as const;
 const OUTPUT_FORMATS = ['json', 'table'] as const;
@@ -168,9 +166,7 @@ if (import.meta.main) {
 }
 
 async function runCli(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('bgstats')
-    .version(false)
+  await createCli('bgstats')
     .usage('$0 <command> [options]')
     .parserConfiguration({
       'strip-aliased': true,
@@ -310,13 +306,9 @@ async function runCli(): Promise<void> {
         });
       },
     )
-    .strict()
     .strictCommands()
     .demandCommand(1, 'Choose a BG Stats command.')
     .recommendCommands()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 }
 

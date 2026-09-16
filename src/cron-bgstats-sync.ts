@@ -1,14 +1,12 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { format, isValid, parseISO, subDays } from 'date-fns';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
-import { failWithFullHelp } from './utils/yargs';
 
 const SOURCE_NAME = 'clocktracker.app';
 const DEFAULT_LOOKBACK_DAYS = 30;
@@ -40,9 +38,7 @@ if (import.meta.main) {
 }
 
 async function runCli(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('cron-bgstats-sync')
-    .version(false)
+  await createCli('cron-bgstats-sync')
     .usage('$0 <command> [options]')
     .parserConfiguration({
       'strip-aliased': true,
@@ -94,13 +90,9 @@ async function runCli(): Promise<void> {
       () => {},
       () => installCrontab(),
     )
-    .strict()
     .strictCommands()
     .demandCommand(1, 'Choose run or install.')
     .recommendCommands()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 }
 

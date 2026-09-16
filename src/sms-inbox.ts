@@ -1,9 +1,7 @@
 #!/usr/bin/env bun
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
+import { createCli } from './utils/yargs';
 
 import env from './env';
-import { failWithFullHelp } from './utils/yargs';
 
 interface MessageRow {
   id: string;
@@ -29,9 +27,7 @@ if (import.meta.main) {
 }
 
 async function run(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('sms-inbox')
-    .version(false)
+  await createCli('sms-inbox')
     .usage('$0 <command> [options]')
     .command(
       'list',
@@ -105,12 +101,8 @@ async function run(): Promise<void> {
         );
       },
     )
-    .strict()
     .demandCommand(1, 'Choose a command.')
     .recommendCommands()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 }
 

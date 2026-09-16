@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './env';
 import {
@@ -14,7 +13,6 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
-import { failWithFullHelp } from './utils/yargs';
 import {
   createLocalProgram,
   logWorkouts,
@@ -370,9 +368,7 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    await yargs(hideBin(process.argv))
-      .scriptName('workouts')
-      .strict()
+    await createCli('workouts')
       .command<WorkoutHistoryCommandArgs>(
         '$0',
         'List workout history',
@@ -460,10 +456,7 @@ async function runCli(): Promise<void> {
             }),
         runLogWorkoutCommand
       )
-      .help()
-      .version(false)
       .wrap(process.stdout.columns ?? 80)
-      .fail(failWithFullHelp)
       .parseAsync();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

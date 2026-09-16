@@ -1,13 +1,11 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './env';
 import { renderCsvRecords, renderTableRecords, type CsvValue } from './utils/output';
-import { failWithFullHelp } from './utils/yargs';
 
 const API_BASE_URL = 'https://subscription.cookunity.com/sdui-service';
 const API_VERSION = '1.25.0';
@@ -74,9 +72,7 @@ if (import.meta.main) {
 }
 
 async function runCli(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('cookunity')
-    .version(false)
+  await createCli('cookunity')
     .usage('$0 catalog <date> [options]')
     .command(
       'catalog <date>',
@@ -128,13 +124,9 @@ async function runCli(): Promise<void> {
         });
       },
     )
-    .strict()
     .strictCommands()
     .demandCommand(1, 'Choose a CookUnity command.')
     .recommendCommands()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 }
 

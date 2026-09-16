@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
-import yargs, { type Argv } from 'yargs';
-import { hideBin } from 'yargs/helpers';
+import { createCli } from './utils/yargs';
+import type { Argv } from 'yargs';
 
 import env from './env';
-import { failWithFullHelp } from './utils/yargs';
 
 const PLACES_BASE_URL = 'https://places.googleapis.com/v1';
 const DEFAULT_LIMIT = 20;
@@ -114,9 +113,7 @@ if (import.meta.main) {
 }
 
 async function run(): Promise<void> {
-	await yargs(hideBin(process.argv))
-		.scriptName('google-maps')
-		.version(false)
+	await createCli('google-maps')
 		.usage('$0 <command> [options]')
 		.parserConfiguration({
 			'strip-aliased': true,
@@ -156,12 +153,8 @@ async function run(): Promise<void> {
 				renderJson(details);
 			},
 		)
-		.strict()
 		.demandCommand(1, 'Choose a command.')
 		.recommendCommands()
-		.wrap(process.stdout.columns || 100)
-		.fail(failWithFullHelp)
-		.help()
 		.parseAsync();
 }
 

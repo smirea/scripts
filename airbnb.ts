@@ -1,15 +1,13 @@
 #!/usr/bin/env bun
+import { createCli } from './src/utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './src/env';
 import { createScript } from './src/utils/createScript';
-import { failWithFullHelp } from './src/utils/yargs';
 
 const ORIGIN = 'https://www.airbnb.com';
 const QUERIES = {
@@ -23,9 +21,7 @@ type RecordValue = Record<string, any>;
 
 if (import.meta.main) {
   void createScript(async () => {
-    await yargs(hideBin(process.argv))
-      .scriptName('airbnb')
-      .version(false)
+    await createCli('airbnb')
       .option('refresh-session', { type: 'boolean', default: false, describe: 'Refresh saved credentials from Chrome via Browser Gate before reading data.' })
       .command('reservations [code]', 'Read current/upcoming stays, or a reservation by confirmation code, as Markdown.',
         command => command.positional('code', { type: 'string', describe: 'Airbnb confirmation code, including past reservations.' }),
@@ -40,10 +36,6 @@ if (import.meta.main) {
           console.log(await wishlists(await createClient(args.refreshSession), args.id));
         })
       .demandCommand(1, 'Choose reservations or wishlists.')
-      .strict()
-      .wrap(process.stdout.columns || 100)
-      .fail(failWithFullHelp)
-      .help()
       .parseAsync();
   });
 }

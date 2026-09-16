@@ -27,7 +27,7 @@ if (!existsSync(source)) {
   process.exit(1);
 }
 
-const result = spawnSync('bun', ['--no-env-file', ...envFileArgs(), source, ...args], {
+const result = spawnSync('bun', ['--no-env-file', ...envFileArgs(), '--preload', path.join(repoRoot, 'src/utils/defaults.ts'), source, ...args], {
   cwd: process.cwd(),
   env: process.env,
   stdio: 'inherit',

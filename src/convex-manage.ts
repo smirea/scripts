@@ -1,15 +1,13 @@
 #!/usr/bin/env bun
+import { createCli } from "./utils/yargs";
 import { access, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import yargs from "yargs";
 import type { Argv, ArgumentsCamelCase } from "yargs";
-import { hideBin } from "yargs/helpers";
 
-import { failWithFullHelp } from "./utils/yargs";
 
 const composeFile = `services:
   backend:
@@ -95,10 +93,7 @@ main().catch((error) => {
 });
 
 async function main() {
-  await yargs(hideBin(process.argv))
-    .scriptName("convex-manage")
-    .version(false)
-    .strict()
+  await createCli("convex-manage")
     .command(
       ["create", "add"],
       "Create a local self-hosted Convex deployment",
@@ -130,9 +125,6 @@ async function main() {
       (argv: ArgumentsCamelCase<IdOptions>) => openDashboard(argv.id),
     )
     .demandCommand(1, "Choose a command.")
-    .fail(failWithFullHelp)
-    .help()
-    .wrap(process.stdout.columns || 100)
     .parseAsync();
 }
 

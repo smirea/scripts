@@ -1,12 +1,11 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { ClassicLevel } from 'classic-level';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import {
   OUTPUT_FORMATS,
@@ -17,7 +16,6 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
-import { failWithFullHelp } from './utils/yargs';
 
 const SOURCE_PATH = 'cache://macrofactor/firestore';
 const MACROFACTOR_APP_BUNDLE_ID = 'com.sbs.diet';
@@ -545,9 +543,7 @@ function resolveWindow(options: {
 
 async function runCli(): Promise<void> {
   try {
-    const args = await yargs(hideBin(process.argv))
-      .scriptName('macrofactor')
-      .strict()
+    const args = await createCli('macrofactor')
       .option('days', {
         alias: ['d'],
         type: 'number',
@@ -595,9 +591,6 @@ async function runCli(): Promise<void> {
         default: 'auto',
         describe: 'MacroFactor app warm mode: auto opens when stale or missing docs, open always opens, none never opens',
       })
-      .version(false)
-      .fail(failWithFullHelp)
-      .help()
       .parseAsync();
 
     if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {

@@ -1,12 +1,10 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './env';
-import { failWithFullHelp } from './utils/yargs';
 
 interface EmailRow {
   id: string;
@@ -42,9 +40,7 @@ if (import.meta.main) {
 }
 
 async function run(): Promise<void> {
-  await yargs(hideBin(process.argv))
-    .scriptName('email-inbox')
-    .version(false)
+  await createCli('email-inbox')
     .usage('$0 <command> [options]')
     .command(
       'list',
@@ -141,12 +137,8 @@ async function run(): Promise<void> {
         process.stdout.write(raw);
       },
     )
-    .strict()
     .demandCommand(1, 'Choose a command.')
     .recommendCommands()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 }
 

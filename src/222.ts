@@ -1,16 +1,14 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 import { z } from 'zod';
 
 import env from './env';
 import { printRich, type RichPerson } from './utils/222Rich';
 import { createScript } from './utils/createScript';
-import { failWithFullHelp } from './utils/yargs';
 
 const API_URL = 'https://ios.api.222.place';
 const RSVP_URL = 'https://rsvp.222.place/';
@@ -29,8 +27,7 @@ const eventSchema = z.object({
 type Event = z.infer<typeof eventSchema>;
 
 createScript(async () => {
-  await yargs(hideBin(process.argv))
-    .scriptName('222')
+  await createCli('222')
     .option('format', { choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
     .option('api-key', { type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
     .option('refresh-session', { type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
@@ -87,11 +84,6 @@ createScript(async () => {
       }
     })
     .demandCommand(1, 'Choose invites or events.')
-    .strict()
-    .version(false)
-    .wrap(process.stdout.columns || 100)
-    .help()
-    .fail(failWithFullHelp)
     .parseAsync();
 });
 

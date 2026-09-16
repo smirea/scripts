@@ -1,13 +1,11 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 import { format, isValid, parseISO, subDays } from 'date-fns';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
-import { failWithFullHelp } from './utils/yargs';
 
 const API_BASE_URL = 'https://clocktracker.app';
 const BROWSER_GATE_HEALTH_URL = 'http://127.0.0.1:17373/health';
@@ -153,9 +151,7 @@ if (import.meta.main) {
 }
 
 async function runCli(): Promise<void> {
-  const argv = await yargs(hideBin(process.argv))
-    .scriptName('clocktracker')
-    .version(false)
+  const argv = await createCli('clocktracker')
     .usage('$0 [options]')
     .option('since', {
       type: 'string',
@@ -185,10 +181,6 @@ async function runCli(): Promise<void> {
     .example('$0 --since 2026-07-01', 'Read games since July 1 as BG Stats JSON.')
     .example('$0 --format table', 'Show games from the past week in a table.')
     .example('$0 --write', 'Update existing source plays and record new ones in BG Stats.')
-    .strict()
-    .wrap(process.stdout.columns || 100)
-    .fail(failWithFullHelp)
-    .help()
     .parseAsync();
 
   const since = parseSince(argv.since);

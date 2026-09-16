@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -7,11 +8,8 @@ import path from 'node:path';
 import { isCancel, password, text } from '@clack/prompts';
 import AnyList, { type AnyListShoppingList } from 'anylist';
 import chalk from 'chalk';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './env';
-import { failWithFullHelp } from './utils/yargs';
 
 const ENV_LOCAL_PATH = path.resolve(import.meta.dir, '..', '.env.local');
 const CREDENTIAL_KEY = 'ANYLIST_CREDENTIALS';
@@ -99,9 +97,7 @@ interface AnyListUserData {
 }
 
 async function runCli(): Promise<void> {
-  const cli = yargs(hideBin(process.argv))
-    .scriptName('anylist')
-    .strict()
+  const cli = createCli('anylist')
     .option('format', {
       alias: 'f',
       type: 'string',
@@ -246,7 +242,6 @@ async function runCli(): Promise<void> {
         .demandCommand(1),
       async () => undefined)
     .demandCommand(1)
-    .fail(failWithFullHelp)
     .help();
 
   await cli.parse();

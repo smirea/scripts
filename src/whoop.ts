@@ -1,11 +1,10 @@
 #!/usr/bin/env bun
+import { createCli } from './utils/yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { format, isValid, parseISO, startOfDay, subDays } from 'date-fns';
-import yargs from 'yargs';
-import { hideBin } from 'yargs/helpers';
 
 import env from './env';
 import {
@@ -22,7 +21,6 @@ import {
   type CsvValue,
   type OutputFormat,
 } from './utils/output';
-import { failWithFullHelp } from './utils/yargs';
 
 const BASE_URL = 'https://api.prod.whoop.com/developer/v2';
 const AUTH_URL = 'https://api.prod.whoop.com/oauth/oauth2/auth';
@@ -165,9 +163,7 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    const args = await yargs(hideBin(process.argv))
-      .scriptName('whoop-pull')
-      .strict()
+    const args = await createCli('whoop-pull')
       .option('include', {
         alias: ['types', 'what', 'i'],
         type: 'string',
@@ -222,8 +218,6 @@ async function runCli(): Promise<void> {
         type: 'string',
         describe: 'Manually set WHOOP_REFRESH_TOKEN in .env.local before fetching data',
       })
-      .fail(failWithFullHelp)
-      .help()
       .parseAsync();
 
     const providedRefreshToken = normalizeOptionalString(args.token);
