@@ -41,7 +41,7 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 
 Markdown is the default. Invites combine current and upcoming invitations across cities, with local times, status, RSVP links, venue addresses and maps, arrival instructions, itinerary and reveal times, individual attendees and personality summaries. Approximate locations are labeled as obfuscated; people and exact venues appear when returned by the API. JSON preserves the full invite records. Events include all fields returned by the availability API, plus any restrictions on requesting an invite. Location follows your 222 account's current location, not device GPS. City overrides are not supported yet. These commands only read data and never RSVP or request an invite.
 
-`--format=rich` adds terminal colors and attendee tables with names above inline profile photos, personality summaries, and check-in status. Photos use the [iTerm2 inline image protocol](https://iterm2.com/documentation-images.html); large photos require iTerm2 3.5+. Missing or failed photos show a placeholder. Other terminals and tmux use text tables; redirected output contains neither colors nor image escape sequences.
+`--format=rich` adds terminal colors and a single borderless row of other attendees, with names above inline profile photos, personality summaries, and check-in status. Photos use the [iTerm2 inline image protocol](https://iterm2.com/documentation-images.html); large photos require iTerm2 3.5+. Missing or failed photos show a placeholder. Other terminals and tmux use text rows; redirected output contains neither colors nor image escape sequences.
 
 ## Airbnb
 

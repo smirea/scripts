@@ -239,7 +239,7 @@ function inviteMarkdown(event: Event, includePeople = true): string {
   });
   const reveals = records(record(rsvp.additional_timeline_metadata).additional_points)
     .map(point => `${String(point.label)}: ${String(dateValue(point.date_time, event))}`);
-  const people = records(event.group_attendees).map(personMarkdown);
+  const people = otherAttendees(event).map(personMarkdown);
   const guests = records(rsvp.plus_ones).map(personMarkdown);
   return [
     `## ${escapeMarkdown(event.title)}`,
@@ -258,8 +258,14 @@ function inviteMarkdown(event: Event, includePeople = true): string {
   ].filter(Boolean).join('\n\n');
 }
 
+function otherAttendees(event: Event): Record<string, unknown>[] {
+  const rsvp = record(event.rsvp);
+  const currentUserId = rsvp.member_id ?? record(rsvp.member).id;
+  return records(event.group_attendees).filter(person => !currentUserId || record(person.member).id !== currentUserId);
+}
+
 function richPeople(event: Event): RichPerson[] {
-  return records(event.group_attendees).map(person => {
+  return otherAttendees(event).map(person => {
     const member = record(person.member);
     const outcome = record(member.outcome);
     return {

@@ -58,37 +58,31 @@ export async function renderRich(markdown: string, people: RichPerson[][], optio
 
 async function peopleGrid(people: RichPerson[], options: RichOptions): Promise<string> {
   const style = new Chalk({ level: options.color ? 1 : 0 });
-  const count = Math.max(1, Math.min(4, Math.floor((options.columns - 1) / 23)));
-  const cellWidth = Math.floor((options.columns - count - 1) / count);
-  const result: string[] = [];
-  for (let start = 0; start < people.length; start += count) {
-    const row = people.slice(start, start + count);
-    const border = (left: string, middle: string, right: string) => left + row.map(() => '─'.repeat(cellWidth)).join(middle) + right;
-    const cells = (values: string[], bold = false) => '│' + values.map(value => {
-      const clipped = truncate(clean(value), cellWidth - 2);
-      const padded = ` ${clipped}${' '.repeat(cellWidth - 1 - Bun.stringWidth(clipped))}`;
-      return bold ? style.bold(padded) : padded;
-    }).join('│') + '│';
-    result.push(border('┌', '┬', '┐'), cells(row.map(person => person.name), true));
-    if (options.images) {
-      const photos = await Promise.all(row.map(person => downloadPhoto(person.imageUrl)));
-      const blank = cells(row.map(() => ''));
-      // Reserve rows before drawing so an image cannot scroll away another cell's saved cursor position.
-      let images = `${Array.from({ length: PHOTO_ROWS }, () => blank).join('\n')}\n${ESC}[${PHOTO_ROWS}A`;
-      for (let index = 0; index < row.length; index++) {
-        images += `${ESC}7${ESC}[${index * (cellWidth + 1) + 3}G`;
-        const photo = photos[index];
-        images += photo ? inlineImage(photo, cellWidth - 2, PHOTO_ROWS) : style.dim(truncate('No photo', cellWidth - 2));
-        images += `${ESC}8`;
-      }
-      images += `${ESC}[${PHOTO_ROWS}B${ESC}[1G`;
-      result.push(images + cells(row.map(person => person.personality ?? '')));
-    } else {
-      result.push(cells(row.map(person => person.imageUrl ? 'Photo (iTerm2)' : 'No photo')),
-        cells(row.map(person => person.personality ?? '')));
+  const gap = 2;
+  const cellWidth = Math.max(1, Math.floor((options.columns - gap * (people.length - 1)) / people.length));
+  const cells = (values: string[], bold = false) => values.map(value => {
+    const clipped = truncate(clean(value), cellWidth);
+    const padded = clipped + ' '.repeat(cellWidth - Bun.stringWidth(clipped));
+    return bold ? style.bold(padded) : padded;
+  }).join(' '.repeat(gap)).trimEnd();
+  const result = [cells(people.map(person => person.name), true)];
+  if (options.images) {
+    const photos = await Promise.all(people.map(person => downloadPhoto(person.imageUrl)));
+    // Reserve rows before drawing so an image cannot scroll away another person's saved cursor position.
+    let images = `${'\n'.repeat(PHOTO_ROWS)}${ESC}[${PHOTO_ROWS}A`;
+    for (let index = 0; index < people.length; index++) {
+      images += `${ESC}7${ESC}[${index * (cellWidth + gap) + 1}G`;
+      const photo = photos[index];
+      images += photo ? inlineImage(photo, cellWidth, PHOTO_ROWS) : style.dim(truncate('No photo', cellWidth));
+      images += `${ESC}8`;
     }
-    result.push(cells(row.map(person => person.status ?? '')), border('└', '┴', '┘'));
+    images += `${ESC}[${PHOTO_ROWS}B${ESC}[1G`;
+    result.push(images + cells(people.map(person => person.personality ?? '')));
+  } else {
+    result.push(cells(people.map(person => person.imageUrl ? 'Photo (iTerm2)' : 'No photo')),
+      cells(people.map(person => person.personality ?? '')));
   }
+  result.push(cells(people.map(person => person.status ?? '')));
   return result.join('\n');
 }
 
