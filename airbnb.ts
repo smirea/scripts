@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './src/utils/yargs';
+import { createScript } from './src/utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -7,7 +7,6 @@ import path from 'node:path';
 
 
 import env from './src/env';
-import { createScript } from './src/utils/createScript';
 
 const ORIGIN = 'https://www.airbnb.com';
 const QUERIES = {
@@ -20,24 +19,22 @@ const QUERIES = {
 type RecordValue = Record<string, any>;
 
 if (import.meta.main) {
-  void createScript(async () => {
-    await createCli('airbnb')
-      .option('refresh-session', { type: 'boolean', default: false, describe: 'Refresh saved credentials from Chrome via Browser Gate before reading data.' })
-      .command('reservations [code]', 'Read current/upcoming stays, or a reservation by confirmation code, as Markdown.',
-        command => command.positional('code', { type: 'string', describe: 'Airbnb confirmation code, including past reservations.' }),
-        async args => {
-          if (args.code && !/^[A-Z0-9]{8,12}$/i.test(args.code)) throw new Error('Use an Airbnb confirmation code.');
-          console.log(await reservations(await createClient(args.refreshSession), args.code?.toUpperCase()));
-        })
-      .command('wishlists [id]', 'Read all wishlists, or a wishlist with saved listings, notes, and votes, as Markdown.',
-        command => command.positional('id', { type: 'string', describe: 'Numeric wishlist ID from the list output or Airbnb URL.' }),
-        async args => {
-          if (args.id && !/^\d+$/.test(args.id)) throw new Error('Use a numeric wishlist ID.');
-          console.log(await wishlists(await createClient(args.refreshSession), args.id));
-        })
-      .demandCommand(1, 'Choose reservations or wishlists.')
-      .parseAsync();
-  });
+  void createScript('airbnb')
+    .option('refresh-session', { type: 'boolean', default: false, describe: 'Refresh saved credentials from Chrome via Browser Gate before reading data.' })
+    .command('reservations [code]', 'Read current/upcoming stays, or a reservation by confirmation code, as Markdown.',
+      command => command.positional('code', { type: 'string', describe: 'Airbnb confirmation code, including past reservations.' }),
+      async args => {
+        if (args.code && !/^[A-Z0-9]{8,12}$/i.test(args.code)) throw new Error('Use an Airbnb confirmation code.');
+        console.log(await reservations(await createClient(args.refreshSession), args.code?.toUpperCase()));
+      })
+    .command('wishlists [id]', 'Read all wishlists, or a wishlist with saved listings, notes, and votes, as Markdown.',
+      command => command.positional('id', { type: 'string', describe: 'Numeric wishlist ID from the list output or Airbnb URL.' }),
+      async args => {
+        if (args.id && !/^\d+$/.test(args.id)) throw new Error('Use a numeric wishlist ID.');
+        console.log(await wishlists(await createClient(args.refreshSession), args.id));
+      })
+    .demandCommand(1, 'Choose reservations or wishlists.')
+    .parseAsync();
 }
 
 async function createClient(refresh: boolean): Promise<AirbnbClient> {

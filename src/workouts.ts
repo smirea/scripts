@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -368,7 +368,7 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    await createCli('workouts')
+    await createScript('workouts')
       .command<WorkoutHistoryCommandArgs>(
         '$0',
         'List workout history',

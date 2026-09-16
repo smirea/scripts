@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -8,7 +8,6 @@ import { z } from 'zod';
 
 import env from './env';
 import { printRich, type RichPerson } from './utils/222Rich';
-import { createScript } from './utils/createScript';
 
 const API_URL = 'https://ios.api.222.place';
 const RSVP_URL = 'https://rsvp.222.place/';
@@ -26,80 +25,78 @@ const eventSchema = z.object({
 }).passthrough();
 type Event = z.infer<typeof eventSchema>;
 
-createScript(async () => {
-  await createCli('222')
-    .option('format', { alias: 'f', choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
-    .option('api-key', { alias: 'k', type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
-    .option('refresh-session', { alias: 's', type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
-    .alias('help', 'h')
-    .check(args => {
-      if (args['api-key'] !== undefined && args['refresh-session']) throw new Error('Use either --api-key or --refresh-session, not both.');
-      return true;
-    })
-    .command('invites', 'List current and upcoming invites across cities', parser => parser
-      .option('with-rejected', { alias: 'r', type: 'boolean', default: false, description: 'Include invites marked NOT_INTERESTED' })
-      .option('past', { alias: 'p', type: 'boolean', default: false, description: 'Show all past experiences returned by the API instead of current/upcoming invites' }), async args => {
-      const api = new Api(args['api-key'], args['refresh-session']);
-      let events: Event[];
-      let currentUserId: string | undefined;
-      if (args.past) {
-        const past = await api.get('/get_members_past_events', z.object({ past_events: z.array(eventSchema) }));
-        events = past.past_events;
-        if (args.format !== 'json') {
-          const profile = await api.get('/get_authed_member', z.object({ authed_member: z.object({ id: z.string() }) }));
-          currentUserId = profile.authed_member.id;
-        }
-      } else {
-        const [current, upcoming] = await Promise.all([
-          api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
-          api.get('/get_members_upcoming_events', z.object({ upcoming_events: z.array(eventSchema) })),
-        ]);
-        events = [...upcoming.upcoming_events, ...current.current_events];
+void createScript('222')
+  .option('format', { alias: 'f', choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
+  .option('api-key', { alias: 'k', type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
+  .option('refresh-session', { alias: 's', type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
+  .alias('help', 'h')
+  .check(args => {
+    if (args['api-key'] !== undefined && args['refresh-session']) throw new Error('Use either --api-key or --refresh-session, not both.');
+    return true;
+  })
+  .command('invites', 'List current and upcoming invites across cities', parser => parser
+    .option('with-rejected', { alias: 'r', type: 'boolean', default: false, description: 'Include invites marked NOT_INTERESTED' })
+    .option('past', { alias: 'p', type: 'boolean', default: false, description: 'Show all past experiences returned by the API instead of current/upcoming invites' }), async args => {
+    const api = new Api(args['api-key'], args['refresh-session']);
+    let events: Event[];
+    let currentUserId: string | undefined;
+    if (args.past) {
+      const past = await api.get('/get_members_past_events', z.object({ past_events: z.array(eventSchema) }));
+      events = past.past_events;
+      if (args.format !== 'json') {
+        const profile = await api.get('/get_authed_member', z.object({ authed_member: z.object({ id: z.string() }) }));
+        currentUserId = profile.authed_member.id;
       }
-      const invites = sortEvents([...new Map(events.map(event => [event.id, event])).values()]
-        .filter(event => args['with-rejected'] || event.rsvp?.status !== 'NOT_INTERESTED'));
-      if (args.past) invites.reverse();
-      if (args.format === 'json') {
-        console.log(JSON.stringify({ invites }, null, 2));
-      } else {
-        const markdown = [
-          `# 222 ${args.past ? 'past experiences' : 'invites'} (${invites.length})`,
-          ...invites.map(event => inviteMarkdown(event, args.format !== 'rich', currentUserId)),
-          ...(invites.length ? [] : [args.past ? 'No past experiences.' : 'No invites.']),
-        ].join('\n\n');
-        if (args.format === 'rich') {
-          await printRich(markdown, invites.map(event => richPeople(event, currentUserId)));
-        } else console.log(markdown);
-      }
-    })
-    .command('events', 'List available events for your current 222 account location, with all API details', parser => parser, async args => {
-      const api = new Api(args['api-key'], args['refresh-session']);
-      const response = await api.get('/get_request_new_event_metadata', z.object({
-        request_new_event_metadata: z.object({
-          requestable_events: z.array(eventSchema),
-        }).passthrough(),
-      }));
-      const { requestable_events, ...metadata } = response.request_new_event_metadata;
-      const events = sortEvents(requestable_events);
-      if (args.format === 'json') {
-        console.log(JSON.stringify({ ...metadata, events }, null, 2));
-      } else {
-        const markdown = [
-          `# 222 available events (${events.length})`,
-          'Location: your current 222 account location.',
-          ...Object.entries(metadata).filter(([key]) => key !== 'requestable_dates').map(([key, value]) => markdownField(key, value)),
-          ...events.map(event => `## ${escapeMarkdown(event.title)}\n\n${Object.entries(event)
-            .filter(([key]) => key !== 'title')
-            .map(([key, value]) => markdownField(key, displayValue(event, key, value))).filter(Boolean).join('\n')}`),
-          ...(events.length ? [] : ['No available events.']),
-        ].filter(Boolean).join('\n\n');
-        if (args.format === 'rich') await printRich(markdown);
-        else console.log(markdown);
-      }
-    })
-    .demandCommand(1, 'Choose invites or events.')
-    .parseAsync();
-});
+    } else {
+      const [current, upcoming] = await Promise.all([
+        api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
+        api.get('/get_members_upcoming_events', z.object({ upcoming_events: z.array(eventSchema) })),
+      ]);
+      events = [...upcoming.upcoming_events, ...current.current_events];
+    }
+    const invites = sortEvents([...new Map(events.map(event => [event.id, event])).values()]
+      .filter(event => args['with-rejected'] || event.rsvp?.status !== 'NOT_INTERESTED'));
+    if (args.past) invites.reverse();
+    if (args.format === 'json') {
+      console.log(JSON.stringify({ invites }, null, 2));
+    } else {
+      const markdown = [
+        `# 222 ${args.past ? 'past experiences' : 'invites'} (${invites.length})`,
+        ...invites.map(event => inviteMarkdown(event, args.format !== 'rich', currentUserId)),
+        ...(invites.length ? [] : [args.past ? 'No past experiences.' : 'No invites.']),
+      ].join('\n\n');
+      if (args.format === 'rich') {
+        await printRich(markdown, invites.map(event => richPeople(event, currentUserId)));
+      } else console.log(markdown);
+    }
+  })
+  .command('events', 'List available events for your current 222 account location, with all API details', parser => parser, async args => {
+    const api = new Api(args['api-key'], args['refresh-session']);
+    const response = await api.get('/get_request_new_event_metadata', z.object({
+      request_new_event_metadata: z.object({
+        requestable_events: z.array(eventSchema),
+      }).passthrough(),
+    }));
+    const { requestable_events, ...metadata } = response.request_new_event_metadata;
+    const events = sortEvents(requestable_events);
+    if (args.format === 'json') {
+      console.log(JSON.stringify({ ...metadata, events }, null, 2));
+    } else {
+      const markdown = [
+        `# 222 available events (${events.length})`,
+        'Location: your current 222 account location.',
+        ...Object.entries(metadata).filter(([key]) => key !== 'requestable_dates').map(([key, value]) => markdownField(key, value)),
+        ...events.map(event => `## ${escapeMarkdown(event.title)}\n\n${Object.entries(event)
+          .filter(([key]) => key !== 'title')
+          .map(([key, value]) => markdownField(key, displayValue(event, key, value))).filter(Boolean).join('\n')}`),
+        ...(events.length ? [] : ['No available events.']),
+      ].filter(Boolean).join('\n\n');
+      if (args.format === 'rich') await printRich(markdown);
+      else console.log(markdown);
+    }
+  })
+  .demandCommand(1, 'Choose invites or events.')
+  .parseAsync();
 
 class Api {
   private authorization?: string;

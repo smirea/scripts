@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -151,7 +151,7 @@ if (import.meta.main) {
 }
 
 async function runCli(): Promise<void> {
-  const argv = await createCli('clocktracker')
+  const argv = await createScript('clocktracker')
     .usage('$0 [options]')
     .option('since', {
       type: 'string',

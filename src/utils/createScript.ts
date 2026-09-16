@@ -1,29 +1,113 @@
 import { execSync, type ExecSyncOptions } from 'child_process';
-import fs from 'fs';
+import fs, { writeSync } from 'fs';
+import { inspect } from 'node:util';
 import path from 'path';
 
 import chalk from 'chalk';
 import { formatDate } from 'date-fns';
 import _ from 'lodash';
 
-export async function createScript(fn: () => any) {
-    process.on('unhandledRejection', err => {
-        console.error(chalk.red.bold('[Unhandled promise rejection]'), err);
-    });
+import yargs, { type Argv } from 'yargs';
+import { hideBin } from 'yargs/helpers';
 
-    await new Promise(resolve => setTimeout(resolve, 1)); // nice to have so that you can define things anywhere in the script file without worrying about initialization order
+import { commandDefinition, validateCliDefaults, type DefaultCommand } from './validateDefaults';
+import { defaults, scriptDefaults, type DefaultOptions, type ScriptDefaults } from './defaults';
 
+export function createScript(name: string, args = hideBin(process.argv), localDefaults: ScriptDefaults = defaults): Argv {
+  const parser = yargs(args)
+    .scriptName(name)
+    .help()
+    .strict()
+    .version(false)
+    .wrap(process.stdout.columns || 100)
+    .fail(failWithFullHelp);
+  let exitProcess = true;
+  const setExitProcess = parser.exitProcess.bind(parser);
+  parser.exitProcess = (enabled = true) => {
+    exitProcess = enabled;
+    return setExitProcess(enabled);
+  };
+  const fail = (error: unknown): never => {
+    if (!exitProcess) throw error;
+    writeSync(process.stderr.fd, `${error instanceof Error ? error.message : String(error)}\n`);
+    if (error && typeof error === 'object' && 'data' in error) writeSync(process.stderr.fd, `error.data = ${inspect(error.data)}\n`);
+    process.exit(1);
+  };
+  const root = structuredClone(scriptDefaults(name, localDefaults));
+  const commands: DefaultCommand[] = [];
+  const values = (scope: DefaultOptions) => Object.fromEntries(
+    Object.entries(scope).filter(([, value]) => value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value))),
+  );
+  const command = parser.command.bind(parser);
+
+  function installCommands(scope: DefaultOptions, inherited: Record<string, unknown>, definitions?: DefaultCommand[]) {
+    parser.command = ((...params: any[]) => {
+      if (typeof params[0] === 'object' && !Array.isArray(params[0])) {
+        const module = params[0];
+        return parser.command(module.aliases ? [module.command].flat().concat(module.aliases) : module.command, module.describe ?? module.description ?? false, module.builder, module.handler, module.middlewares, module.deprecated);
+      }
+      if (definitions) definitions.push(commandDefinition(params));
+      const [spec, description, builder, ...rest] = params;
+      const commandName = (Array.isArray(spec) ? spec[0] : spec).split(' ')[0];
+      return (command as any)(spec, description, (cli: Argv, help: boolean) => {
+        const child = scope[commandName];
+        const childScope = child && typeof child === 'object' && !Array.isArray(child) ? child as DefaultOptions : {};
+        const selected = { ...inherited, ...values(scope), ...values(childScope) };
+        installCommands(childScope, selected);
+        const result = typeof builder === 'function' ? builder(cli, help) : cli.options(builder ?? {});
+        const finish = (built: Argv | void) => (built ?? cli).default(selected);
+        return result instanceof Promise ? result.then(finish) : finish(result);
+      }, ...rest);
+    }) as Argv['command'];
+  }
+
+  installCommands(root, {}, commands);
+  let validated = false;
+  // Apply after option declarations so local defaults win over the script's defaults.
+  for (const method of ['parse', 'parseAsync', 'parseSync'] as const) {
+    const parse = parser[method].bind(parser);
+    (parser as any)[method] = (...params: any[]) => {
+      const run = () => {
+        parser.default(values(root));
+        return (parse as any)(...params);
+      };
+      if (validated) return run();
+      validated = true;
+      const validation = validateCliDefaults(parser, root, commands, name);
+      if (validation instanceof Promise) {
+        if (method === 'parseSync') throw new Error('Async command builders require parseAsync() to validate defaults.');
+        return validation.then(run);
+      }
+      return run();
+    };
+  }
+  for (const method of ['parse', 'parseSync'] as const) {
+    const parse = parser[method].bind(parser);
+    (parser as any)[method] = (...params: any[]) => {
+      try {
+        const result = (parse as any)(...params);
+        return result instanceof Promise ? result.catch(fail) : result;
+      } catch (error) {
+        return fail(error);
+      }
+    };
+  }
+  const parseAsync = parser.parseAsync.bind(parser);
+  parser.parseAsync = (async (...params: Parameters<Argv['parseAsync']>) => {
+    // Let the entry module finish initializing before command handlers use its classes/constants.
+    await new Promise(resolve => setTimeout(resolve, 0));
     try {
-        await fn();
-        process.exit(0);
-    } catch (err) {
-        console.error(err);
-        if ((err as any).data) {
-            console.error(chalk.red.bold('error.data ='), (err as any).data);
-        }
-        process.exit(1);
+      return await parseAsync(...params);
+    } catch (error) {
+      return fail(error);
     }
+  }) as Argv['parseAsync'];
+  return parser;
+}
 
+function failWithFullHelp(message: string, error: Error, parser: Argv): never {
+  parser.showHelp(help => writeSync(process.stderr.fd, `${help}\n`));
+  throw error ?? new Error(message);
 }
 
 let groupLevel = (() => {

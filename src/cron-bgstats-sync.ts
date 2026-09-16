@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,14 +31,11 @@ interface BgStatsPlay {
 }
 
 if (import.meta.main) {
-  runCli().catch(error => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
+  void runCli();
 }
 
 async function runCli(): Promise<void> {
-  await createCli('cron-bgstats-sync')
+  await createScript('cron-bgstats-sync')
     .usage('$0 <command> [options]')
     .parserConfiguration({
       'strip-aliased': true,

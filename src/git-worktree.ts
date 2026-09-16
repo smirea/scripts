@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from "./utils/yargs";
+import { createScript } from "./utils/createScript";
 import { confirm, isCancel, select, text } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import type { StdioOptions } from "node:child_process";
@@ -11,10 +11,7 @@ import { formatTabularRows } from "./utils/tabular";
 
 const home = requireEnv("HOME");
 
-void runCli().catch(error => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+void runCli();
 
 interface WorktreeEntry {
   path: string;
@@ -37,48 +34,44 @@ interface RepoInfo {
 }
 
 async function runCli(): Promise<void> {
-  await createCli("git-worktree")
+  await createScript("git-worktree")
     .command(
       "add <branch>",
       "Add a worktree for a branch",
       (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
-      (argv: ArgumentsCamelCase<{ branch: string }>) =>
-        runOrExit(() => {
-          const info = getRepoInfo();
-          const worktreePath = addWorktree(info, argv.branch);
-          console.log(`Worktree ready: ${worktreePath}`);
-        })
+      (argv: ArgumentsCamelCase<{ branch: string }>) => {
+        const info = getRepoInfo();
+        const worktreePath = addWorktree(info, argv.branch);
+        console.log(`Worktree ready: ${worktreePath}`);
+      }
     )
     .command(
       ["list", "ls"],
       "List worktrees",
       () => {},
-      () =>
-        runOrExit(() => {
-          const info = getRepoInfo();
-          listWorktrees(info);
-        })
+      () => {
+        const info = getRepoInfo();
+        listWorktrees(info);
+      }
     )
     .command(
       ["remove [branch]", "rm [branch]"],
       "Remove a worktree",
       (y: Argv) => y.positional("branch", { type: "string" }),
-      (argv: ArgumentsCamelCase<{ branch?: string }>) =>
-        runOrExit(() => {
-          const info = getRepoInfo();
-          removeWorktree(info, argv.branch);
-        })
+      (argv: ArgumentsCamelCase<{ branch?: string }>) => {
+        const info = getRepoInfo();
+        removeWorktree(info, argv.branch);
+      }
     )
     .command(
       "cd <branch>",
       "Print worktree path for a branch",
       (y: Argv) => y.positional("branch", { type: "string", demandOption: true }),
-      (argv: ArgumentsCamelCase<{ branch: string }>) =>
-        runOrExit(() => {
-          const info = getRepoInfo();
-          const target = resolveWorktreePath(info, argv.branch);
-          console.log(target);
-        })
+      (argv: ArgumentsCamelCase<{ branch: string }>) => {
+        const info = getRepoInfo();
+        const target = resolveWorktreePath(info, argv.branch);
+        console.log(target);
+      }
     )
     .command(
       "merge [branch]",
@@ -88,38 +81,26 @@ async function runCli(): Promise<void> {
           type: "string",
           description: "Branch to merge. If omitted, choose from an interactive worktree list.",
         }),
-      (argv: ArgumentsCamelCase<{ branch?: string }>) =>
-        runOrExit(async () => {
-          const info = getRepoInfo();
-          await mergeBranchFromWorktree(info, argv.branch);
-        })
+      async (argv: ArgumentsCamelCase<{ branch?: string }>) => {
+        const info = getRepoInfo();
+        await mergeBranchFromWorktree(info, argv.branch);
+      }
     )
     .command(
       "$0",
       "Interactively select a worktree",
       () => {},
-      () =>
-        runOrExit(async () => {
-          const info = getRepoInfo();
-          const target = await selectWorktreeInteractive(info);
-          if (shouldSwitchToSelectedWorktree()) {
-            switchToWorktreeShell(target);
-            return;
-          }
-          console.log(target);
-        })
+      async () => {
+        const info = getRepoInfo();
+        const target = await selectWorktreeInteractive(info);
+        if (shouldSwitchToSelectedWorktree()) {
+          switchToWorktreeShell(target);
+          return;
+        }
+        console.log(target);
+      }
     )
     .parseAsync();
-}
-
-async function runOrExit(fn: () => void | Promise<void>): Promise<void> {
-  try {
-    await fn();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(message);
-    process.exit(1);
-  }
 }
 
 function getRepoInfo(): RepoInfo {

@@ -4,11 +4,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { loadDefaults } from './defaults';
-import { createCli } from './yargs';
+import { createScript } from './createScript';
 
 describe('local script defaults', () => {
   function cli(args: string[]) {
-    return createCli('222', args, {
+    return createScript('222', args, {
       '222': { format: 'json', invites: { format: 'rich', limit: 7, enabled: false, tags: ['local'], city: { limit: 9 } } },
     })
       .exitProcess(false)
@@ -40,7 +40,7 @@ describe('local script defaults', () => {
   });
 
   test('shared factory handles object and async command builders', async () => {
-    const args = await createCli('222', ['invites'], { '222': { invites: { format: 'rich' } } })
+    const args = await createScript('222', ['invites'], { '222': { invites: { format: 'rich' } } })
       .command({ command: 'invites', builder: async p => p.option('format', { default: 'md' }), handler: () => {} })
       .parseAsync();
     expect(args.format).toBe('rich');
@@ -48,11 +48,11 @@ describe('local script defaults', () => {
 
   test('defaults are coerced and validated before handlers run', async () => {
     let handled: unknown;
-    await createCli('222', ['invites'], { '222': { invites: { limit: 7 } } })
+    await createScript('222', ['invites'], { '222': { invites: { limit: 7 } } })
       .command('invites', '', p => p.option('limit', { type: 'number', default: 1, coerce: n => n * 2 }), argv => { handled = argv.limit; })
       .parseAsync();
     expect(handled).toBe(14);
-    expect(() => createCli('222', [], { '222': { format: 'invalid' } })
+    expect(() => createScript('222', [], { '222': { format: 'invalid' } })
       .exitProcess(false)
       .option('format', { choices: ['md', 'rich'], default: 'md' })
       .fail(message => { throw new Error(message); })
@@ -60,11 +60,11 @@ describe('local script defaults', () => {
   });
 
   test('built-in defaults still work without local overrides', () => {
-    expect(createCli('222', [], {}).option('format', { default: 'md' }).parseSync().format).toBe('md');
+    expect(createScript('222', [], {}).option('format', { default: 'md' }).parseSync().format).toBe('md');
   });
 
   test('registered script aliases share defaults', () => {
-    expect(createCli('git-worktree', [], { wt: { base: 'main' } }).option('base', { default: 'master' }).parseSync().base).toBe('main');
+    expect(createScript('git-worktree', [], { wt: { base: 'main' } }).option('base', { default: 'master' }).parseSync().base).toBe('main');
   });
 
   test('initializes once from the example regardless of working directory', () => {
@@ -99,7 +99,7 @@ describe('defaults name validation', () => {
       formatt: 'rich', missing: {},
       invites: { format: 'rich', limit: 7, limitt: 9, missing: {}, city: { regionn: 'west' } },
     } };
-    const makeCli = (args: string[]) => createCli('222', args, local)
+    const makeCli = (args: string[]) => createScript('222', args, local)
       .exitProcess(false)
       .option('format', { choices: ['md', 'rich'], default: 'md' })
       .command('events', '', p => p, () => {})
@@ -123,4 +123,23 @@ describe('defaults name validation', () => {
       warn.mockRestore();
     }
   });
+});
+
+describe('script lifecycle', () => {
+  test('defers command execution until module initialization finishes', async () => {
+    const pending = createScript('222', ['invites'], {}).exitProcess(false)
+      .command('invites', '', {}, () => { expect(new Later().value).toBe('ready'); })
+      .parseAsync();
+    class Later { value = 'ready'; }
+    await pending;
+  });
+
+  test('embedded parsers propagate asynchronous handler errors', async () => {
+    const failure = new Error('handler failed');
+    await expect(createScript('222', ['invites'], {}).exitProcess(false)
+      .fail((message, error) => { throw error ?? new Error(message); })
+      .command('invites', '', {}, async () => { throw failure; })
+      .parseAsync()).rejects.toBe(failure);
+  });
+
 });

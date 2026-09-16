@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from "./utils/yargs";
+import { createScript } from "./utils/createScript";
 import { access, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import net from "node:net";
@@ -87,13 +87,10 @@ type ComposeRuntime =
   | { kind: "plugin"; dockerPath: string; command: string }
   | { kind: "standalone"; dockerPath: string; composePath: string; command: string };
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+void main();
 
 async function main() {
-  await createCli("convex-manage")
+  await createScript("convex-manage")
     .command(
       ["create", "add"],
       "Create a local self-hosted Convex deployment",

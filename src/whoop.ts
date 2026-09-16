@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -163,7 +163,7 @@ if (import.meta.main) {
 
 async function runCli(): Promise<void> {
   try {
-    const args = await createCli('whoop-pull')
+    const args = await createScript('whoop-pull')
       .option('include', {
         alias: ['types', 'what', 'i'],
         type: 'string',

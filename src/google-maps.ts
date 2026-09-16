@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import type { Argv } from 'yargs';
 
 import env from './env';
@@ -113,7 +113,7 @@ if (import.meta.main) {
 }
 
 async function run(): Promise<void> {
-	await createCli('google-maps')
+	await createScript('google-maps')
 		.usage('$0 <command> [options]')
 		.parserConfiguration({
 			'strip-aliased': true,

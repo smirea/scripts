@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
@@ -543,7 +543,7 @@ function resolveWindow(options: {
 
 async function runCli(): Promise<void> {
   try {
-    const args = await createCli('macrofactor')
+    const args = await createScript('macrofactor')
       .option('days', {
         alias: ['d'],
         type: 'number',

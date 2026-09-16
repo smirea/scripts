@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -97,7 +97,7 @@ interface AnyListUserData {
 }
 
 async function runCli(): Promise<void> {
-  const cli = createCli('anylist')
+  const cli = createScript('anylist')
     .option('format', {
       alias: 'f',
       type: 'string',
@@ -244,7 +244,7 @@ async function runCli(): Promise<void> {
     .demandCommand(1)
     .help();
 
-  await cli.parse();
+  await cli.parseAsync();
 }
 
 export async function createShoppingList(
@@ -909,8 +909,5 @@ function formatMutationResult(value: MutationResult): string {
 }
 
 if (import.meta.main) {
-  runCli().catch(error => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
+  void runCli();
 }

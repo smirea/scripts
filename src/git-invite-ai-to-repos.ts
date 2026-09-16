@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from "./utils/yargs";
+import { createScript } from "./utils/createScript";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 
@@ -114,7 +114,7 @@ function restoreConfiguredGhUser(): void {
 }
 
 async function parseCliArgs(): Promise<CliArgs> {
-  const parsed = await createCli("git-invite-ai-to-repos")
+  const parsed = await createScript("git-invite-ai-to-repos")
     .option("owner", {
       type: "string",
       default: DEFAULT_OWNER,

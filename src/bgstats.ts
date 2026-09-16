@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -159,14 +159,11 @@ interface SyncResult {
 }
 
 if (import.meta.main) {
-  runCli().catch(error => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
+  void runCli();
 }
 
 async function runCli(): Promise<void> {
-  await createCli('bgstats')
+  await createScript('bgstats')
     .usage('$0 <command> [options]')
     .parserConfiguration({
       'strip-aliased': true,

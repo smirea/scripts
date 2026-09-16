@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from "./utils/yargs";
+import { createScript } from "./utils/createScript";
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import env from "./env";
@@ -110,7 +110,7 @@ function parseCliArgs(rawArgs: string[]): CliOptions {
     }
     args.push(arg);
   }
-  const options = createCli("gai", who ? [who.type === "print" ? "--who" : `--who=${who.value}`] : [])
+  const options = createScript("gai", who ? [who.type === "print" ? "--who" : `--who=${who.value}`] : [])
     .option("who", { type: "string", description: "Print the AI committer name, or set it with --who=name" })
     .parseSync();
   if (options.who !== undefined) {

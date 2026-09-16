@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from "./utils/yargs";
+import { createScript } from "./utils/createScript";
 import { intro, note, outro } from "@clack/prompts";
 import { spawnSync } from "node:child_process";
 import {
@@ -256,7 +256,7 @@ async function parseCliArgs(): Promise<CliArgs> {
   const home = requireEnv("HOME");
   const defaultOutDir = path.join(home, "Documents", "voice-memos", "captains-log");
 
-  const parsed = await createCli("voice-memo-parse")
+  const parsed = await createScript("voice-memo-parse")
     .option("folder", {
       type: "string",
       default: DEFAULT_FOLDER,

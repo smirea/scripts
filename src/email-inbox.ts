@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { createCli } from './utils/yargs';
+import { createScript } from './utils/createScript';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 
@@ -33,14 +33,11 @@ interface EmailResponse {
 }
 
 if (import.meta.main) {
-  run().catch(error => {
-    console.error(error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
+  void run();
 }
 
 async function run(): Promise<void> {
-  await createCli('email-inbox')
+  await createScript('email-inbox')
     .usage('$0 <command> [options]')
     .command(
       'list',
