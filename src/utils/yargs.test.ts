@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -76,5 +76,51 @@ describe('local script defaults', () => {
     writeFileSync(path.join(root, 'defaults.example.ts'), 'export default {};');
     loadDefaults(root);
     expect(readFileSync(path.join(root, 'defaults.ts'), 'utf8')).toBe(example);
+  });
+});
+
+
+describe('defaults name validation', () => {
+  test('warns about unknown scripts when loading the file', () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'script-defaults-invalid-'));
+    writeFileSync(path.join(root, 'defaults.example.ts'), "export default { typo: {}, '222': {} };");
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      loadDefaults(root);
+      expect(warn.mock.calls).toEqual([['[defaults.ts] Unknown script "typo"; ignoring it.']]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test('validates inactive and nested commands without executing handlers or accepting typos as flags', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const local = { '222': {
+      formatt: 'rich', missing: {},
+      invites: { format: 'rich', limit: 7, limitt: 9, missing: {}, city: { regionn: 'west' } },
+    } };
+    const makeCli = (args: string[]) => createCli('222', args, local)
+      .exitProcess(false)
+      .option('format', { choices: ['md', 'rich'], default: 'md' })
+      .command('events', '', p => p, () => {})
+      .command('invites', '', p => p.option('limit', { type: 'number' })
+        .command('city', '', c => c.option('region', { type: 'string' })), () => { throw new Error('Unexpected handler'); });
+    try {
+      const result = await makeCli(['events']).parseAsync();
+      expect(result.format).toBe('md');
+      expect(result).not.toHaveProperty('formatt');
+      expect(warn.mock.calls.map(([message]) => message)).toEqual([
+        '[defaults.ts] Unknown option "222.formatt"; ignoring it.',
+        '[defaults.ts] Unknown command "222.missing"; ignoring it.',
+        '[defaults.ts] Unknown option "222.invites.limitt"; ignoring it.',
+        '[defaults.ts] Unknown command "222.invites.missing"; ignoring it.',
+        '[defaults.ts] Unknown option "222.invites.city.regionn"; ignoring it.',
+      ]);
+      expect(local['222'].invites.limitt).toBe(9);
+      expect(() => makeCli(['events', '--formatt=rich'])
+        .fail(message => { throw new Error(message); }).parseSync()).toThrow('Unknown argument: formatt');
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

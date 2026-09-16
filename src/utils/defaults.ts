@@ -18,6 +18,11 @@ export function loadDefaults(repoRoot = path.resolve(import.meta.dir, '../..')):
   if (!defaults || typeof defaults !== 'object' || Array.isArray(defaults)) {
     throw new Error(`${file} must default-export an object.`);
   }
+  for (const name of Object.keys(defaults)) {
+    if (!SCRIPT_COMMANDS.some(command => command.name === name)) {
+      console.warn(`[defaults.ts] Unknown script "${name}"; ignoring it.`);
+    }
+  }
   return defaults;
 }
 
