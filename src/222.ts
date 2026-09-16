@@ -194,7 +194,6 @@ function sortEvents(events: Event[]): Event[] {
 function inviteMarkdown(event: Event, includePeople = true): string {
   const rsvp = record(event.rsvp);
   const selected = record(rsvp.assigned_attend_option ?? rsvp.requested_attend_option);
-  const cancellationPolicy = record(record(rsvp.decline_event_modal_config).modal).body_markdown;
   const fields: Record<string, unknown> = {
     when: localDate(event.start_date_time, event.time_zone),
     where: [event.city, event.neighborhood].filter(Boolean).join(' — '),
@@ -242,25 +241,6 @@ function inviteMarkdown(event: Event, includePeople = true): string {
     .map(point => `${String(point.label)}: ${String(dateValue(point.date_time, event))}`);
   const people = records(event.group_attendees).map(personMarkdown);
   const guests = records(rsvp.plus_ones).map(personMarkdown);
-  const host = record(rsvp.host);
-  const peopleInfo = fieldsMarkdown({
-    revealed_attendees: people.length || undefined,
-    event_member_count: event.member_count,
-    curated_group_size: event.curated_group_size,
-    maximum_private_group_size: event.max_private_group_size,
-    host: record(host.member).simplified_name ?? host.simplified_name,
-    group_bio: event.group_bio,
-    shared_traits: event.group_similar_traits,
-    plus_ones_allowed: event.number_of_plus_ones_allowed,
-    plus_one_payment_required: event.is_plus_one_payment_required,
-  });
-  const fees = Object.values(record(event.fees)).map(value => priceMarkdown(record(value))).filter(Boolean);
-  const options = records(event.attend_options).map(option => [
-    `- **${escapeMarkdown(String(option.title))}**`,
-    fieldsMarkdown({ details: nonempty(option.details), group_types: option.allowed_group_types }, '  '),
-    ...records(option.price_items).map(price => `  - ${priceMarkdown(price)}`),
-  ].filter(Boolean).join('\n'));
-  const selectedPrices = records(selected.price_items).map(price => `- ${priceMarkdown(price)}`);
   return [
     `## ${escapeMarkdown(event.title)}`,
     fieldsMarkdown(fields),
@@ -269,18 +249,11 @@ function inviteMarkdown(event: Event, includePeople = true): string {
       reveals.length ? markdownField('reveal schedule', reveals) : '',
       !venues.length ? 'Exact venues have not been returned by the API yet.' : '',
     ].filter(Boolean).join('\n\n')),
-    section('People', [peopleInfo, people.length ? (includePeople ? people.join('\n') : '') : 'Attendee details have not been returned by the API yet.',
+    people.length || guests.length ? [
+      '### People',
+      includePeople ? people.join('\n') : '',
       guests.length ? `Guests:\n\n${guests.join('\n')}` : '',
-    ].filter(Boolean).join('\n\n')),
-    section('Attendance & fees', [
-      ...(options.length ? options : selectedPrices),
-      ...fees.map(fee => `- ${fee}`),
-      fieldsMarkdown({
-        cancellation_policy: typeof cancellationPolicy === 'string' ? cancellationPolicy.replaceAll('**', '') : undefined,
-        confirmation_guidelines: nonempty(rsvp.confirmation_guidelines),
-        age_restriction: event.is_twenty_one_plus === true ? '21+' : undefined,
-      }),
-    ].filter(Boolean).join('\n\n')),
+    ].filter(Boolean).join('\n\n') : '',
     section('Details', fieldsMarkdown({ description: event.description, notes: nonempty(event.details), attributes: nonempty(event.attributes) })),
   ].filter(Boolean).join('\n\n');
 }
@@ -350,13 +323,6 @@ function personMarkdown(person: Record<string, unknown>): string {
     typeof member.profile_photo_url === 'string' && /^https?:\/\//.test(member.profile_photo_url)
       ? `  - [Profile photo](<${member.profile_photo_url.replaceAll('>', '%3E')}>)` : '',
   ].filter(Boolean).join('\n');
-}
-
-function priceMarkdown(price: Record<string, unknown>): string {
-  if (typeof price.price !== 'number' || typeof price.currency !== 'string') return '';
-  const money = (amount: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: String(price.currency) }).format(amount / 100);
-  const discounted = typeof price.discount_price === 'number' ? price.discount_price : price.price;
-  return `${escapeMarkdown(String(price.label ?? 'Price'))}: ${money(discounted)}${discounted !== price.price ? ` (normally ${money(price.price)})` : ''}`;
 }
 
 function localDate(value: string, timeZone: string): string {
