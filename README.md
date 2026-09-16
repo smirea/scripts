@@ -33,7 +33,8 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 222 invites --format=json
 222 events --format=json
 222 invites --refresh-session
-222 invites --all
+222 invites --with-rejected
+222 invites --past -f rich
 222 invites --format=rich
 222 events --format=rich
 ```
@@ -42,7 +43,9 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 
 Markdown is the default. Invites combine current and upcoming invitations across cities, with status emojis and short dates in each heading, venue addresses and map links directly below, arrival instructions, itinerary and reveal times, and individual attendees and personality summaries. Rich headings show dates in gray and offer clickable map links. Approximate locations are labeled as obfuscated; people and exact venues appear when returned by the API. JSON preserves the full invite records. Events include all fields returned by the availability API, plus any restrictions on requesting an invite. Location follows your 222 account's current location, not device GPS. City overrides are not supported yet. These commands only read data and never RSVP or request an invite.
 
-`--format=rich` adds terminal colors and a single borderless row of other attendees, with names above inline profile photos, personality summaries, and check-in status. Photos use the [iTerm2 inline image protocol](https://iterm2.com/documentation-images.html); large photos require iTerm2 3.5+. Missing or failed photos show a placeholder. Other terminals and tmux use text rows; redirected output contains neither colors nor image escape sequences.
+`invites --past` shows every experience returned by the history endpoint, newest first, with venues and past group members. The endpoint currently returns ten records and exposes no pagination cursor. Current/upcoming invites hide `NOT_INTERESTED` by default; `--with-rejected` includes them (`--all` was renamed). Short flags: `-p` past, `-r` with-rejected, `-f` format, `-k` api-key, `-s` refresh-session, and `-h` help.
+
+`--format=rich` adds terminal colors and a single borderless row of other attendees, with names above inline profile photos and personality summaries. Photos use the [iTerm2 inline image protocol](https://iterm2.com/documentation-images.html); large photos require iTerm2 3.5+. Missing or failed photos show a placeholder. Other terminals and tmux use text rows; redirected output contains neither colors nor image escape sequences.
 
 ## Airbnb
 

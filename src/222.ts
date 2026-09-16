@@ -28,33 +28,47 @@ type Event = z.infer<typeof eventSchema>;
 
 createScript(async () => {
   await createCli('222')
-    .option('format', { choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
-    .option('api-key', { type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
-    .option('refresh-session', { type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
+    .option('format', { alias: 'f', choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
+    .option('api-key', { alias: 'k', type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
+    .option('refresh-session', { alias: 's', type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
+    .alias('help', 'h')
     .check(args => {
       if (args['api-key'] !== undefined && args['refresh-session']) throw new Error('Use either --api-key or --refresh-session, not both.');
       return true;
     })
     .command('invites', 'List current and upcoming invites across cities', parser => parser
-      .option('all', { type: 'boolean', default: false, description: 'Include invites marked NOT_INTERESTED' }), async args => {
+      .option('with-rejected', { alias: 'r', type: 'boolean', default: false, description: 'Include invites marked NOT_INTERESTED' })
+      .option('past', { alias: 'p', type: 'boolean', default: false, description: 'Show all past experiences returned by the API instead of current/upcoming invites' }), async args => {
       const api = new Api(args['api-key'], args['refresh-session']);
-      const [current, upcoming] = await Promise.all([
-        api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
-        api.get('/get_members_upcoming_events', z.object({ upcoming_events: z.array(eventSchema) })),
-      ]);
-      const invites = sortEvents([...new Map(
-        [...upcoming.upcoming_events, ...current.current_events].map(event => [event.id, event]),
-      ).values()].filter(event => args.all || event.rsvp?.status !== 'NOT_INTERESTED'));
+      let events: Event[];
+      let currentUserId: string | undefined;
+      if (args.past) {
+        const past = await api.get('/get_members_past_events', z.object({ past_events: z.array(eventSchema) }));
+        events = past.past_events;
+        if (args.format !== 'json') {
+          const profile = await api.get('/get_authed_member', z.object({ authed_member: z.object({ id: z.string() }) }));
+          currentUserId = profile.authed_member.id;
+        }
+      } else {
+        const [current, upcoming] = await Promise.all([
+          api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
+          api.get('/get_members_upcoming_events', z.object({ upcoming_events: z.array(eventSchema) })),
+        ]);
+        events = [...upcoming.upcoming_events, ...current.current_events];
+      }
+      const invites = sortEvents([...new Map(events.map(event => [event.id, event])).values()]
+        .filter(event => args['with-rejected'] || event.rsvp?.status !== 'NOT_INTERESTED'));
+      if (args.past) invites.reverse();
       if (args.format === 'json') {
         console.log(JSON.stringify({ invites }, null, 2));
       } else {
         const markdown = [
-          `# 222 invites (${invites.length})`,
-          ...invites.map(event => inviteMarkdown(event, args.format !== 'rich')),
-          ...(invites.length ? [] : ['No invites.']),
+          `# 222 ${args.past ? 'past experiences' : 'invites'} (${invites.length})`,
+          ...invites.map(event => inviteMarkdown(event, args.format !== 'rich', currentUserId)),
+          ...(invites.length ? [] : [args.past ? 'No past experiences.' : 'No invites.']),
         ].join('\n\n');
         if (args.format === 'rich') {
-          await printRich(markdown, invites.map(richPeople));
+          await printRich(markdown, invites.map(event => richPeople(event, currentUserId)));
         } else console.log(markdown);
       }
     })
@@ -184,7 +198,7 @@ function sortEvents(events: Event[]): Event[] {
   return events.sort((a, b) => a.start_date_time.localeCompare(b.start_date_time) || a.id.localeCompare(b.id));
 }
 
-function inviteMarkdown(event: Event, includePeople = true): string {
+function inviteMarkdown(event: Event, includePeople = true, currentUserId?: string): string {
   const rsvp = record(event.rsvp);
   const locations = [...records(event.venues), ...records(event.current_instruction_elements).map(item => record(item.venue))]
     .filter(venue => venue.name || venue.address);
@@ -221,7 +235,7 @@ function inviteMarkdown(event: Event, includePeople = true): string {
   });
   const reveals = records(record(rsvp.additional_timeline_metadata).additional_points)
     .map(point => `${String(point.label)}: ${String(dateValue(point.date_time, event))}`);
-  const people = otherAttendees(event).map(personMarkdown);
+  const people = otherAttendees(event, currentUserId).map(personMarkdown);
   const guests = records(rsvp.plus_ones).map(personMarkdown);
   return [
     `## ${statusEmoji(event)} ${escapeMarkdown(event.title)} (${shortDate(event)})`,
@@ -256,21 +270,23 @@ function shortDate(event: Event): string {
   return `${value('weekday')}, ${value('month')} ${day}${suffix}`;
 }
 
-function otherAttendees(event: Event): Record<string, unknown>[] {
+function otherAttendees(event: Event, currentUserId?: string): Record<string, unknown>[] {
   const rsvp = record(event.rsvp);
-  const currentUserId = rsvp.member_id ?? record(rsvp.member).id;
-  return records(event.group_attendees).filter(person => !currentUserId || record(person.member).id !== currentUserId);
+  const userId = currentUserId ?? rsvp.member_id ?? record(rsvp.member).id;
+  const attendees = [...records(event.group_attendees), ...records(event.my_groups)
+    .flatMap(group => records(group.members).map(member => ({ member })))];
+  return [...new Map(attendees.filter(person => !userId || record(person.member).id !== userId)
+    .map(person => [record(person.member).id ?? person, person])).values()];
 }
 
-function richPeople(event: Event): RichPerson[] {
-  return otherAttendees(event).map(person => {
+function richPeople(event: Event, currentUserId?: string): RichPerson[] {
+  return otherAttendees(event, currentUserId).map(person => {
     const member = record(person.member);
     const outcome = record(member.outcome);
     return {
       name: String(member.simplified_name ?? member.name ?? 'Unnamed attendee'),
       imageUrl: typeof member.profile_photo_url === 'string' ? member.profile_photo_url : undefined,
       personality: typeof outcome.personality_type === 'string' ? outcome.personality_type : undefined,
-      status: humanize(person.checked_in_status),
     };
   });
 }
@@ -285,10 +301,6 @@ function records(value: unknown): Record<string, unknown>[] {
 
 function nonempty(value: unknown): unknown {
   return Array.isArray(value) && !value.length ? undefined : value;
-}
-
-function humanize(value: unknown): string | undefined {
-  return typeof value === 'string' ? value.toLowerCase().replaceAll('_', ' ') : undefined;
 }
 
 function dateValue(value: unknown, event: Event): string | undefined {
@@ -320,8 +332,6 @@ function personMarkdown(person: Record<string, unknown>): string {
     `- **${escapeMarkdown(String(member.simplified_name ?? member.name ?? 'Unnamed attendee'))}**`,
     fieldsMarkdown({
       personality: outcome.personality_type,
-      check_in_status: humanize(person.checked_in_status),
-      message: person.member_reported_checked_in_message,
     }, '  '),
     typeof member.profile_photo_url === 'string' && /^https?:\/\//.test(member.profile_photo_url)
       ? `  - [Profile photo](<${member.profile_photo_url.replaceAll('>', '%3E')}>)` : '',

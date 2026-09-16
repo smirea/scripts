@@ -6,7 +6,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 const people = [[
-  { name: 'Alice', imageUrl: 'https://example.com/alice.png', personality: 'Searcher', status: 'on the way' },
+  { name: 'Alice', imageUrl: 'https://example.com/alice.png', personality: 'Searcher' },
   { name: '李明', imageUrl: 'https://example.com/missing.png' },
 ]];
 const markdown = '# Invites\n\n## Dinner\n\n### People';

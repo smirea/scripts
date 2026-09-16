@@ -4,7 +4,6 @@ export interface RichPerson {
   name: string;
   imageUrl?: string;
   personality?: string;
-  status?: string;
 }
 
 interface RichOptions {
@@ -94,7 +93,6 @@ async function peopleGrid(people: RichPerson[], options: RichOptions): Promise<s
     result.push(cells(people.map(person => person.imageUrl ? 'Photo (iTerm2)' : 'No photo')),
       cells(people.map(person => person.personality ?? '')));
   }
-  result.push(cells(people.map(person => person.status ?? '')));
   return result.join('\n');
 }
 
