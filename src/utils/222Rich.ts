@@ -51,10 +51,11 @@ export async function renderRich(markdown: string, people: RichPerson[][], optio
     } else if (line.startsWith('# ')) {
       lines.push(style.bold.magenta(plain(line.slice(2))));
     } else {
-      const map = line.match(/^(.*) \[map\]\((https:\/\/[^)]+)\)$/);
+      const map = line.match(/^(.*)\[([^\]]+)\]\((https:\/\/www\.google\.com\/maps\/[^)]+)\)(.*)$/);
       if (map) {
-        const link = options.color ? `${ESC}]8;;${map[2]}${ESC}\\${style.underline.blue('[map]')}${ESC}]8;;${ESC}\\` : `[map] (${map[2]})`;
-        lines.push(`${plain(map[1])} ${link}`);
+        const label = plain(map[2]);
+        const link = options.color ? `${ESC}]8;;${map[3]}${ESC}\\${style.underline.blue(label)}${ESC}]8;;${ESC}\\` : `${label} (${map[3]})`;
+        lines.push(`${plain(map[1])}${link}${plain(map[4])}`);
         continue;
       }
       for (const part of wrap(line, width)) {

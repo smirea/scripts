@@ -307,8 +307,10 @@ function venueMarkdown(venue: Record<string, unknown>): string {
   const coordinate = record(venue.coordinate);
   const query = venue.address ?? (typeof coordinate.lat === 'number' && typeof coordinate.lon === 'number'
     ? `${coordinate.lat},${coordinate.lon}` : undefined);
-  const label = `${escapeMarkdown(String(venue.name ?? 'Venue'))}${venue.address ? ` (${escapeMarkdown(String(venue.address))})` : ''}`;
-  return `- ${label}${query ? ` [map](https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(query))})` : ''}`;
+  const name = escapeMarkdown(String(venue.name ?? 'Venue'));
+  const address = venue.address ? escapeMarkdown(String(venue.address)) : undefined;
+  const url = query ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(query))}` : undefined;
+  return address ? `- ${name} (${url ? `[${address}](${url})` : address})` : `- ${url ? `[${name}](${url})` : name}`;
 }
 
 function personMarkdown(person: Record<string, unknown>): string {
