@@ -8,6 +8,7 @@ import { hideBin } from 'yargs/helpers';
 import { z } from 'zod';
 
 import env from './env';
+import { printRich, type RichPerson } from './utils/222Rich';
 import { createScript } from './utils/createScript';
 import { failWithFullHelp } from './utils/yargs';
 
@@ -30,7 +31,7 @@ type Event = z.infer<typeof eventSchema>;
 createScript(async () => {
   await yargs(hideBin(process.argv))
     .scriptName('222')
-    .option('format', { choices: ['md', 'json'] as const, default: 'md', description: 'Output format' })
+    .option('format', { choices: ['md', 'json', 'rich'] as const, default: 'md', description: 'Output format; rich shows styled events and inline attendee photos in iTerm2' })
     .option('api-key', { type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
     .option('refresh-session', { type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
     .check(args => {
@@ -49,11 +50,14 @@ createScript(async () => {
       if (args.format === 'json') {
         console.log(JSON.stringify({ invites }, null, 2));
       } else {
-        console.log([
+        const markdown = [
           `# 222 invites (${invites.length})`,
-          ...invites.map(inviteMarkdown),
+          ...invites.map(event => inviteMarkdown(event, args.format !== 'rich')),
           ...(invites.length ? [] : ['No invites.']),
-        ].join('\n\n'));
+        ].join('\n\n');
+        if (args.format === 'rich') {
+          await printRich(markdown, invites.map(richPeople));
+        } else console.log(markdown);
       }
     })
     .command('events', 'List available events for your current 222 account location, with all API details', parser => parser, async args => {
@@ -68,7 +72,7 @@ createScript(async () => {
       if (args.format === 'json') {
         console.log(JSON.stringify({ ...metadata, events }, null, 2));
       } else {
-        console.log([
+        const markdown = [
           `# 222 available events (${events.length})`,
           'Location: your current 222 account location.',
           ...Object.entries(metadata).filter(([key]) => key !== 'requestable_dates').map(([key, value]) => markdownField(key, value)),
@@ -76,7 +80,9 @@ createScript(async () => {
             .filter(([key]) => key !== 'title')
             .map(([key, value]) => markdownField(key, displayValue(event, key, value))).filter(Boolean).join('\n')}`),
           ...(events.length ? [] : ['No available events.']),
-        ].filter(Boolean).join('\n\n'));
+        ].filter(Boolean).join('\n\n');
+        if (args.format === 'rich') await printRich(markdown);
+        else console.log(markdown);
       }
     })
     .demandCommand(1, 'Choose invites or events.')
@@ -185,7 +191,7 @@ function sortEvents(events: Event[]): Event[] {
   return events.sort((a, b) => a.start_date_time.localeCompare(b.start_date_time) || a.id.localeCompare(b.id));
 }
 
-function inviteMarkdown(event: Event): string {
+function inviteMarkdown(event: Event, includePeople = true): string {
   const rsvp = record(event.rsvp);
   const selected = record(rsvp.assigned_attend_option ?? rsvp.requested_attend_option);
   const cancellationPolicy = record(record(rsvp.decline_event_modal_config).modal).body_markdown;
@@ -263,7 +269,7 @@ function inviteMarkdown(event: Event): string {
       reveals.length ? markdownField('reveal schedule', reveals) : '',
       !venues.length ? 'Exact venues have not been returned by the API yet.' : '',
     ].filter(Boolean).join('\n\n')),
-    section('People', [peopleInfo, people.length ? people.join('\n') : 'Attendee details have not been returned by the API yet.',
+    section('People', [peopleInfo, people.length ? (includePeople ? people.join('\n') : '') : 'Attendee details have not been returned by the API yet.',
       guests.length ? `Guests:\n\n${guests.join('\n')}` : '',
     ].filter(Boolean).join('\n\n')),
     section('Attendance & fees', [
@@ -277,6 +283,19 @@ function inviteMarkdown(event: Event): string {
     ].filter(Boolean).join('\n\n')),
     section('Details', fieldsMarkdown({ description: event.description, notes: nonempty(event.details), attributes: nonempty(event.attributes) })),
   ].filter(Boolean).join('\n\n');
+}
+
+function richPeople(event: Event): RichPerson[] {
+  return records(event.group_attendees).map(person => {
+    const member = record(person.member);
+    const outcome = record(member.outcome);
+    return {
+      name: String(member.simplified_name ?? member.name ?? 'Unnamed attendee'),
+      imageUrl: typeof member.profile_photo_url === 'string' ? member.profile_photo_url : undefined,
+      personality: typeof outcome.personality_type === 'string' ? outcome.personality_type : undefined,
+      status: humanize(person.checked_in_status),
+    };
+  });
 }
 
 function record(value: unknown): Record<string, unknown> {
