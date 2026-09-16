@@ -32,9 +32,10 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 222 events
 222 invites --format=json
 222 events --format=json
+222 invites --refresh-session
 ```
 
-`src/222.ts` calls the 222 API directly. It retrieves your signed-in Chrome session through `~/code/chrome-browsergate/scripts/invoke`, or accepts a 222 auth token with `--api-key`. Credentials are not saved. Run setup to install the `222` command.
+`src/222.ts` calls the 222 API directly using `TWOTWOTWO_API_KEY` from `src/env.ts`. If missing or rejected, it retrieves your signed-in Chrome session through `~/code/chrome-browsergate/scripts/invoke`, validates the token, and saves it to the ignored `.env.local`. Use `--refresh-session` to force this, or `--api-key` for a temporary override. Normal runs use the saved key without contacting Chrome. Run setup to install the `222` command.
 
 Markdown is the default. Invites combine current and upcoming invitations across cities, with local times, status, RSVP links, and revealed venues; JSON preserves the full invite records. Events include all fields returned by the availability API, plus any restrictions on requesting an invite. Location follows your 222 account's current location, not device GPS. City overrides are not supported yet. These commands only read data and never RSVP or request an invite.
 

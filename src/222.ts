@@ -1,11 +1,13 @@
 #!/usr/bin/env bun
 import { spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
 import { z } from 'zod';
 
+import env from './env';
 import { createScript } from './utils/createScript';
 import { failWithFullHelp } from './utils/yargs';
 
@@ -29,9 +31,14 @@ createScript(async () => {
   await yargs(hideBin(process.argv))
     .scriptName('222')
     .option('format', { choices: ['md', 'json'] as const, default: 'md', description: 'Output format' })
-    .option('api-key', { type: 'string', requiresArg: true, description: '222 auth token; otherwise retrieve the signed-in Chrome session with BrowserGate' })
+    .option('api-key', { type: 'string', requiresArg: true, description: 'Override the saved TWOTWOTWO_API_KEY for this run' })
+    .option('refresh-session', { type: 'boolean', default: false, description: 'Fetch and save a fresh token from signed-in Chrome via BrowserGate' })
+    .check(args => {
+      if (args['api-key'] !== undefined && args['refresh-session']) throw new Error('Use either --api-key or --refresh-session, not both.');
+      return true;
+    })
     .command('invites', 'List all current and upcoming invites across cities', parser => parser, async args => {
-      const api = new Api(args['api-key']);
+      const api = new Api(args['api-key'], args['refresh-session']);
       const [current, upcoming] = await Promise.all([
         api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
         api.get('/get_members_upcoming_events', z.object({ upcoming_events: z.array(eventSchema) })),
@@ -50,7 +57,7 @@ createScript(async () => {
       }
     })
     .command('events', 'List available events for your current 222 account location, with all API details', parser => parser, async args => {
-      const api = new Api(args['api-key']);
+      const api = new Api(args['api-key'], args['refresh-session']);
       const response = await api.get('/get_request_new_event_metadata', z.object({
         request_new_event_metadata: z.object({
           requestable_events: z.array(eventSchema),
@@ -83,22 +90,46 @@ createScript(async () => {
 
 class Api {
   private authorization?: string;
+  private refreshing?: Promise<string>;
 
-  constructor(private apiKey?: string) {
+  constructor(private apiKey?: string, refreshSession = false) {
     if (apiKey !== undefined && !apiKey.trim()) throw new Error('--api-key cannot be empty.');
+    const savedKey = apiKey ?? env.TWOTWOTWO_API_KEY;
+    if (!refreshSession && savedKey?.trim()) this.authorization = tokenHeader(savedKey);
+  }
+
+  private refresh(): Promise<string> {
+    this.refreshing ??= (async () => {
+      const authorization = browserAuthorization();
+      const response = await fetch(`${API_URL}/get_authed_member`, {
+        headers: { Authorization: authorization },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`Could not validate the BrowserGate token (HTTP ${response.status}). Sign in at ${RSVP_URL} in Chrome and retry.`);
+      }
+      const parsed = z.object({ authed_member: z.object({ id: z.string() }) }).safeParse(await response.json());
+      if (!parsed.success) throw new Error('222 returned an unexpected authentication response; credentials were not saved.');
+      saveApiKey(authorization.replace(/^Token\s+/i, ''));
+      this.authorization = authorization;
+      return authorization;
+    })().finally(() => { this.refreshing = undefined; });
+    return this.refreshing;
   }
 
   async get<T>(endpoint: string, schema: z.ZodType<T>): Promise<T> {
-    this.authorization ??= this.apiKey ? tokenHeader(this.apiKey) : browserAuthorization();
+    this.authorization ??= await this.refresh();
     for (let attempt = 0; attempt < 2; attempt++) {
+      const authorization: string = this.authorization;
       const response = await fetch(`${API_URL}${endpoint}`, {
-        headers: { Authorization: this.authorization, Accept: 'application/json' },
+        headers: { Authorization: authorization, Accept: 'application/json' },
         signal: AbortSignal.timeout(30_000),
       });
       if (response.status === 401 || response.status === 403) {
         await response.body?.cancel();
         if (attempt === 0 && !this.apiKey) {
-          this.authorization = browserAuthorization();
+          if (this.authorization === authorization) await this.refresh();
           continue;
         }
         throw new Error('222 authentication failed. Sign in at https://rsvp.222.place/ in Chrome or supply a valid --api-key.');
@@ -113,6 +144,17 @@ class Api {
     }
     throw new Error('222 authentication failed.');
   }
+}
+
+function saveApiKey(token: string): void {
+  const file = path.resolve(import.meta.dir, '../.env.local');
+  const content = existsSync(file) ? readFileSync(file, 'utf8') : '';
+  const line = `TWOTWOTWO_API_KEY=${JSON.stringify(token)}`;
+  const pattern = /^TWOTWOTWO_API_KEY=.*$/gm;
+  const updated = pattern.test(content) ? content.replace(pattern, () => line) : `${content.trimEnd()}\n${line}\n`;
+  writeFileSync(file, updated, { mode: 0o600 });
+  chmodSync(file, 0o600);
+  console.error('Saved 222 credentials in .env.local.');
 }
 
 function tokenHeader(token: string): string {

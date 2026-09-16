@@ -25,6 +25,7 @@ const env = z.object({
   SMS_INBOX_TOKEN: z.string(),
   AIRBNB_SESSION_COOKIE: z.string().optional(),
   AIRBNB_API_KEY: z.string().optional(),
+  TWOTWOTWO_API_KEY: z.string().optional(),
 }).parse(process.env);
 
 export default env;
