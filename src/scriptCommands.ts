@@ -17,6 +17,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'convex-manage', source: 'src/convex-manage.ts' },
   { name: 'google-maps', source: 'src/google-maps.ts' },
   { name: 'cookunity', source: 'src/cookunity.ts' },
+  { name: '222', source: 'src/222.ts' },
   { name: 'airbnb', source: 'airbnb.ts' },
   { name: 'bgstats', source: 'src/bgstats.ts' },
   { name: 'clocktracker', source: 'src/clocktracker.ts' },
