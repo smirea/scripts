@@ -38,7 +38,8 @@ createScript(async () => {
       if (args['api-key'] !== undefined && args['refresh-session']) throw new Error('Use either --api-key or --refresh-session, not both.');
       return true;
     })
-    .command('invites', 'List all current and upcoming invites across cities', parser => parser, async args => {
+    .command('invites', 'List current and upcoming invites across cities', parser => parser
+      .option('all', { type: 'boolean', default: false, description: 'Include invites marked NOT_INTERESTED' }), async args => {
       const api = new Api(args['api-key'], args['refresh-session']);
       const [current, upcoming] = await Promise.all([
         api.get('/get_members_current_events', z.object({ current_events: z.array(eventSchema) })),
@@ -46,7 +47,7 @@ createScript(async () => {
       ]);
       const invites = sortEvents([...new Map(
         [...upcoming.upcoming_events, ...current.current_events].map(event => [event.id, event]),
-      ).values()]);
+      ).values()].filter(event => args.all || event.rsvp?.status !== 'NOT_INTERESTED'));
       if (args.format === 'json') {
         console.log(JSON.stringify({ invites }, null, 2));
       } else {

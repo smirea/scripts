@@ -33,6 +33,7 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 222 invites --format=json
 222 events --format=json
 222 invites --refresh-session
+222 invites --all
 222 invites --format=rich
 222 events --format=rich
 ```
