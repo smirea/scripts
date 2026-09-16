@@ -186,20 +186,9 @@ function sortEvents(events: Event[]): Event[] {
 
 function inviteMarkdown(event: Event, includePeople = true): string {
   const rsvp = record(event.rsvp);
-  const selected = record(rsvp.assigned_attend_option ?? rsvp.requested_attend_option);
-  const fields: Record<string, unknown> = {
-    when: localDate(event.start_date_time, event.time_zone),
-    where: [event.city, event.neighborhood].filter(Boolean).join(' — '),
-    status: humanize(rsvp.status),
-    guaranteed_selection: rsvp.is_guaranteed_selection,
-    attendance: selected.title,
-    rsvp: event.rsvp ? `${RSVP_URL}?id=${encodeURIComponent(event.rsvp.id)}` : undefined,
-    payment_deadline: event.payment_deadline_date_time ? localDate(event.payment_deadline_date_time, event.time_zone) : undefined,
-    late_deadline: dateValue(event.late_deadline_date_time, event),
-    canceled: event.is_canceled === true ? true : undefined,
-    sold_out: event.is_sold_out === true ? true : undefined,
-  };
-  const venues = records(event.venues).map(venue => venueMarkdown(venue));
+  const locations = [...records(event.venues), ...records(event.current_instruction_elements).map(item => record(item.venue))]
+    .filter(venue => venue.name || venue.address);
+  const venues = [...new Map(locations.map(venue => [venue.id ?? `${venue.name}:${venue.address}`, venue])).values()].map(venueMarkdown);
   const stages = records(record(event.timeline).stages).map(stage => {
     const approximate = record(stage.location_coordinate_obfuscated);
     const coordinate = record(approximate.coordinate);
@@ -235,10 +224,10 @@ function inviteMarkdown(event: Event, includePeople = true): string {
   const people = otherAttendees(event).map(personMarkdown);
   const guests = records(rsvp.plus_ones).map(personMarkdown);
   return [
-    `## ${escapeMarkdown(event.title)}`,
-    fieldsMarkdown(fields),
+    `## ${statusEmoji(event)} ${escapeMarkdown(event.title)} (${shortDate(event)})`,
+    venues.join('\n'),
     event.blurb ? escapeMarkdown(event.blurb) : '',
-    section('Locations & itinerary', [...venues, ...stages, ...instructions,
+    section('Locations & itinerary', [...stages, ...instructions,
       reveals.length ? markdownField('reveal schedule', reveals) : '',
       !venues.length ? 'Exact venues have not been returned by the API yet.' : '',
     ].filter(Boolean).join('\n\n')),
@@ -249,6 +238,22 @@ function inviteMarkdown(event: Event, includePeople = true): string {
     ].filter(Boolean).join('\n\n') : '',
     section('Details', fieldsMarkdown({ description: event.description, notes: nonempty(event.details), attributes: nonempty(event.attributes) })),
   ].filter(Boolean).join('\n\n');
+}
+
+function statusEmoji(event: Event): string {
+  const status = event.rsvp?.status;
+  if (event.is_canceled || ['NOT_INTERESTED', 'DECLINED', 'REJECTED', 'CANCELED', 'CANCELLED', 'BAILED'].includes(status ?? '')) return '❌';
+  return ['CONFIRMED', 'SELECTED', 'ATTENDING'].includes(status ?? '') ? '✅' : '❓';
+}
+
+function shortDate(event: Event): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    weekday: 'short', month: 'short', day: 'numeric', timeZone: event.time_zone,
+  }).formatToParts(new Date(event.start_date_time));
+  const value = (type: string) => parts.find(part => part.type === type)!.value;
+  const day = Number(value('day'));
+  const suffix = day % 100 >= 11 && day % 100 <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[day % 10] ?? 'th');
+  return `${value('weekday')}, ${value('month')} ${day}${suffix}`;
 }
 
 function otherAttendees(event: Event): Record<string, unknown>[] {
@@ -302,11 +307,8 @@ function venueMarkdown(venue: Record<string, unknown>): string {
   const coordinate = record(venue.coordinate);
   const query = venue.address ?? (typeof coordinate.lat === 'number' && typeof coordinate.lon === 'number'
     ? `${coordinate.lat},${coordinate.lon}` : undefined);
-  return [
-    `- **${escapeMarkdown(String(venue.name ?? 'Venue'))}**${venue.type ? ` (${escapeMarkdown(humanize(venue.type) ?? '')})` : ''}`,
-    fieldsMarkdown({ address: venue.address }, '  '),
-    query ? `  - [Map](https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(query))})` : '',
-  ].filter(Boolean).join('\n');
+  const label = `${escapeMarkdown(String(venue.name ?? 'Venue'))}${venue.address ? ` (${escapeMarkdown(String(venue.address))})` : ''}`;
+  return `- ${label}${query ? ` [map](https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(query))})` : ''}`;
 }
 
 function personMarkdown(person: Record<string, unknown>): string {
