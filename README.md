@@ -14,6 +14,7 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 
 ## Scripts
 
+- `airbnb` (`airbnb.ts`): read reservations and wishlists as Markdown. Pass a confirmation code or wishlist ID for details; use `--refresh-session` to save credentials from signed-in Chrome via Browser Gate.
 - `gai` (`src/git-commit-ai.ts`): generate a conventional commit message from staged changes using Gemini, then commit as the current git user while appending a `Co-Authored-By` trailer for the configured AI identity. Supports `--who` for reading the effective trailer identity and setting `AI_COMITTER_NAME` via `env-manager global set`. Also available as `git ai-cim` after running setup (via the `git-ai-cim` wrapper).
 - `git-invite-ai-to-repos` (`src/git-invite-ai-to-repos.ts`): invite the configured AI GitHub account to owner repositories created in the past year, or specific repositories via `--repos`, then accept those invitations as the AI account using GitHub CLI's stored multi-account auth.
 - `git-worktree` / `wt` (`src/git-worktree.ts`): manage git worktrees with `add`, `list`, `remove`, `cd`, `merge` (aliases: `ls`, `rm`). `rm` always uses `git worktree remove --force`. `merge` can select a worktree branch interactively and merge it into the current branch, then optionally remove the merged branch/worktree (default yes). Worktrees live under `~/worktrees/<repo>__<branch>`; `add` runs `bun install`.
@@ -24,19 +25,3 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 - `voice-memo-parse` (`src/voice-memo-parse.ts`): opens Voice Memos, waits for sync, exports new recordings from a folder (default `Captain's Log`) into `~/Documents/voice-memos/captains-log` as audio + markdown pairs using `YYYY-MM-DD_HH-MM` naming, uses embedded transcripts with Gemini fallback when needed, and regenerates `_overview.md` with Gemini-powered highlights for each memo (`# [date] [location] ([audio]/[md])`). Highlights default to Gemini 3 Flash and automatically fall back to `gemini-2.5-flash` if unavailable. Supports `--setup-permissions` to check permission status, open relevant System Settings pages, and print exact manual steps for anything macOS cannot auto-prompt.
 - `whoop-pull` (`src/whoop.ts`): fetch WHOOP data as JSON (defaults to the last 2 days; configurable via CLI). If `WHOOP_REFRESH_TOKEN` is missing, it opens the WHOOP auth URL in your default browser, supports manual `--auth-code` exchange, and can persist `--token` / rotated refresh tokens into `.env.local`.
 - `setup` (`src/setup.ts`): creates/refreshes wrappers for the scripts in `~/bin`.
-
-## Airbnb
-
-`airbnb.ts` reads Airbnb directly through its private API and prints Markdown. Normal runs do not open or activate browser tabs. Run `bun src/setup.ts` to install the `airbnb` command.
-
-```sh
-airbnb reservations --refresh-session
-airbnb reservations
-airbnb reservations <confirmation-code>
-airbnb wishlists
-airbnb wishlists <wishlist-id>
-```
-
-Initial setup and later `--refresh-session` runs use the signed-in Chrome session through `~/code/chrome-browsergate/scripts/invoke`. Working credentials are saved only in the ignored `.env.local`; project variables are read through `src/env.ts`. Sign in on airbnb.com and refresh again if the session expires.
-
-`reservations` shows current/upcoming stays with local check-in/out times, address, host, guest counts, and listing links. Pass a confirmation code to look up a specific stay, including a past reservation. `wishlists` paginates all lists; pass its numeric ID for saved listing details, prices, availability for the saved search, notes, and votes. Redirect stdout to save Markdown. Airbnb's private query hashes may need updating when its API changes.
