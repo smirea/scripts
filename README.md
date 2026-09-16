@@ -37,7 +37,7 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 
 `src/222.ts` calls the 222 API directly using `TWOTWOTWO_API_KEY` from `src/env.ts`. If missing or rejected, it retrieves your signed-in Chrome session through `~/code/chrome-browsergate/scripts/invoke`, validates the token, and saves it to the ignored `.env.local`. Use `--refresh-session` to force this, or `--api-key` for a temporary override. Normal runs use the saved key without contacting Chrome. Run setup to install the `222` command.
 
-Markdown is the default. Invites combine current and upcoming invitations across cities, with local times, status, RSVP links, and revealed venues; JSON preserves the full invite records. Events include all fields returned by the availability API, plus any restrictions on requesting an invite. Location follows your 222 account's current location, not device GPS. City overrides are not supported yet. These commands only read data and never RSVP or request an invite.
+Markdown is the default. Invites combine current and upcoming invitations across cities, with local times, status, RSVP links, venue addresses and maps, arrival instructions, itinerary and reveal times, attendees and personality summaries, attendance options, and fees. Approximate locations are labeled as obfuscated; people and exact venues appear when returned by the API. JSON preserves the full invite records. Events include all fields returned by the availability API, plus any restrictions on requesting an invite. Location follows your 222 account's current location, not device GPS. City overrides are not supported yet. These commands only read data and never RSVP or request an invite.
 
 ## Airbnb
 

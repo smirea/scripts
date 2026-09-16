@@ -186,19 +186,158 @@ function sortEvents(events: Event[]): Event[] {
 }
 
 function inviteMarkdown(event: Event): string {
+  const rsvp = record(event.rsvp);
+  const selected = record(rsvp.assigned_attend_option ?? rsvp.requested_attend_option);
+  const cancellationPolicy = record(record(rsvp.decline_event_modal_config).modal).body_markdown;
   const fields: Record<string, unknown> = {
     when: localDate(event.start_date_time, event.time_zone),
     where: [event.city, event.neighborhood].filter(Boolean).join(' — '),
-    status: event.rsvp?.status,
+    status: humanize(rsvp.status),
+    guaranteed_selection: rsvp.is_guaranteed_selection,
+    attendance: selected.title,
     rsvp: event.rsvp ? `${RSVP_URL}?id=${encodeURIComponent(event.rsvp.id)}` : undefined,
     payment_deadline: event.payment_deadline_date_time ? localDate(event.payment_deadline_date_time, event.time_zone) : undefined,
-    description: event.blurb,
-    details: event.details,
-    venues: event.venues,
-    event_id: event.id,
+    late_deadline: dateValue(event.late_deadline_date_time, event),
+    canceled: event.is_canceled === true ? true : undefined,
+    sold_out: event.is_sold_out === true ? true : undefined,
   };
-  return `## ${escapeMarkdown(event.title)}\n\n${Object.entries(fields)
-    .map(([key, value]) => markdownField(key, value)).filter(Boolean).join('\n')}`;
+  const venues = records(event.venues).map(venue => venueMarkdown(venue));
+  const stages = records(record(event.timeline).stages).map(stage => {
+    const approximate = record(stage.location_coordinate_obfuscated);
+    const coordinate = record(approximate.coordinate);
+    return [
+      `- **${escapeMarkdown(String(stage.title ?? 'Stage'))}** — ${escapeMarkdown(String(dateValue(stage.start_date_time, event) ?? 'Time to be announced'))}`,
+      fieldsMarkdown({
+        description: stage.subtitle,
+        location_revealed: dateValue(stage.location_reveal_date_time, event),
+        approximate_area: typeof coordinate.lat === 'number' && typeof coordinate.lon === 'number'
+          ? `${coordinate.lat}, ${coordinate.lon}; obfuscated radius ${approximate.obfuscation_radius_miles} miles — not an exact venue location`
+          : undefined,
+      }, '  '),
+    ].filter(Boolean).join('\n');
+  });
+  const instructions = records(event.current_instruction_elements).map(instruction => {
+    const venue = record(instruction.venue);
+    return [
+      `- **${escapeMarkdown(String(instruction.title ?? 'Arrival instructions'))}**`,
+      fieldsMarkdown({
+        when: dateValue(instruction.date_time, event),
+        venue: venue.name,
+        address: venue.address,
+        instructions: instruction.details,
+        reservation: instruction.table,
+        ticket: instruction.external_ticket_url,
+        ticket_image: instruction.ticket_image_url,
+        qr_code: instruction.qr_code_image_url,
+      }, '  '),
+    ].filter(Boolean).join('\n');
+  });
+  const reveals = records(record(rsvp.additional_timeline_metadata).additional_points)
+    .map(point => `${String(point.label)}: ${String(dateValue(point.date_time, event))}`);
+  const people = records(event.group_attendees).map(personMarkdown);
+  const guests = records(rsvp.plus_ones).map(personMarkdown);
+  const host = record(rsvp.host);
+  const peopleInfo = fieldsMarkdown({
+    revealed_attendees: people.length || undefined,
+    event_member_count: event.member_count,
+    curated_group_size: event.curated_group_size,
+    maximum_private_group_size: event.max_private_group_size,
+    host: record(host.member).simplified_name ?? host.simplified_name,
+    group_bio: event.group_bio,
+    shared_traits: event.group_similar_traits,
+    plus_ones_allowed: event.number_of_plus_ones_allowed,
+    plus_one_payment_required: event.is_plus_one_payment_required,
+  });
+  const fees = Object.values(record(event.fees)).map(value => priceMarkdown(record(value))).filter(Boolean);
+  const options = records(event.attend_options).map(option => [
+    `- **${escapeMarkdown(String(option.title))}**`,
+    fieldsMarkdown({ details: nonempty(option.details), group_types: option.allowed_group_types }, '  '),
+    ...records(option.price_items).map(price => `  - ${priceMarkdown(price)}`),
+  ].filter(Boolean).join('\n'));
+  const selectedPrices = records(selected.price_items).map(price => `- ${priceMarkdown(price)}`);
+  return [
+    `## ${escapeMarkdown(event.title)}`,
+    fieldsMarkdown(fields),
+    event.blurb ? escapeMarkdown(event.blurb) : '',
+    section('Locations & itinerary', [...venues, ...stages, ...instructions,
+      reveals.length ? markdownField('reveal schedule', reveals) : '',
+      !venues.length ? 'Exact venues have not been returned by the API yet.' : '',
+    ].filter(Boolean).join('\n\n')),
+    section('People', [peopleInfo, people.length ? people.join('\n') : 'Attendee details have not been returned by the API yet.',
+      guests.length ? `Guests:\n\n${guests.join('\n')}` : '',
+    ].filter(Boolean).join('\n\n')),
+    section('Attendance & fees', [
+      ...(options.length ? options : selectedPrices),
+      ...fees.map(fee => `- ${fee}`),
+      fieldsMarkdown({
+        cancellation_policy: typeof cancellationPolicy === 'string' ? cancellationPolicy.replaceAll('**', '') : undefined,
+        confirmation_guidelines: nonempty(rsvp.confirmation_guidelines),
+        age_restriction: event.is_twenty_one_plus === true ? '21+' : undefined,
+      }),
+    ].filter(Boolean).join('\n\n')),
+    section('Details', fieldsMarkdown({ description: event.description, notes: nonempty(event.details), attributes: nonempty(event.attributes) })),
+  ].filter(Boolean).join('\n\n');
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function records(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.map(record) : [];
+}
+
+function nonempty(value: unknown): unknown {
+  return Array.isArray(value) && !value.length ? undefined : value;
+}
+
+function humanize(value: unknown): string | undefined {
+  return typeof value === 'string' ? value.toLowerCase().replaceAll('_', ' ') : undefined;
+}
+
+function dateValue(value: unknown, event: Event): string | undefined {
+  return typeof value === 'string' ? localDate(value, event.time_zone) : undefined;
+}
+
+function fieldsMarkdown(fields: Record<string, unknown>, indent = ''): string {
+  return Object.entries(fields).map(([key, value]) => markdownField(key, value, indent)).filter(Boolean).join('\n');
+}
+
+function section(title: string, body: string): string {
+  return body ? `### ${title}\n\n${body}` : '';
+}
+
+function venueMarkdown(venue: Record<string, unknown>): string {
+  const coordinate = record(venue.coordinate);
+  const query = venue.address ?? (typeof coordinate.lat === 'number' && typeof coordinate.lon === 'number'
+    ? `${coordinate.lat},${coordinate.lon}` : undefined);
+  return [
+    `- **${escapeMarkdown(String(venue.name ?? 'Venue'))}**${venue.type ? ` (${escapeMarkdown(humanize(venue.type) ?? '')})` : ''}`,
+    fieldsMarkdown({ address: venue.address }, '  '),
+    query ? `  - [Map](https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(String(query))})` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function personMarkdown(person: Record<string, unknown>): string {
+  const member = person.member ? record(person.member) : person;
+  const outcome = record(member.outcome);
+  return [
+    `- **${escapeMarkdown(String(member.simplified_name ?? member.name ?? 'Unnamed attendee'))}**`,
+    fieldsMarkdown({
+      personality: outcome.personality_type,
+      check_in_status: humanize(person.checked_in_status),
+      message: person.member_reported_checked_in_message,
+    }, '  '),
+    typeof member.profile_photo_url === 'string' && /^https?:\/\//.test(member.profile_photo_url)
+      ? `  - [Profile photo](<${member.profile_photo_url.replaceAll('>', '%3E')}>)` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function priceMarkdown(price: Record<string, unknown>): string {
+  if (typeof price.price !== 'number' || typeof price.currency !== 'string') return '';
+  const money = (amount: number) => new Intl.NumberFormat('en-US', { style: 'currency', currency: String(price.currency) }).format(amount / 100);
+  const discounted = typeof price.discount_price === 'number' ? price.discount_price : price.price;
+  return `${escapeMarkdown(String(price.label ?? 'Price'))}: ${money(discounted)}${discounted !== price.price ? ` (normally ${money(price.price)})` : ''}`;
 }
 
 function localDate(value: string, timeZone: string): string {
