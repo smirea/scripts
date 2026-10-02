@@ -474,7 +474,7 @@ function renderPlaces(value: Place | Place[], format: string, showOpen = true): 
 		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)} (${place.userRatingCount ?? 0})`,
 		type: place.primaryType ?? place.types?.[0] ?? '',
 		...(showOpen ? { open: openStatus(place) } : {}),
-		url: place.googleMapsUri ?? '',
+		url: format === 'table' ? tableMapsUrl(place.googleMapsUri) : place.googleMapsUri ?? '',
 	}));
 
 	if (format === 'table') {
@@ -491,6 +491,19 @@ function renderPlaces(value: Place | Place[], format: string, showOpen = true): 
 		line(columns.map(() => '---')),
 		...rows.map(row => line(Object.values(row))),
 	].join('\n'));
+}
+
+function tableMapsUrl(value: string | undefined): string {
+	if (!value) {
+		return '';
+	}
+	try {
+		const url = new URL(value);
+		url.searchParams.delete('g_mp');
+		return url.toString();
+	} catch {
+		return value;
+	}
 }
 
 function getDetailFieldMask(options: DetailsOptions): string {
