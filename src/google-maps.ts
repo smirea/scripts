@@ -49,6 +49,7 @@ const DEFAULT_DETAIL_FIELDS = [
 interface SearchOptions {
 	limit?: number;
 	near?: string;
+	center?: { latitude: number; longitude: number };
 	distance?: number;
 	minRating?: number;
 	minRatingCount?: number;
@@ -288,7 +289,7 @@ function joinPositionals(value: unknown): string {
 	return typeof value === 'string' ? value.trim() : '';
 }
 
-async function searchPlaces(query: string, options: SearchOptions): Promise<Place[]> {
+export async function searchPlaces(query: string, options: SearchOptions = {}): Promise<Place[]> {
 	if (!query) {
 		throw new Error('Missing search query.');
 	}
@@ -304,7 +305,7 @@ async function searchPlaces(query: string, options: SearchOptions): Promise<Plac
 	return (response.places ?? []).filter(place => (place.userRatingCount ?? 0) >= minimumCount);
 }
 
-async function placeDetails(place: string, options: DetailsOptions): Promise<Place> {
+export async function placeDetails(place: string, options: DetailsOptions = {}): Promise<Place> {
 	if (!place) {
 		throw new Error('details requires a places/... resource name, place id, or exact text query.');
 	}
@@ -349,7 +350,10 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 		body.priceLevels = priceLevels;
 	}
 
-	const center = options.near ? await resolveLocation(options.near) : await detectLocation();
+	if (options.center && !parseCoordinates(options.center)) {
+		throw new Error('Invalid search coordinates.');
+	}
+	const center = options.center ?? (options.near ? await resolveLocation(options.near) : await detectLocation());
 	if (center) {
 		body.locationBias = {
 			circle: {
@@ -438,6 +442,7 @@ async function placesFetch<T>(
 	}
 
 	const response = await fetch(url, {
+		signal: AbortSignal.timeout(20_000),
 		method: body === undefined ? 'GET' : 'POST',
 		headers: {
 			'Content-Type': 'application/json',
@@ -452,6 +457,25 @@ async function placesFetch<T>(
 		throw new Error(`Google Places API ${response.status}: ${text}`);
 	}
 	return JSON.parse(text) as T;
+}
+
+export async function placePhoto(name: string, maxWidthPx = 1200): Promise<Response> {
+	if (!/^places\/[A-Za-z0-9_-]+\/photos\/[A-Za-z0-9_-]+$/.test(name)) {
+		throw new Error('Invalid Google Places photo resource.');
+	}
+	if (!Number.isInteger(maxWidthPx) || maxWidthPx < 1 || maxWidthPx > 4800) {
+		throw new Error('Photo width must be between 1 and 4800 pixels.');
+	}
+	const url = new URL(`${PLACES_BASE_URL}/${name}/media`);
+	url.searchParams.set('maxWidthPx', String(maxWidthPx));
+	const response = await fetch(url, {
+		headers: { 'X-Goog-Api-Key': await readGoogleMapsApiKey() },
+		signal: AbortSignal.timeout(20_000),
+	});
+	if (!response.ok) {
+		throw new Error(`Google Places photo request failed (${response.status}).`);
+	}
+	return response;
 }
 
 async function readGoogleMapsApiKey(): Promise<string> {
