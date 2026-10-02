@@ -8,7 +8,7 @@ import env from './env';
 const PLACES_BASE_URL = 'https://places.googleapis.com/v1';
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 20;
-const DEFAULT_RADIUS_METERS = 10_000;
+const DEFAULT_DISTANCE_METERS = 10_000;
 const DEFAULT_SEARCH_FIELD_MASK = [
 	'places.name',
 	'places.id',
@@ -17,6 +17,7 @@ const DEFAULT_SEARCH_FIELD_MASK = [
 	'places.location',
 	'places.rating',
 	'places.userRatingCount',
+	'places.currentOpeningHours.openNow',
 	'places.priceLevel',
 	'places.primaryType',
 	'places.types',
@@ -42,25 +43,26 @@ const DEFAULT_DETAIL_FIELDS = [
 	'nationalPhoneNumber',
 	'internationalPhoneNumber',
 	'regularOpeningHours',
+	'currentOpeningHours.openNow',
 ];
 
 interface SearchOptions {
 	limit?: number;
 	near?: string;
-	radius?: number;
+	distance?: number;
 	minRating?: number;
+	minRatingCount?: number;
 	rank?: string;
 	openNow?: boolean;
 	type?: string;
 	strictType?: boolean;
-	priceLevel?: string[] | string;
+	priceLevel?: number[] | number;
 	language?: string;
-	region?: string;
 }
 
 interface DetailsOptions {
 	near?: string;
-	radius?: number;
+	distance?: number;
 	rank?: string;
 	type?: string;
 	strictType?: boolean;
@@ -68,7 +70,6 @@ interface DetailsOptions {
 	photos?: boolean;
 	fields?: string[] | string;
 	language?: string;
-	region?: string;
 }
 
 interface Place {
@@ -88,6 +89,7 @@ interface Place {
 	nationalPhoneNumber?: string;
 	internationalPhoneNumber?: string;
 	regularOpeningHours?: unknown;
+	currentOpeningHours?: { openNow?: boolean };
 	photos?: unknown[];
 	reviews?: unknown[];
 }
@@ -141,7 +143,7 @@ async function run(): Promise<void> {
 				),
 			async argv => {
 				const places = await searchPlaces(joinPositionals(argv.query), argv);
-				renderPlaces(places, argv.format);
+				renderPlaces(places, argv.format, !argv.openNow);
 			},
 		)
 		.command(
@@ -175,9 +177,14 @@ function addSearchOptions<T>(argv: Argv<T>): Argv<T & SearchOptions> {
 			describe: `Maximum results, capped at ${MAX_LIMIT}.`,
 		})
 		.option('min-rating', {
-			alias: 'm',
+			alias: 'r',
 			type: 'number',
 			describe: 'Minimum Google rating from 0 to 5.',
+		})
+		.option('min-rating-count', {
+			alias: 'c',
+			type: 'number',
+			describe: 'Minimum number of ratings; filters the returned search results locally.',
 		})
 		.option('rank', {
 			alias: 'k',
@@ -204,9 +211,10 @@ function addSearchOptions<T>(argv: Argv<T>): Argv<T & SearchOptions> {
 		})
 		.option('price-level', {
 			alias: 'p',
-			type: 'string',
+			type: 'number',
+			choices: [0, 1, 2, 3, 4] as const,
 			array: true,
-			describe: 'Allowed price levels: 0/free, 1/inexpensive, 2/moderate, 3/expensive, 4/very-expensive.',
+			describe: 'Allowed price levels from 0 (free) to 4 (very expensive).',
 		});
 }
 
@@ -249,32 +257,27 @@ function addDetailsOptions<T>(argv: Argv<T>): Argv<T & DetailsOptions> {
 		});
 }
 
-function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'near' | 'radius'>> {
+function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'near' | 'distance'>> {
 	return argv
 		.option('near', {
 			alias: 'n',
 			type: 'string',
 			describe: 'Bias search or text-query resolution around this location (defaults to device location, then an IP-based estimate).',
 		})
-		.option('radius', {
-			alias: 'r',
+		.option('distance', {
+			alias: 'd',
 			type: 'number',
-			default: DEFAULT_RADIUS_METERS,
-			describe: 'Location bias radius in meters.',
+			default: DEFAULT_DISTANCE_METERS,
+			describe: 'Location bias distance in meters.',
 		});
 }
 
-function addLocaleOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'language' | 'region'>> {
+function addLocaleOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'language'>> {
 	return argv
 		.option('language', {
 			alias: 'L',
 			type: 'string',
 			describe: 'Preferred BCP-47 language code, for example en or pt-BR.',
-		})
-		.option('region', {
-			alias: 'R',
-			type: 'string',
-			describe: 'Two-character CLDR region code, for example PT or US.',
 		});
 }
 
@@ -289,12 +292,16 @@ async function searchPlaces(query: string, options: SearchOptions): Promise<Plac
 	if (!query) {
 		throw new Error('Missing search query.');
 	}
+	const minimumCount = options.minRatingCount ?? 0;
+	if (!Number.isSafeInteger(minimumCount) || minimumCount < 0) {
+		throw new Error('--min-rating-count must be a non-negative integer.');
+	}
 	const response = await placesFetch<SearchResponse>(
 		'places:searchText',
 		await buildTextSearchBody(query, options),
 		DEFAULT_SEARCH_FIELD_MASK,
 	);
-	return response.places ?? [];
+	return (response.places ?? []).filter(place => (place.userRatingCount ?? 0) >= minimumCount);
 }
 
 async function placeDetails(place: string, options: DetailsOptions): Promise<Place> {
@@ -305,9 +312,6 @@ async function placeDetails(place: string, options: DetailsOptions): Promise<Pla
 	const params = new URLSearchParams();
 	if (options.language) {
 		params.set('languageCode', options.language);
-	}
-	if (options.region) {
-		params.set('regionCode', options.region);
 	}
 	return placesFetch<Place>(resourceName, undefined, getDetailFieldMask(options), params);
 }
@@ -320,9 +324,6 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 
 	if (options.language) {
 		body.languageCode = options.language;
-	}
-	if (options.region) {
-		body.regionCode = options.region;
 	}
 	if (options.openNow) {
 		body.openNow = true;
@@ -353,7 +354,7 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 		body.locationBias = {
 			circle: {
 				center,
-				radius: getRadius(options),
+				radius: getDistance(options),
 			},
 		};
 	}
@@ -406,12 +407,11 @@ async function resolvePlaceResourceName(input: string, options: DetailsOptions):
 	const body = await buildTextSearchBody(input, {
 		limit: 1,
 		near: options.near,
-		radius: options.radius,
+		distance: options.distance,
 		rank: options.rank,
 		type: options.type,
 		strictType: options.strictType,
 		language: options.language,
-		region: options.region,
 	});
 	const response = await placesFetch<SearchResponse>('places:searchText', body, 'places.name');
 	const name = response.places?.[0]?.name;
@@ -458,9 +458,13 @@ async function readGoogleMapsApiKey(): Promise<string> {
 	return env.GOOGLE_MAPS_API_KEY;
 }
 
-function renderPlaces(value: Place | Place[], format: string): void {
+function renderPlaces(value: Place | Place[], format: string, showOpen = true): void {
+	const openStatus = (place: Place) => place.currentOpeningHours?.openNow === undefined
+		? 'unknown' : place.currentOpeningHours.openNow ? 'yes' : 'no';
 	if (format === 'json') {
-		console.log(JSON.stringify(value, null, 2));
+		console.log(JSON.stringify(showOpen
+			? Array.isArray(value) ? value.map(place => ({ ...place, open: openStatus(place) })) : { ...value, open: openStatus(value) }
+			: value, null, 2));
 		return;
 	}
 
@@ -469,6 +473,7 @@ function renderPlaces(value: Place | Place[], format: string): void {
 		name: place.displayName?.text ?? '',
 		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)} (${place.userRatingCount ?? 0})`,
 		type: place.primaryType ?? place.types?.[0] ?? '',
+		...(showOpen ? { open: openStatus(place) } : {}),
 		url: place.googleMapsUri ?? '',
 	}));
 
@@ -477,7 +482,7 @@ function renderPlaces(value: Place | Place[], format: string): void {
 		return;
 	}
 
-	const columns = ['id', 'name', 'rating', 'type', 'url'];
+	const columns = ['id', 'name', 'rating', 'type', ...(showOpen ? ['open'] : []), 'url'];
 	const escapeCell = (cell: string) => cell.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
 		.replaceAll('>', '&gt;').replaceAll('\\', '\\\\').replaceAll('|', '\\|').replaceAll(/\r\n|\r|\n/g, '<br>');
 	const line = (cells: string[]) => `| ${cells.map(escapeCell).join(' | ')} |`;
@@ -504,33 +509,13 @@ function getDetailFieldMask(options: DetailsOptions): string {
 	return [...fields].join(',');
 }
 
-function getPriceLevels(value: string[] | string | undefined): string[] {
-	const levels = new Map([
-		['0', 'PRICE_LEVEL_FREE'],
-		['free', 'PRICE_LEVEL_FREE'],
-		['1', 'PRICE_LEVEL_INEXPENSIVE'],
-		['inexpensive', 'PRICE_LEVEL_INEXPENSIVE'],
-		['2', 'PRICE_LEVEL_MODERATE'],
-		['moderate', 'PRICE_LEVEL_MODERATE'],
-		['3', 'PRICE_LEVEL_EXPENSIVE'],
-		['expensive', 'PRICE_LEVEL_EXPENSIVE'],
-		['4', 'PRICE_LEVEL_VERY_EXPENSIVE'],
-		['very-expensive', 'PRICE_LEVEL_VERY_EXPENSIVE'],
-		['very_expensive', 'PRICE_LEVEL_VERY_EXPENSIVE'],
-		['very expensive', 'PRICE_LEVEL_VERY_EXPENSIVE'],
-	]);
-
-	return getList(value).map(rawLevel => {
-		const normalized = rawLevel.trim().toLowerCase();
-		const mapped = levels.get(normalized);
-		if (mapped) {
-			return mapped;
+function getPriceLevels(value: number[] | number | undefined): string[] {
+	const levels = ['PRICE_LEVEL_FREE', 'PRICE_LEVEL_INEXPENSIVE', 'PRICE_LEVEL_MODERATE', 'PRICE_LEVEL_EXPENSIVE', 'PRICE_LEVEL_VERY_EXPENSIVE'];
+	return (Array.isArray(value) ? value : value === undefined ? [] : [value]).map(level => {
+		if (!Number.isInteger(level) || level < 0 || level > 4) {
+			throw new Error('--price-level must be an integer from 0 to 4.');
 		}
-		const enumValue = rawLevel.trim().toUpperCase();
-		if (enumValue.startsWith('PRICE_LEVEL_')) {
-			return enumValue;
-		}
-		throw new Error(`Unsupported price level: ${rawLevel}`);
+		return levels[level];
 	});
 }
 
@@ -544,8 +529,8 @@ function getLimit(options: { limit?: number }): number {
 	return Math.max(1, Math.min(MAX_LIMIT, Math.trunc(requested)));
 }
 
-function getRadius(options: { radius?: number }): number {
-	const requested = options.radius ?? DEFAULT_RADIUS_METERS;
+function getDistance(options: { distance?: number }): number {
+	const requested = options.distance ?? DEFAULT_DISTANCE_METERS;
 	return Math.max(1, Math.trunc(requested));
 }
 
