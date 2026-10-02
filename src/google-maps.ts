@@ -467,9 +467,8 @@ function renderPlaces(value: Place | Place[], format: string): void {
 	const rows = (Array.isArray(value) ? value : [value]).map(place => ({
 		id: place.id ?? place.name?.replace(/^places\//, '') ?? '',
 		name: place.displayName?.text ?? '',
-		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)}(${place.userRatingCount ?? 0})`,
+		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)} (${place.userRatingCount ?? 0})`,
 		type: place.primaryType ?? place.types?.[0] ?? '',
-		address: place.formattedAddress ?? '',
 		url: place.googleMapsUri ?? '',
 	}));
 
@@ -478,7 +477,7 @@ function renderPlaces(value: Place | Place[], format: string): void {
 		return;
 	}
 
-	const columns = ['id', 'name', 'rating', 'type', 'address', 'url'];
+	const columns = ['id', 'name', 'rating', 'type', 'url'];
 	const escapeCell = (cell: string) => cell.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
 		.replaceAll('>', '&gt;').replaceAll('\\', '\\\\').replaceAll('|', '\\|').replaceAll(/\r\n|\r|\n/g, '<br>');
 	const line = (cells: string[]) => `| ${cells.map(escapeCell).join(' | ')} |`;
