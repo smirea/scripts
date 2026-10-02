@@ -33,5 +33,6 @@ CoreLocationCLI, then falls back to an approximate public-IP location.
 Install the device location helper with `brew install --cask corelocationcli`
 and run `CoreLocationCLI` once to approve macOS location access. Keep Wi-Fi
 enabled for device location. If macOS blocks the helper, allow it in System
-Settings → Privacy & Security. Device lookup times out after 10 seconds;
+Settings → Privacy & Security. On permission failures, the script prints instructions and opens the Location
+Services settings pane. Device lookup times out after 12 seconds;
 if both location sources fail, searches continue without an explicit bias.

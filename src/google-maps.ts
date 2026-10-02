@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import type { Argv } from 'yargs';
+import { getCoreLocation, parseCoordinates } from './utils/coreLocation';
 
 import env from './env';
 
@@ -361,29 +362,12 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 }
 
 async function detectLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
-	return await detectDeviceLocation() ?? await detectIpLocation();
-}
-
-async function detectDeviceLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
-	const executable = process.platform === 'darwin' ? Bun.which('CoreLocationCLI') : null;
-	if (!executable) {
-		return undefined;
+	const location = await getCoreLocation();
+	if (location) {
+		return location;
 	}
-	try {
-		const child = Bun.spawn([executable, '--format', '{"latitude":%latitude,"longitude":%longitude}'], {
-			stdout: 'pipe',
-			stderr: 'ignore',
-			timeout: 10_000,
-			killSignal: 'SIGKILL',
-		});
-		const output = await new Response(child.stdout).text();
-		if (await child.exited !== 0) {
-			return undefined;
-		}
-		return parseCoordinates(JSON.parse(output));
-	} catch {
-		return undefined;
-	}
+	console.error('[google-maps] Device location unavailable; falling back to an approximate IP-based location.');
+	return detectIpLocation();
 }
 
 async function detectIpLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
@@ -396,19 +380,6 @@ async function detectIpLocation(): Promise<{ latitude: number; longitude: number
 	} catch {
 		return undefined;
 	}
-}
-
-function parseCoordinates(value: unknown): { latitude: number; longitude: number } | undefined {
-	if (!value || typeof value !== 'object') {
-		return undefined;
-	}
-	const { latitude, longitude } = value as { latitude?: unknown; longitude?: unknown };
-	if (typeof latitude !== 'number' || typeof longitude !== 'number'
-		|| !Number.isFinite(latitude) || !Number.isFinite(longitude)
-		|| Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
-		return undefined;
-	}
-	return { latitude, longitude };
 }
 
 async function resolveLocation(input: string): Promise<{ latitude: number; longitude: number }> {
