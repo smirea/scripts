@@ -240,7 +240,7 @@ function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'nea
 	return argv
 		.option('near', {
 			type: 'string',
-			describe: 'Bias search, or text-query resolution, around this location.',
+			describe: 'Bias search or text-query resolution around this location (defaults to an IP-based estimate).',
 		})
 		.option('radius', {
 			type: 'number',
@@ -331,16 +331,36 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 		body.priceLevels = priceLevels;
 	}
 
-	if (options.near) {
+	const center = options.near ? await resolveLocation(options.near) : await detectLocation();
+	if (center) {
 		body.locationBias = {
 			circle: {
-				center: await resolveLocation(options.near),
+				center,
 				radius: getRadius(options),
 			},
 		};
 	}
 
 	return body;
+}
+
+async function detectLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
+	try {
+		const response = await fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(2_000) });
+		if (!response.ok) {
+			return undefined;
+		}
+		const location = await response.json() as { latitude?: unknown; longitude?: unknown };
+		const { latitude, longitude } = location;
+		if (typeof latitude !== 'number' || typeof longitude !== 'number'
+			|| !Number.isFinite(latitude) || !Number.isFinite(longitude)
+			|| Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+			return undefined;
+		}
+		return { latitude, longitude };
+	} catch {
+		return undefined;
+	}
 }
 
 async function resolveLocation(input: string): Promise<{ latitude: number; longitude: number }> {
