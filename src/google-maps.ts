@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import type { Argv } from 'yargs';
+import { renderTableRecords } from './utils/output';
 
 import env from './env';
 
@@ -115,6 +116,13 @@ if (import.meta.main) {
 async function run(): Promise<void> {
 	await createScript('google-maps')
 		.usage('$0 <command> [options]')
+		.option('format', {
+			alias: 'f',
+			type: 'string',
+			choices: ['json', 'table', 'md'] as const,
+			default: 'table',
+			describe: 'Output format.',
+		})
 		.parserConfiguration({
 			'strip-aliased': true,
 			'strip-dashed': true,
@@ -133,7 +141,7 @@ async function run(): Promise<void> {
 				),
 			async argv => {
 				const places = await searchPlaces(joinPositionals(argv.query), argv);
-				renderJson(places);
+				renderPlaces(places, argv.format);
 			},
 		)
 		.command(
@@ -150,7 +158,7 @@ async function run(): Promise<void> {
 				),
 			async argv => {
 				const details = await placeDetails(joinPositionals(argv.place), argv);
-				renderJson(details);
+				renderPlaces(details, argv.format);
 			},
 		)
 		.demandCommand(1, 'Choose a command.')
@@ -411,8 +419,36 @@ async function readGoogleMapsApiKey(): Promise<string> {
 	return env.GOOGLE_MAPS_API_KEY;
 }
 
-function renderJson(value: unknown): void {
-	console.log(JSON.stringify(value, null, 2));
+function renderPlaces(value: Place | Place[], format: string): void {
+	if (format === 'json') {
+		console.log(JSON.stringify(value, null, 2));
+		return;
+	}
+
+	const rows = (Array.isArray(value) ? value : [value]).map(place => ({
+		id: place.id ?? place.name?.replace(/^places\//, '') ?? '',
+		name: place.displayName?.text ?? '',
+		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)}(${place.userRatingCount ?? 0})`,
+		type: place.primaryType ?? place.types?.[0] ?? '',
+		phone: place.nationalPhoneNumber ?? place.internationalPhoneNumber ?? '',
+		address: place.formattedAddress ?? '',
+		url: place.googleMapsUri ?? '',
+	}));
+
+	if (format === 'table') {
+		renderTableRecords(rows);
+		return;
+	}
+
+	const columns = ['id', 'name', 'rating', 'type', 'phone', 'address', 'url'];
+	const escapeCell = (cell: string) => cell.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+		.replaceAll('>', '&gt;').replaceAll('\\', '\\\\').replaceAll('|', '\\|').replaceAll(/\r\n|\r|\n/g, '<br>');
+	const line = (cells: string[]) => `| ${cells.map(escapeCell).join(' | ')} |`;
+	console.log([
+		line(columns),
+		line(columns.map(() => '---')),
+		...rows.map(row => line(Object.values(row))),
+	].join('\n'));
 }
 
 function getDetailFieldMask(options: DetailsOptions): string {
