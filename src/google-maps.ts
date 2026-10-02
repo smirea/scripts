@@ -168,34 +168,41 @@ async function run(): Promise<void> {
 function addSearchOptions<T>(argv: Argv<T>): Argv<T & SearchOptions> {
 	return addLocationOptions(addLocaleOptions(argv))
 		.option('limit', {
+			alias: 'l',
 			type: 'number',
 			default: DEFAULT_LIMIT,
 			describe: `Maximum results, capped at ${MAX_LIMIT}.`,
 		})
 		.option('min-rating', {
+			alias: 'm',
 			type: 'number',
 			describe: 'Minimum Google rating from 0 to 5.',
 		})
 		.option('rank', {
+			alias: 'k',
 			type: 'string',
 			choices: ['relevance', 'distance', 'RELEVANCE', 'DISTANCE'] as const,
 			describe: 'Text search ranking preference.',
 		})
 		.option('open-now', {
+			alias: 'o',
 			type: 'boolean',
 			default: false,
 			describe: 'Only include places Google reports as open now.',
 		})
 		.option('type', {
+			alias: 't',
 			type: 'string',
 			describe: 'Google place type, for example lodging, restaurant, or school.',
 		})
 		.option('strict-type', {
+			alias: 's',
 			type: 'boolean',
 			default: false,
 			describe: 'Only return results whose type matches --type.',
 		})
 		.option('price-level', {
+			alias: 'p',
 			type: 'string',
 			array: true,
 			describe: 'Allowed price levels: 0/free, 1/inexpensive, 2/moderate, 3/expensive, 4/very-expensive.',
@@ -205,30 +212,36 @@ function addSearchOptions<T>(argv: Argv<T>): Argv<T & SearchOptions> {
 function addDetailsOptions<T>(argv: Argv<T>): Argv<T & DetailsOptions> {
 	return addLocationOptions(addLocaleOptions(argv))
 		.option('rank', {
+			alias: 'k',
 			type: 'string',
 			choices: ['relevance', 'distance', 'RELEVANCE', 'DISTANCE'] as const,
 			describe: 'Ranking preference when resolving a text query to one place.',
 		})
 		.option('type', {
+			alias: 't',
 			type: 'string',
 			describe: 'Google place type used when resolving a text query.',
 		})
 		.option('strict-type', {
+			alias: 's',
 			type: 'boolean',
 			default: false,
 			describe: 'Only consider matching place types when resolving a text query.',
 		})
 		.option('reviews', {
+			alias: 'v',
 			type: 'boolean',
 			default: false,
 			describe: 'Include Google review summaries when available.',
 		})
 		.option('photos', {
+			alias: 'p',
 			type: 'boolean',
 			default: false,
 			describe: 'Include Google photo references when available.',
 		})
 		.option('fields', {
+			alias: 'F',
 			type: 'string',
 			array: true,
 			describe: 'Exact comma-separated field mask to use instead of the default details fields.',
@@ -238,10 +251,12 @@ function addDetailsOptions<T>(argv: Argv<T>): Argv<T & DetailsOptions> {
 function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'near' | 'radius'>> {
 	return argv
 		.option('near', {
+			alias: 'n',
 			type: 'string',
 			describe: 'Bias search or text-query resolution around this location (defaults to an IP-based estimate).',
 		})
 		.option('radius', {
+			alias: 'r',
 			type: 'number',
 			default: DEFAULT_RADIUS_METERS,
 			describe: 'Location bias radius in meters.',
@@ -251,10 +266,12 @@ function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'nea
 function addLocaleOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'language' | 'region'>> {
 	return argv
 		.option('language', {
+			alias: 'L',
 			type: 'string',
 			describe: 'Preferred BCP-47 language code, for example en or pt-BR.',
 		})
 		.option('region', {
+			alias: 'R',
 			type: 'string',
 			describe: 'Two-character CLDR region code, for example PT or US.',
 		});
