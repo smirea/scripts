@@ -25,3 +25,13 @@ Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local`
 - `voice-memo-parse` (`src/voice-memo-parse.ts`): opens Voice Memos, waits for sync, exports new recordings from a folder (default `Captain's Log`) into `~/Documents/voice-memos/captains-log` as audio + markdown pairs using `YYYY-MM-DD_HH-MM` naming, uses embedded transcripts with Gemini fallback when needed, and regenerates `_overview.md` with Gemini-powered highlights for each memo (`# [date] [location] ([audio]/[md])`). Highlights default to Gemini 3 Flash and automatically fall back to `gemini-2.5-flash` if unavailable. Supports `--setup-permissions` to check permission status, open relevant System Settings pages, and print exact manual steps for anything macOS cannot auto-prompt.
 - `whoop-pull` (`src/whoop.ts`): fetch WHOOP data as JSON (defaults to the last 2 days; configurable via CLI). If `WHOOP_REFRESH_TOKEN` is missing, it opens the WHOOP auth URL in your default browser, supports manual `--auth-code` exchange, and can persist `--token` / rotated refresh tokens into `.env.local`.
 - `setup` (`src/setup.ts`): creates/refreshes wrappers for the scripts in `~/bin`.
+
+### Google Maps location
+
+`google-maps` uses `--near` when provided. Otherwise, on macOS it tries
+CoreLocationCLI, then falls back to an approximate public-IP location.
+Install the device location helper with `brew install --cask corelocationcli`
+and run `CoreLocationCLI` once to approve macOS location access. Keep Wi-Fi
+enabled for device location. If macOS blocks the helper, allow it in System
+Settings → Privacy & Security. Device lookup times out after 10 seconds;
+if both location sources fail, searches continue without an explicit bias.

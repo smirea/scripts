@@ -253,7 +253,7 @@ function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'nea
 		.option('near', {
 			alias: 'n',
 			type: 'string',
-			describe: 'Bias search or text-query resolution around this location (defaults to an IP-based estimate).',
+			describe: 'Bias search or text-query resolution around this location (defaults to device location, then an IP-based estimate).',
 		})
 		.option('radius', {
 			alias: 'r',
@@ -361,22 +361,54 @@ async function buildTextSearchBody(query: string, options: SearchOptions): Promi
 }
 
 async function detectLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
+	return await detectDeviceLocation() ?? await detectIpLocation();
+}
+
+async function detectDeviceLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
+	const executable = process.platform === 'darwin' ? Bun.which('CoreLocationCLI') : null;
+	if (!executable) {
+		return undefined;
+	}
+	try {
+		const child = Bun.spawn([executable, '--format', '{"latitude":%latitude,"longitude":%longitude}'], {
+			stdout: 'pipe',
+			stderr: 'ignore',
+			timeout: 10_000,
+			killSignal: 'SIGKILL',
+		});
+		const output = await new Response(child.stdout).text();
+		if (await child.exited !== 0) {
+			return undefined;
+		}
+		return parseCoordinates(JSON.parse(output));
+	} catch {
+		return undefined;
+	}
+}
+
+async function detectIpLocation(): Promise<{ latitude: number; longitude: number } | undefined> {
 	try {
 		const response = await fetch('https://ipapi.co/json/', { signal: AbortSignal.timeout(2_000) });
 		if (!response.ok) {
 			return undefined;
 		}
-		const location = await response.json() as { latitude?: unknown; longitude?: unknown };
-		const { latitude, longitude } = location;
-		if (typeof latitude !== 'number' || typeof longitude !== 'number'
-			|| !Number.isFinite(latitude) || !Number.isFinite(longitude)
-			|| Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
-			return undefined;
-		}
-		return { latitude, longitude };
+		return parseCoordinates(await response.json());
 	} catch {
 		return undefined;
 	}
+}
+
+function parseCoordinates(value: unknown): { latitude: number; longitude: number } | undefined {
+	if (!value || typeof value !== 'object') {
+		return undefined;
+	}
+	const { latitude, longitude } = value as { latitude?: unknown; longitude?: unknown };
+	if (typeof latitude !== 'number' || typeof longitude !== 'number'
+		|| !Number.isFinite(latitude) || !Number.isFinite(longitude)
+		|| Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+		return undefined;
+	}
+	return { latitude, longitude };
 }
 
 async function resolveLocation(input: string): Promise<{ latitude: number; longitude: number }> {
