@@ -92,13 +92,12 @@ async function run(): Promise<void> {
       },
     )
     .command(
-      'read <id>',
-      'Read a saved email.',
+      'read [id]',
+      'Read a saved email, or the latest email when no id is given.',
       command => command
         .positional('id', {
           type: 'string',
-          demandOption: true,
-          describe: 'Email id from the list command.',
+          describe: 'Email id from the list command (defaults to the latest email).',
         })
         .option('html', {
           type: 'boolean',
@@ -111,9 +110,15 @@ async function run(): Promise<void> {
           describe: 'Print metadata, attachments, and both bodies as JSON.',
         }),
       async argv => {
+        let id = argv.id;
+        if (id === undefined) {
+          const result = await requestJson<EmailListResponse>(argv.inbox, '/emails?limit=1');
+          id = result.emails[0]?.id;
+          if (id === undefined) throw new Error(`No emails in the ${argv.inbox} inbox.`);
+        }
         const result = await requestJson<EmailResponse>(
           argv.inbox,
-          `/emails/${encodeURIComponent(argv.id)}?include=text,html`,
+          `/emails/${encodeURIComponent(id)}?include=text,html`,
         );
 
         if (argv.json) {
