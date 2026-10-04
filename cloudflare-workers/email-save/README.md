@@ -83,11 +83,14 @@ All endpoints accept `?inbox=email-save` (the default) or `?inbox=spam`. This al
 The CLI uses the same Worker URL and token for both inboxes:
 
 ```sh
+email-inbox
 email-inbox list -i spam
 EMAIL_INBOX=spam email-inbox read <id>
 EMAIL_INBOX=spam email-inbox list --inbox email-save
 email-inbox raw <id> -i spam -o message.eml
 ```
+
+With no command, the CLI prints totals and the latest email date/time for both inboxes, followed by help. `GET /stats?inbox=spam` returns `total_emails` and `last_email_at` (`null` for an empty inbox); totals include all saved emails, independent of the list limit.
 
 List recent emails:
 

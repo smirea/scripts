@@ -8,6 +8,11 @@ import env from './env';
 
 type Inbox = 'email-save' | 'spam';
 
+interface InboxStats {
+  total_emails: number;
+  last_email_at: string | null;
+}
+
 interface EmailRow {
   id: string;
   received_at: string;
@@ -39,8 +44,9 @@ if (import.meta.main) {
 }
 
 async function run(): Promise<void> {
-  await createScript('email-inbox')
-    .usage('$0 <command> [options]')
+  const cli = createScript('email-inbox');
+  await cli
+    .usage('$0 [command] [options]')
     .option('inbox', {
       alias: 'i',
       type: 'string',
@@ -144,7 +150,27 @@ async function run(): Promise<void> {
         process.stdout.write(raw);
       },
     )
-    .demandCommand(1, 'Choose a command.')
+    .command(
+      '$0',
+      false,
+      command => command,
+      async () => {
+        const inboxes: Inbox[] = ['email-save', 'spam'];
+        const rows = await Promise.all(inboxes.map(async inbox => {
+          const stats = await requestJson<InboxStats>(inbox, '/stats');
+          const lastEmail = stats.last_email_at ? new Date(stats.last_email_at) : null;
+          return {
+            Inbox: `${inbox}@stf.lol`,
+            'Total emails': stats.total_emails,
+            'Last email date': lastEmail?.toLocaleDateString() ?? '-',
+            'Last email time': lastEmail?.toLocaleTimeString() ?? '-',
+          };
+        }));
+        console.table(rows);
+        process.stdout.write('\n');
+        cli.showHelp(help => process.stdout.write(`${help}\n`));
+      },
+    )
     .recommendCommands()
     .parseAsync();
 }

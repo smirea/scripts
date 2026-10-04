@@ -127,6 +127,14 @@ export default {
     }
     const storage = inboxStorage(env, inbox);
 
+    if (request.method === 'GET' && url.pathname === '/stats') {
+      const stats = await storage.DB.prepare(`
+        SELECT COUNT(*) AS total_emails, MAX(received_at) AS last_email_at
+        FROM emails
+      `).first<{ total_emails: number; last_email_at: string | null }>();
+      return json(stats);
+    }
+
     if (request.method === 'GET' && url.pathname === '/emails') {
       const limit = clampLimit(url.searchParams.get('limit'));
       const threadKey = url.searchParams.get('threadKey');
