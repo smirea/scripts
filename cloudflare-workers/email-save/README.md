@@ -1,6 +1,6 @@
 # email-save Cloudflare Worker
 
-Stores mail sent to `email-save@stf.lol` and `spam@stf.lol` in separate R2 buckets and D1 databases, using the same parsing and thread tracking.
+Stores mail sent to `email-save@stf.lol` and `spam@stf.lol` in one R2 bucket and one D1 database. An indexed `inbox` field selects each address's mail independently of original or forwarded recipients. Deduplication keys and R2 object IDs are scoped by inbox; existing `email-save` IDs are preserved.
 
 `email-save@stf.lol` accepts approved senders only:
 
@@ -34,9 +34,6 @@ Then run:
 ```sh
 cd cloudflare-workers/email-save
 wrangler r2 bucket create email-save-archive
-wrangler r2 bucket create spam-archive
-wrangler d1 create spam
-# Set SPAM_DB's database_id in wrangler.jsonc to the returned ID.
 bun run migrate:remote
 wrangler secret put READ_TOKEN
 wrangler deploy

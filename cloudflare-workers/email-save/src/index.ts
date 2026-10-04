@@ -4,13 +4,10 @@ interface Env {
   ALLOWED_SENDERS: string;
   DB: D1Database;
   EMAIL_BUCKET: R2Bucket;
-  SPAM_DB: D1Database;
-  SPAM_BUCKET: R2Bucket;
   READ_TOKEN?: string;
 }
 
 type Inbox = 'email-save' | 'spam';
-type Storage = Pick<Env, 'DB' | 'EMAIL_BUCKET'>;
 
 interface ForwardedHeaders {
   from?: string;
@@ -56,6 +53,7 @@ interface StoredEmailInput {
 
 interface EmailRow {
   id: string;
+  inbox: Inbox;
   dedupe_key: string;
   received_at: string;
   from_addr: string;
@@ -111,7 +109,7 @@ export default {
     });
 
     for (const email of emails) {
-      await storeEmail(inboxStorage(env, inbox), email);
+      await storeEmail(env, inbox, email);
     }
   },
 
@@ -125,13 +123,13 @@ export default {
     if (inbox !== 'email-save' && inbox !== 'spam') {
       return json({ error: 'invalid_inbox', choices: ['email-save', 'spam'] }, 400);
     }
-    const storage = inboxStorage(env, inbox);
 
     if (request.method === 'GET' && url.pathname === '/stats') {
-      const stats = await storage.DB.prepare(`
+      const stats = await env.DB.prepare(`
         SELECT COUNT(*) AS total_emails, MAX(received_at) AS last_email_at
         FROM emails
-      `).first<{ total_emails: number; last_email_at: string | null }>();
+        WHERE inbox = ?
+      `).bind(inbox).first<{ total_emails: number; last_email_at: string | null }>();
       return json(stats);
     }
 
@@ -139,27 +137,28 @@ export default {
       const limit = clampLimit(url.searchParams.get('limit'));
       const threadKey = url.searchParams.get('threadKey');
       const rows = threadKey
-        ? await storage.DB.prepare(`
+        ? await env.DB.prepare(`
             SELECT * FROM emails
-            WHERE thread_key = ?
+            WHERE inbox = ? AND thread_key = ?
             ORDER BY received_at DESC
             LIMIT ?
-          `).bind(threadKey, limit).all<EmailRow>()
-        : await storage.DB.prepare(`
+          `).bind(inbox, threadKey, limit).all<EmailRow>()
+        : await env.DB.prepare(`
             SELECT * FROM emails
+            WHERE inbox = ?
             ORDER BY received_at DESC
             LIMIT ?
-          `).bind(limit).all<EmailRow>();
+          `).bind(inbox, limit).all<EmailRow>();
 
       return json({ emails: rows.results });
     }
 
     const emailMatch = url.pathname.match(/^\/emails\/([^/]+)$/);
     if (request.method === 'GET' && emailMatch) {
-      const email = await loadEmail(storage.DB, emailMatch[1]);
+      const email = await loadEmail(env.DB, inbox, emailMatch[1]);
       if (!email) return json({ error: 'not_found' }, 404);
 
-      const attachments = await storage.DB.prepare(`
+      const attachments = await env.DB.prepare(`
         SELECT id, attachment_index, filename, mime_type, content_id, size, r2_key
         FROM attachments
         WHERE email_id = ?
@@ -172,18 +171,18 @@ export default {
       return json({
         email,
         attachments: attachments.results,
-        text: body.includes('text') && email.text_key ? await getText(storage.EMAIL_BUCKET, email.text_key) : undefined,
-        html: body.includes('html') && email.html_key ? await getText(storage.EMAIL_BUCKET, email.html_key) : undefined,
+        text: body.includes('text') && email.text_key ? await getText(env.EMAIL_BUCKET, email.text_key) : undefined,
+        html: body.includes('html') && email.html_key ? await getText(env.EMAIL_BUCKET, email.html_key) : undefined,
       });
     }
 
     const objectMatch = url.pathname.match(/^\/emails\/([^/]+)\/(raw|headers)$/);
     if (request.method === 'GET' && objectMatch) {
-      const email = await loadEmail(storage.DB, objectMatch[1]);
+      const email = await loadEmail(env.DB, inbox, objectMatch[1]);
       if (!email) return json({ error: 'not_found' }, 404);
 
       const key = objectMatch[2] === 'raw' ? email.raw_key : email.headers_key;
-      const object = await storage.EMAIL_BUCKET.get(key);
+      const object = await env.EMAIL_BUCKET.get(key);
       if (!object) return json({ error: 'object_not_found' }, 404);
 
       return new Response(object.body, {
@@ -196,12 +195,6 @@ export default {
     return json({ error: 'not_found' }, 404);
   },
 } satisfies ExportedHandler<Env>;
-
-function inboxStorage(env: Env, inbox: Inbox): Storage {
-  return inbox === 'spam'
-    ? { DB: env.SPAM_DB, EMAIL_BUCKET: env.SPAM_BUCKET }
-    : { DB: env.DB, EMAIL_BUCKET: env.EMAIL_BUCKET };
-}
 
 async function buildEmailsToStore(input: {
   raw: ArrayBuffer;
@@ -349,7 +342,11 @@ async function buildGmailForwardedEmails(
   return emails;
 }
 
-async function storeEmail(env: Storage, email: StoredEmailInput): Promise<void> {
+async function storeEmail(env: Env, inbox: Inbox, email: StoredEmailInput): Promise<void> {
+  if (inbox !== 'email-save') {
+    const dedupeKey = `${inbox}:${email.dedupeKey}`;
+    email = { ...email, dedupeKey, id: await idFromDedupeKey(dedupeKey) };
+  }
   const baseKey = `emails/${email.id}`;
   const rawKey = `${baseKey}/raw.eml`;
   const headersKey = `${baseKey}/headers.json`;
@@ -386,9 +383,9 @@ async function storeEmail(env: Storage, email: StoredEmailInput): Promise<void> 
         id, dedupe_key, received_at, from_addr, to_addr, subject, normalized_subject,
         message_id, in_reply_to, references_header, thread_key, thread_basis,
         forwarded_from, forwarded_to, forwarded_date, forwarded_subject,
-        raw_key, headers_key, text_key, html_key, attachment_count, raw_size
+        raw_key, headers_key, text_key, html_key, attachment_count, raw_size, inbox
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(dedupe_key) DO UPDATE SET
         received_at = excluded.received_at,
         from_addr = excluded.from_addr,
@@ -433,6 +430,7 @@ async function storeEmail(env: Storage, email: StoredEmailInput): Promise<void> 
       htmlKey,
       attachmentRows.length,
       rawSize,
+      inbox,
     ),
     ...attachmentRows.map((attachment) =>
       env.DB.prepare(`
@@ -795,8 +793,8 @@ function safeFilename(filename: string): string {
   return filename.replace(/[^a-z0-9._-]+/gi, '_').replace(/^_+|_+$/g, '') || 'attachment';
 }
 
-async function loadEmail(db: D1Database, id: string): Promise<EmailRow | null> {
-  return db.prepare('SELECT * FROM emails WHERE id = ?').bind(id).first<EmailRow>();
+async function loadEmail(db: D1Database, inbox: Inbox, id: string): Promise<EmailRow | null> {
+  return db.prepare('SELECT * FROM emails WHERE inbox = ? AND id = ?').bind(inbox, id).first<EmailRow>();
 }
 
 async function getText(bucket: R2Bucket, key: string): Promise<string | null> {

@@ -11,10 +11,6 @@
     {
       "binding": "EMAIL_BUCKET",
       "bucket_name": "email-save-archive"
-    },
-    {
-      "binding": "SPAM_BUCKET",
-      "bucket_name": "spam-archive"
     }
   ],
   "d1_databases": [
@@ -22,12 +18,6 @@
       "binding": "DB",
       "database_name": "email-save",
       "database_id": "6df53736-5be0-4ed1-a50c-55e981e21717",
-      "migrations_dir": "migrations"
-    },
-    {
-      "binding": "SPAM_DB",
-      "database_name": "spam",
-      "database_id": "99eca4a4-6d6b-480c-be9d-39fb1ba0904b",
       "migrations_dir": "migrations"
     }
   ]
