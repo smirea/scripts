@@ -1,11 +1,13 @@
 # email-save Cloudflare Worker
 
-Stores mail sent to `email-save@stf.lol`.
+Stores mail sent to `email-save@stf.lol` and `spam@stf.lol` in separate R2 buckets and D1 databases, using the same parsing and thread tracking.
 
-Approved senders only:
+`email-save@stf.lol` accepts approved senders only:
 
 - `steven.mirea@gmail.com`
 - `me@stefanmirea.com`
+
+`spam@stf.lol` accepts mail from any sender. Both inboxes require the same read token for API access.
 
 The Worker stores the raw `.eml`, headers, parsed text/html bodies, and attachments in R2. D1 stores query metadata and thread hints.
 
@@ -32,6 +34,10 @@ Then run:
 ```sh
 cd cloudflare-workers/email-save
 wrangler r2 bucket create email-save-archive
+wrangler r2 bucket create spam-archive
+wrangler d1 create spam
+# Set SPAM_DB's database_id in wrangler.jsonc to the returned ID.
+bun run migrate:remote
 wrangler secret put READ_TOKEN
 wrangler deploy
 wrangler email routing enable stf.lol
@@ -40,6 +46,13 @@ wrangler email routing rules create stf.lol \
   --match-type literal \
   --match-field to \
   --match-value email-save@stf.lol \
+  --action-type worker \
+  --action-value email-save
+wrangler email routing rules create stf.lol \
+  --name spam \
+  --match-type literal \
+  --match-field to \
+  --match-value spam@stf.lol \
   --action-type worker \
   --action-value email-save
 ```
@@ -63,6 +76,17 @@ All endpoints require:
 
 ```text
 Authorization: Bearer <READ_TOKEN>
+```
+
+All endpoints accept `?inbox=email-save` (the default) or `?inbox=spam`. This also applies to reading metadata, bodies, raw emails, and headers; IDs are looked up only in the selected inbox.
+
+The CLI uses the same Worker URL and token for both inboxes:
+
+```sh
+email-inbox list -i spam
+EMAIL_INBOX=spam email-inbox read <id>
+EMAIL_INBOX=spam email-inbox list --inbox email-save
+email-inbox raw <id> -i spam -o message.eml
 ```
 
 List recent emails:

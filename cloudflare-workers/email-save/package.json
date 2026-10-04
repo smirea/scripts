@@ -6,8 +6,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "types": "wrangler types",
-    "migrate:local": "wrangler d1 migrations apply email-save --local",
-    "migrate:remote": "wrangler d1 migrations apply email-save --remote"
+    "migrate:local": "wrangler d1 migrations apply email-save --local && wrangler d1 migrations apply spam --local",
+    "migrate:remote": "wrangler d1 migrations apply email-save --remote && wrangler d1 migrations apply spam --remote"
   },
   "dependencies": {
     "postal-mime": "^2.7.5"

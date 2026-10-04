@@ -6,6 +6,8 @@ import path from 'node:path';
 
 import env from './env';
 
+type Inbox = 'email-save' | 'spam';
+
 interface EmailRow {
   id: string;
   received_at: string;
@@ -39,6 +41,13 @@ if (import.meta.main) {
 async function run(): Promise<void> {
   await createScript('email-inbox')
     .usage('$0 <command> [options]')
+    .option('inbox', {
+      alias: 'i',
+      type: 'string',
+      choices: ['email-save', 'spam'] as const,
+      default: (env.EMAIL_INBOX || 'email-save') as Inbox,
+      describe: 'Inbox to query (also set with EMAIL_INBOX).',
+    })
     .command(
       'list',
       'List recent saved emails.',
@@ -60,7 +69,7 @@ async function run(): Promise<void> {
       async argv => {
         const params = new URLSearchParams({ limit: String(argv.limit) });
         if (argv.threadKey) params.set('threadKey', argv.threadKey);
-        const result = await requestJson<EmailListResponse>(`/emails?${params}`);
+        const result = await requestJson<EmailListResponse>(argv.inbox, `/emails?${params}`);
 
         if (argv.json) {
           printJson(result);
@@ -97,6 +106,7 @@ async function run(): Promise<void> {
         }),
       async argv => {
         const result = await requestJson<EmailResponse>(
+          argv.inbox,
           `/emails/${encodeURIComponent(argv.id)}?include=text,html`,
         );
 
@@ -123,7 +133,7 @@ async function run(): Promise<void> {
           describe: 'Write the .eml file to this path instead of stdout.',
         }),
       async argv => {
-        const response = await apiRequest(`/emails/${encodeURIComponent(argv.id)}/raw`);
+        const response = await apiRequest(argv.inbox, `/emails/${encodeURIComponent(argv.id)}/raw`);
         const raw = Buffer.from(await response.arrayBuffer());
         if (argv.output) {
           const outputPath = path.resolve(argv.output);
@@ -139,13 +149,15 @@ async function run(): Promise<void> {
     .parseAsync();
 }
 
-async function requestJson<T>(pathname: string): Promise<T> {
-  return apiRequest(pathname).then(response => response.json() as Promise<T>);
+async function requestJson<T>(inbox: Inbox, pathname: string): Promise<T> {
+  return apiRequest(inbox, pathname).then(response => response.json() as Promise<T>);
 }
 
-async function apiRequest(pathname: string): Promise<Response> {
+async function apiRequest(inbox: Inbox, pathname: string): Promise<Response> {
   const baseUrl = env.EMAIL_INBOX_URL.replace(/\/$/, '');
-  const response = await fetch(`${baseUrl}${pathname}`, {
+  const url = new URL(`${baseUrl}${pathname}`);
+  url.searchParams.set('inbox', inbox);
+  const response = await fetch(url, {
     headers: {
       authorization: `Bearer ${env.EMAIL_INBOX_TOKEN}`,
     },

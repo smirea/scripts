@@ -18,7 +18,7 @@ jobs:
         working-directory: cloudflare-workers/email-save
 
       - name: Apply D1 migrations
-        run: bunx wrangler d1 migrations apply email-save --remote
+        run: bun run migrate:remote
         working-directory: cloudflare-workers/email-save
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

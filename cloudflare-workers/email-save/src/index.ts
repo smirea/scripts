@@ -4,8 +4,13 @@ interface Env {
   ALLOWED_SENDERS: string;
   DB: D1Database;
   EMAIL_BUCKET: R2Bucket;
+  SPAM_DB: D1Database;
+  SPAM_BUCKET: R2Bucket;
   READ_TOKEN?: string;
 }
+
+type Inbox = 'email-save' | 'spam';
+type Storage = Pick<Env, 'DB' | 'EMAIL_BUCKET'>;
 
 interface ForwardedHeaders {
   from?: string;
@@ -78,11 +83,17 @@ const encoder = new TextEncoder();
 
 export default {
   async email(message: ForwardableEmailMessage, env: Env): Promise<void> {
+    const recipient = message.to.trim().toLowerCase();
+    const inbox = recipient === 'spam@stf.lol' ? 'spam' : 'email-save';
+    if (recipient !== 'spam@stf.lol' && recipient !== 'email-save@stf.lol') {
+      message.setReject('Unknown inbox.');
+      return;
+    }
     const raw = await new Response(message.raw).arrayBuffer();
     const parsed = await PostalMime.parse(raw);
     const fromAddr = parsed.from?.address || message.from;
 
-    if (!isAllowedSender(fromAddr, env.ALLOWED_SENDERS)) {
+    if (inbox === 'email-save' && !isAllowedSender(fromAddr, env.ALLOWED_SENDERS)) {
       console.log(`Ignoring email from disallowed sender: ${fromAddr}`);
       return;
     }
@@ -100,7 +111,7 @@ export default {
     });
 
     for (const email of emails) {
-      await storeEmail(env, email);
+      await storeEmail(inboxStorage(env, inbox), email);
     }
   },
 
@@ -110,18 +121,23 @@ export default {
     }
 
     const url = new URL(request.url);
+    const inbox = url.searchParams.get('inbox') ?? 'email-save';
+    if (inbox !== 'email-save' && inbox !== 'spam') {
+      return json({ error: 'invalid_inbox', choices: ['email-save', 'spam'] }, 400);
+    }
+    const storage = inboxStorage(env, inbox);
 
     if (request.method === 'GET' && url.pathname === '/emails') {
       const limit = clampLimit(url.searchParams.get('limit'));
       const threadKey = url.searchParams.get('threadKey');
       const rows = threadKey
-        ? await env.DB.prepare(`
+        ? await storage.DB.prepare(`
             SELECT * FROM emails
             WHERE thread_key = ?
             ORDER BY received_at DESC
             LIMIT ?
           `).bind(threadKey, limit).all<EmailRow>()
-        : await env.DB.prepare(`
+        : await storage.DB.prepare(`
             SELECT * FROM emails
             ORDER BY received_at DESC
             LIMIT ?
@@ -132,10 +148,10 @@ export default {
 
     const emailMatch = url.pathname.match(/^\/emails\/([^/]+)$/);
     if (request.method === 'GET' && emailMatch) {
-      const email = await loadEmail(env.DB, emailMatch[1]);
+      const email = await loadEmail(storage.DB, emailMatch[1]);
       if (!email) return json({ error: 'not_found' }, 404);
 
-      const attachments = await env.DB.prepare(`
+      const attachments = await storage.DB.prepare(`
         SELECT id, attachment_index, filename, mime_type, content_id, size, r2_key
         FROM attachments
         WHERE email_id = ?
@@ -148,18 +164,18 @@ export default {
       return json({
         email,
         attachments: attachments.results,
-        text: body.includes('text') && email.text_key ? await getText(env.EMAIL_BUCKET, email.text_key) : undefined,
-        html: body.includes('html') && email.html_key ? await getText(env.EMAIL_BUCKET, email.html_key) : undefined,
+        text: body.includes('text') && email.text_key ? await getText(storage.EMAIL_BUCKET, email.text_key) : undefined,
+        html: body.includes('html') && email.html_key ? await getText(storage.EMAIL_BUCKET, email.html_key) : undefined,
       });
     }
 
     const objectMatch = url.pathname.match(/^\/emails\/([^/]+)\/(raw|headers)$/);
     if (request.method === 'GET' && objectMatch) {
-      const email = await loadEmail(env.DB, objectMatch[1]);
+      const email = await loadEmail(storage.DB, objectMatch[1]);
       if (!email) return json({ error: 'not_found' }, 404);
 
       const key = objectMatch[2] === 'raw' ? email.raw_key : email.headers_key;
-      const object = await env.EMAIL_BUCKET.get(key);
+      const object = await storage.EMAIL_BUCKET.get(key);
       if (!object) return json({ error: 'object_not_found' }, 404);
 
       return new Response(object.body, {
@@ -172,6 +188,12 @@ export default {
     return json({ error: 'not_found' }, 404);
   },
 } satisfies ExportedHandler<Env>;
+
+function inboxStorage(env: Env, inbox: Inbox): Storage {
+  return inbox === 'spam'
+    ? { DB: env.SPAM_DB, EMAIL_BUCKET: env.SPAM_BUCKET }
+    : { DB: env.DB, EMAIL_BUCKET: env.EMAIL_BUCKET };
+}
 
 async function buildEmailsToStore(input: {
   raw: ArrayBuffer;
@@ -319,7 +341,7 @@ async function buildGmailForwardedEmails(
   return emails;
 }
 
-async function storeEmail(env: Env, email: StoredEmailInput): Promise<void> {
+async function storeEmail(env: Storage, email: StoredEmailInput): Promise<void> {
   const baseKey = `emails/${email.id}`;
   const rawKey = `${baseKey}/raw.eml`;
   const headersKey = `${baseKey}/headers.json`;

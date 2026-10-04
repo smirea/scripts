@@ -21,6 +21,7 @@ const env = z.object({
   ANYLIST_CREDENTIALS: z.string().regex(/.+@.+:.+/).optional(),
   EMAIL_INBOX_URL: z.url(),
   EMAIL_INBOX_TOKEN: z.string(),
+  EMAIL_INBOX: z.string().optional(),
   SMS_INBOX_URL: z.url(),
   SMS_INBOX_TOKEN: z.string(),
   AIRBNB_SESSION_COOKIE: z.string().optional(),
