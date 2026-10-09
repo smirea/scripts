@@ -2,7 +2,7 @@
 import { createScript } from './utils/createScript';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
-
+import { convert } from 'html-to-text';
 
 import env from './env';
 
@@ -102,7 +102,7 @@ async function run(): Promise<void> {
         .option('html', {
           type: 'boolean',
           default: false,
-          describe: 'Print the HTML body instead of plain text.',
+          describe: 'Print the original HTML body instead of readable text.',
         })
         .option('json', {
           type: 'boolean',
@@ -213,7 +213,11 @@ function printEmail(result: EmailResponse, html: boolean): void {
   if (result.attachments.length > 0) {
     lines.push(`Attachments: ${result.attachments.map(attachment => attachment.filename ?? attachment.mime_type).join(', ')}`);
   }
-  lines.push('', (html ? result.html : result.text) ?? '');
+  const text = result.text ?? '';
+  const body = html
+    ? result.html ?? text
+    : text.trim() ? text : convert(result.html ?? '', { wordwrap: process.stdout.columns || 100 });
+  lines.push('', body);
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 

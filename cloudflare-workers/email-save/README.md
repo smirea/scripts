@@ -88,7 +88,7 @@ EMAIL_INBOX=spam email-inbox list --inbox email-save
 email-inbox raw <id> -i spam -o message.eml
 ```
 
-With no command, the CLI prints totals and the latest email date/time for both inboxes, followed by help. `read` without an id reads the latest email in the selected inbox, or reports that the inbox is empty. `GET /stats?inbox=spam` returns `total_emails` and `last_email_at` (`null` for an empty inbox); totals include all saved emails, independent of the list limit.
+With no command, the CLI prints totals and the latest email date/time for both inboxes, followed by help. `read` without an id reads the latest email in the selected inbox, or reports that the inbox is empty. HTML-only emails are converted to readable text with links preserved; `--html` prints the original HTML. `GET /stats?inbox=spam` returns `total_emails` and `last_email_at` (`null` for an empty inbox); totals include all saved emails, independent of the list limit.
 
 List recent emails:
 
