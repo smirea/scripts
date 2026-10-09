@@ -67,17 +67,18 @@ async function run(): Promise<void> {
           type: 'string',
           describe: 'Only show emails in this thread.',
         })
-        .option('json', {
-          type: 'boolean',
-          default: false,
-          describe: 'Print the complete API response as JSON.',
+        .option('format', {
+          type: 'string',
+          choices: ['text', 'json'] as const,
+          default: 'text' as const,
+          describe: 'Output format (JSON includes the complete API response).',
         }),
       async argv => {
         const params = new URLSearchParams({ limit: String(argv.limit) });
         if (argv.threadKey) params.set('threadKey', argv.threadKey);
         const result = await requestJson<EmailListResponse>(argv.inbox, `/emails?${params}`);
 
-        if (argv.json) {
+        if (argv.format === 'json') {
           printJson(result);
           return;
         }
@@ -99,15 +100,16 @@ async function run(): Promise<void> {
           type: 'string',
           describe: 'Email id from the list command (defaults to the latest email).',
         })
-        .option('html', {
-          type: 'boolean',
-          default: false,
-          describe: 'Print the original HTML body instead of readable text.',
+        .option('format', {
+          type: 'string',
+          choices: ['text', 'html', 'json'] as const,
+          default: 'text' as const,
+          describe: 'Output format (JSON includes metadata, attachments, and both bodies).',
         })
-        .option('json', {
+        .option('fallback', {
           type: 'boolean',
-          default: false,
-          describe: 'Print metadata, attachments, and both bodies as JSON.',
+          default: true,
+          describe: 'Use the other body when the selected body is missing or blank (disable with --no-fallback).',
         }),
       async argv => {
         let id = argv.id;
@@ -121,12 +123,12 @@ async function run(): Promise<void> {
           `/emails/${encodeURIComponent(id)}?include=text,html`,
         );
 
-        if (argv.json) {
+        if (argv.format === 'json') {
           printJson(result);
           return;
         }
 
-        printEmail(result, argv.html);
+        printEmail(result, argv.format, argv.fallback);
       },
     )
     .command(
@@ -202,7 +204,7 @@ async function apiRequest(inbox: Inbox, pathname: string): Promise<Response> {
   return response;
 }
 
-function printEmail(result: EmailResponse, html: boolean): void {
+function printEmail(result: EmailResponse, format: 'text' | 'html', fallback: boolean): void {
   const email = result.email;
   const lines = [
     `Subject: ${email.forwarded_subject ?? email.subject ?? ''}`,
@@ -213,10 +215,12 @@ function printEmail(result: EmailResponse, html: boolean): void {
   if (result.attachments.length > 0) {
     lines.push(`Attachments: ${result.attachments.map(attachment => attachment.filename ?? attachment.mime_type).join(', ')}`);
   }
-  const text = result.text ?? '';
-  const body = html
-    ? result.html ?? text
-    : text.trim() ? text : convert(result.html ?? '', { wordwrap: process.stdout.columns || 100 });
+  let body = (format === 'html' ? result.html : result.text) ?? '';
+  if (fallback && !body.trim()) {
+    body = format === 'html'
+      ? result.text ?? ''
+      : convert(result.html ?? '', { wordwrap: process.stdout.columns || 100 });
+  }
   lines.push('', body);
   process.stdout.write(`${lines.join('\n')}\n`);
 }
