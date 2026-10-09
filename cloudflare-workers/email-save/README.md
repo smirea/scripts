@@ -82,13 +82,15 @@ The CLI uses the same Worker URL and token for both inboxes:
 ```sh
 email-inbox
 email-inbox list -i spam
+email-inbox -i 1 read 0
+email-inbox --inbox 0 read 2
 EMAIL_INBOX=spam email-inbox read
 EMAIL_INBOX=spam email-inbox read <id>
 EMAIL_INBOX=spam email-inbox list --inbox email-save
 email-inbox raw <id> -i spam -o message.eml
 ```
 
-With no command, the CLI prints totals and the latest email date/time for both inboxes, followed by help. `read` without an id reads the latest email in the selected inbox, or reports that the inbox is empty. `read --format=text|html|json` defaults to text. Missing or blank text bodies fall back to readable HTML converted to text with links preserved; missing or blank HTML bodies fall back to text. `--no-fallback` prints only the selected body. JSON returns metadata, attachments, and both original bodies without conversion. `list --format=text|json` defaults to a text table. `GET /stats?inbox=spam` returns `total_emails` and `last_email_at` (`null` for an empty inbox); totals include all saved emails, independent of the list limit.
+With no command, the CLI prints totals and the latest email date/time for both inboxes, followed by help. Inbox names and zero-based indexes both work with `--inbox` and `EMAIL_INBOX`: `0` is `email-save`, `1` is `spam`. `read` accepts an email id or a zero-based index in the selected inbox, ordered newest first like the unfiltered `list` table. Index `0` is the latest email and is the default when omitted. Indexes shift when new emails arrive; ids remain stable. `read --format=text|html|json` defaults to text. Missing or blank text bodies fall back to readable HTML converted to text with links preserved; missing or blank HTML bodies fall back to text. `--no-fallback` prints only the selected body. JSON returns metadata, attachments, and both original bodies without conversion. `list --format=text|json` defaults to a text table. `GET /stats?inbox=spam` returns `total_emails` and `last_email_at` (`null` for an empty inbox); totals include all saved emails, independent of the list limit. `GET /emails` accepts a non-negative integer `offset` (default `0`) alongside `limit`.
 
 List recent emails:
 

@@ -135,20 +135,24 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/emails') {
       const limit = clampLimit(url.searchParams.get('limit'));
+      const offset = Number(url.searchParams.get('offset') ?? 0);
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        return json({ error: 'invalid_offset' }, 400);
+      }
       const threadKey = url.searchParams.get('threadKey');
       const rows = threadKey
         ? await env.DB.prepare(`
             SELECT * FROM emails
             WHERE inbox = ? AND thread_key = ?
-            ORDER BY received_at DESC
-            LIMIT ?
-          `).bind(inbox, threadKey, limit).all<EmailRow>()
+            ORDER BY received_at DESC, id DESC
+            LIMIT ? OFFSET ?
+          `).bind(inbox, threadKey, limit, offset).all<EmailRow>()
         : await env.DB.prepare(`
             SELECT * FROM emails
             WHERE inbox = ?
-            ORDER BY received_at DESC
-            LIMIT ?
-          `).bind(inbox, limit).all<EmailRow>();
+            ORDER BY received_at DESC, id DESC
+            LIMIT ? OFFSET ?
+          `).bind(inbox, limit, offset).all<EmailRow>();
 
       return json({ emails: rows.results });
     }

@@ -6,7 +6,8 @@ import { convert } from 'html-to-text';
 
 import env from './env';
 
-type Inbox = 'email-save' | 'spam';
+const inboxes = ['email-save', 'spam'] as const;
+type Inbox = typeof inboxes[number];
 
 interface InboxStats {
   total_emails: number;
@@ -50,9 +51,15 @@ async function run(): Promise<void> {
     .option('inbox', {
       alias: 'i',
       type: 'string',
-      choices: ['email-save', 'spam'] as const,
-      default: (env.EMAIL_INBOX || 'email-save') as Inbox,
-      describe: 'Inbox to query (also set with EMAIL_INBOX).',
+      choices: inboxes,
+      default: env.EMAIL_INBOX || 'email-save',
+      coerce: (value: string): Inbox => {
+        const inbox = inboxes.find(inbox => inbox === value)
+          ?? (/^\d+$/.test(value) ? inboxes[Number(value)] : undefined);
+        if (!inbox) throw new Error('Inbox must be email-save (0) or spam (1).');
+        return inbox;
+      },
+      describe: 'Inbox name or index: email-save (0), spam (1); also set with EMAIL_INBOX.',
     })
     .command(
       'list',
@@ -98,7 +105,7 @@ async function run(): Promise<void> {
       command => command
         .positional('id', {
           type: 'string',
-          describe: 'Email id from the list command (defaults to the latest email).',
+          describe: 'Email id or zero-based inbox index, newest first (defaults to 0).',
         })
         .option('format', {
           type: 'string',
@@ -113,10 +120,19 @@ async function run(): Promise<void> {
         }),
       async argv => {
         let id = argv.id;
-        if (id === undefined) {
-          const result = await requestJson<EmailListResponse>(argv.inbox, '/emails?limit=1');
+        const isIndex = id !== undefined && /^-?\d+(?:\.\d+)?$/.test(id) && !/^[a-f0-9]{64}$/i.test(id);
+        if (id === undefined || isIndex) {
+          const index = Number(id ?? 0);
+          if (!Number.isSafeInteger(index) || index < 0) {
+            throw new Error('Email index must be a non-negative safe integer.');
+          }
+          const result = await requestJson<EmailListResponse>(argv.inbox, `/emails?limit=1&offset=${index}`);
           id = result.emails[0]?.id;
-          if (id === undefined) throw new Error(`No emails in the ${argv.inbox} inbox.`);
+          if (id === undefined) {
+            throw new Error(index === 0
+              ? `No emails in the ${argv.inbox} inbox.`
+              : `No email at index ${index} in the ${argv.inbox} inbox.`);
+          }
         }
         const result = await requestJson<EmailResponse>(
           argv.inbox,
@@ -162,7 +178,6 @@ async function run(): Promise<void> {
       false,
       command => command,
       async () => {
-        const inboxes: Inbox[] = ['email-save', 'spam'];
         const rows = await Promise.all(inboxes.map(async inbox => {
           const stats = await requestJson<InboxStats>(inbox, '/stats');
           const lastEmail = stats.last_email_at ? new Date(stats.last_email_at) : null;
