@@ -6,7 +6,6 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ClassicLevel } from 'classic-level';
-import { connectMacroFactor } from './utils/macrofactorApi';
 
 import {
   OUTPUT_FORMATS,
@@ -589,22 +588,11 @@ async function runCli(): Promise<void> {
       default: false,
       describe: 'Include all nutrients in CSV/table output',
     })
-    .option('source', {
-      type: 'string',
-      choices: ['api', 'cache'],
-      default: 'cache',
-      describe: 'Read directly from Firebase or use the local app cache',
-    })
     .option('app', {
       type: 'string',
       choices: APP_MODES,
       default: 'auto',
-      describe: 'With --source cache: auto refreshes stale/missing data, open always opens, none never opens',
-    })
-    .command('setup', 'Save API configuration and verify authenticated data access', {}, async () => {
-      const api = await connectMacroFactor();
-      await api.getDocuments([`food/${formatLocalDateKey(new Date())}`]);
-      console.log('MacroFactor API setup verified. Credentials are saved in env-manager .env.local.');
+      describe: 'MacroFactor app warm mode: auto refreshes stale/missing data, open always opens, none never opens',
     })
     .command('$0', 'Read MacroFactor nutrition data', cli => cli, async args => {
       if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
@@ -617,16 +605,14 @@ async function runCli(): Promise<void> {
         end: args.end,
       });
       const appMode = parseMacroFactorAppMode(args.app);
-      const client = args.source === 'api'
-        ? await MacroFactorClient.createFromApi(window)
-        : await MacroFactorClient.create({ appMode, window });
+      const client = await MacroFactorCacheClient.create({ appMode, window });
       const dayDocuments = fetchFoodLogDays(client, window);
       const customFoodDetails = fetchCustomFoodDetails(client, dayDocuments);
       const programTargets = fetchProgramTargets(client, window);
       const scaleMetrics = fetchScaleMetrics(client, window);
       const microNutrition = fetchMicroNutrition(client, window);
       const report = buildMacrofactorReport({
-        sourcePath: args.source === 'api' ? 'api://macrofactor/firestore' : SOURCE_PATH,
+        sourcePath: SOURCE_PATH,
         window,
         dayDocuments,
         customFoodDetails,
@@ -647,14 +633,14 @@ async function runCli(): Promise<void> {
     .parseAsync();
 }
 
-function fetchFoodLogDays(client: MacroFactorClient, window: ResolvedWindow): CachedFoodLogDay[] {
+function fetchFoodLogDays(client: MacroFactorCacheClient, window: ResolvedWindow): CachedFoodLogDay[] {
   return listFetchDateKeys(window).map(date => ({
     date,
     document: client.getFoodLogDocument(date),
   }));
 }
 
-function fetchProgramTargets(client: MacroFactorClient, window: ResolvedWindow): ProgramTarget[] {
+function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWindow): ProgramTarget[] {
   const documents = listYearDocuments(listProgramYears(window), year => client.getProgramDocument(year));
   const targets: ProgramTarget[] = [];
 
@@ -679,7 +665,7 @@ function fetchProgramTargets(client: MacroFactorClient, window: ResolvedWindow):
 }
 
 function fetchScaleMetrics(
-  client: MacroFactorClient,
+  client: MacroFactorCacheClient,
   window: ResolvedWindow
 ): Record<string, ScaleMetrics> {
   const documents = listYearDocuments(listWindowYears(window), year => client.getScaleDocument(year));
@@ -704,7 +690,7 @@ function fetchScaleMetrics(
 }
 
 function fetchMicroNutrition(
-  client: MacroFactorClient,
+  client: MacroFactorCacheClient,
   window: ResolvedWindow
 ): Record<string, DailyNutritionTotals> {
   const documents = listYearDocuments(listWindowYears(window), year => client.getMicroDocument(year));
@@ -1169,7 +1155,7 @@ function buildRecipeBreakdown(
 }
 
 function fetchCustomFoodDetails(
-  client: MacroFactorClient,
+  client: MacroFactorCacheClient,
   dayDocuments: CachedFoodLogDay[]
 ): Record<string, CustomFoodDetails> {
   const ids = collectCustomFoodIds(dayDocuments);
@@ -1613,13 +1599,13 @@ function collectNutrientColumns(nutrientsList: Record<string, number>[]): string
   });
 }
 
-class MacroFactorClient {
+class MacroFactorCacheClient {
   private constructor(
     private readonly userPath: string,
     private readonly documents: Map<string, Record<string, unknown>>
   ) {}
 
-  static async create(options: { appMode: MacroFactorAppMode; window: ResolvedWindow }): Promise<MacroFactorClient> {
+  static async create(options: { appMode: MacroFactorAppMode; window: ResolvedWindow }): Promise<MacroFactorCacheClient> {
     const cacheDir = resolveFirestoreCacheDir();
     const dateKeys = listFetchDateKeys(options.window);
     const initialDocuments = await readCachedFirestoreDocuments(cacheDir);
@@ -1632,23 +1618,7 @@ class MacroFactorClient {
     });
     const documents = shouldReread ? await readCachedFirestoreDocuments(cacheDir) : initialDocuments;
     const userPath = findCachedUserPath(documents);
-    return new MacroFactorClient(userPath, documents);
-  }
-
-  static async createFromApi(window: ResolvedWindow): Promise<MacroFactorClient> {
-    const api = await connectMacroFactor();
-    const suffixes = [
-      ...listFetchDateKeys(window).map(date => `food/${date}`),
-      ...listProgramYears(window).map(year => `program/${year}`),
-      ...listWindowYears(window).flatMap(year => [`scale/${year}`, `micro/${year}`]),
-    ];
-    const documents = await api.getDocuments(suffixes);
-    const days = listFetchDateKeys(window).map(date => ({ date, document: documents.get(`food/${date}`) ?? null }));
-    const customFoods = await api.getDocuments(collectCustomFoodIds(days).map(id => `customFoods/${id}`));
-    const userPath = `users/${api.userId}`;
-    return new MacroFactorClient(userPath, new Map(
-      [...documents, ...customFoods].map(([suffix, document]) => [`${userPath}/${suffix}`, document])
-    ));
+    return new MacroFactorCacheClient(userPath, documents);
   }
 
   getFoodLogDocument(date: string): Record<string, unknown> | null {
