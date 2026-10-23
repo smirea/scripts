@@ -592,7 +592,7 @@ async function runCli(): Promise<void> {
     .option('source', {
       type: 'string',
       choices: ['api', 'cache'],
-      default: 'api',
+      default: 'cache',
       describe: 'Read directly from Firebase or use the local app cache',
     })
     .option('app', {
