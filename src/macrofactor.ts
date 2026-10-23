@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ClassicLevel } from 'classic-level';
-import { connectMacroFactor, extractMacroFactorApiKey } from './utils/macrofactorApi';
+import { connectMacroFactor } from './utils/macrofactorApi';
 
 import {
   OUTPUT_FORMATS,
@@ -601,9 +601,10 @@ async function runCli(): Promise<void> {
       default: 'auto',
       describe: 'With --source cache: auto refreshes stale/missing data, open always opens, none never opens',
     })
-    .command('setup', 'Extract the installed app API key into env-manager .env.local', {}, () => {
-      extractMacroFactorApiKey();
-      console.log('Saved MACROFACTOR_API_KEY to env-manager .env.local. Account authentication is still required for API reads.');
+    .command('setup', 'Save API configuration and verify authenticated data access', {}, async () => {
+      const api = await connectMacroFactor();
+      await api.getDocuments([`food/${formatLocalDateKey(new Date())}`]);
+      console.log('MacroFactor API setup verified. Credentials are saved in env-manager .env.local.');
     })
     .command('$0', 'Read MacroFactor nutrition data', cli => cli, async args => {
       if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
