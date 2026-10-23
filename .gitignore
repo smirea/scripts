@@ -10,6 +10,7 @@ dist
 .env.test.local
 .env.production.local
 .env.local
+.env.local.*.tmp
 
 # caches
 .eslintcache

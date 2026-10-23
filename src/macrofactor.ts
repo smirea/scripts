@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { ClassicLevel } from 'classic-level';
+import { connectMacroFactor, extractMacroFactorApiKey } from './utils/macrofactorApi';
 
 import {
   OUTPUT_FORMATS,
@@ -546,106 +547,113 @@ function resolveWindow(options: {
 }
 
 async function runCli(): Promise<void> {
-  try {
-    const args = await createScript('macrofactor')
-      .option('days', {
-        alias: ['d'],
-        type: 'number',
-        default: 7,
-        describe: 'Days from --start, or days back from --end/now; ignored when both --start and --end are set',
-      })
-      .option('start', {
-        type: 'string',
-        describe: 'Start date/time in ISO format (e.g. 2026-02-01 or 2026-02-01T00:00:00Z)',
-      })
-      .option('end', {
-        type: 'string',
-        describe: 'End date/time in ISO format',
-      })
-      .option('limit', {
-        alias: ['l'],
-        type: 'number',
-        describe: 'Maximum number of foods to return',
-      })
-      .option('format', {
-        alias: ['f'],
-        type: 'string',
-        choices: OUTPUT_FORMATS,
-        default: 'table',
-        describe: 'Output format',
-      })
-      .option('output', {
-        alias: ['o'],
-        type: 'string',
-        describe: 'Write output to this file path',
-      })
-      .option('pretty', {
-        type: 'boolean',
-        default: true,
-        describe: 'Pretty-print JSON output',
-      })
-      .option('full', {
-        type: 'boolean',
-        default: false,
-        describe: 'Include all nutrients in CSV/table output',
-      })
-      .option('app', {
-        type: 'string',
-        choices: APP_MODES,
-        default: 'auto',
-        describe: 'MacroFactor app warm mode: auto opens when stale or missing docs, open always opens, none never opens',
-      })
-      .parseAsync();
+  await createScript('macrofactor')
+    .option('days', {
+      alias: ['d'],
+      type: 'number',
+      default: 7,
+      describe: 'Days from --start, or days back from --end/now; ignored when both --start and --end are set',
+    })
+    .option('start', {
+      type: 'string',
+      describe: 'Start date/time in ISO format (e.g. 2026-02-01 or 2026-02-01T00:00:00Z)',
+    })
+    .option('end', {
+      type: 'string',
+      describe: 'End date/time in ISO format',
+    })
+    .option('limit', {
+      alias: ['l'],
+      type: 'number',
+      describe: 'Maximum number of foods to return',
+    })
+    .option('format', {
+      alias: ['f'],
+      type: 'string',
+      choices: OUTPUT_FORMATS,
+      default: 'table',
+      describe: 'Output format',
+    })
+    .option('output', {
+      alias: ['o'],
+      type: 'string',
+      describe: 'Write output to this file path',
+    })
+    .option('pretty', {
+      type: 'boolean',
+      default: true,
+      describe: 'Pretty-print JSON output',
+    })
+    .option('full', {
+      type: 'boolean',
+      default: false,
+      describe: 'Include all nutrients in CSV/table output',
+    })
+    .option('source', {
+      type: 'string',
+      choices: ['api', 'cache'],
+      default: 'api',
+      describe: 'Read directly from Firebase or use the local app cache',
+    })
+    .option('app', {
+      type: 'string',
+      choices: APP_MODES,
+      default: 'auto',
+      describe: 'With --source cache: auto refreshes stale/missing data, open always opens, none never opens',
+    })
+    .command('setup', 'Extract the installed app API key into env-manager .env.local', {}, () => {
+      extractMacroFactorApiKey();
+      console.log('Saved MACROFACTOR_API_KEY to env-manager .env.local. Account authentication is still required for API reads.');
+    })
+    .command('$0', 'Read MacroFactor nutrition data', cli => cli, async args => {
+      if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
+        throw new Error('--limit must be a positive number.');
+      }
 
-    if (args.limit != null && (!Number.isFinite(args.limit) || args.limit <= 0)) {
-      throw new Error('--limit must be a positive number.');
-    }
+      const window = resolveWindow({
+        days: args.days,
+        start: args.start,
+        end: args.end,
+      });
+      const appMode = parseMacroFactorAppMode(args.app);
+      const client = args.source === 'api'
+        ? await MacroFactorClient.createFromApi(window)
+        : await MacroFactorClient.create({ appMode, window });
+      const dayDocuments = fetchFoodLogDays(client, window);
+      const customFoodDetails = fetchCustomFoodDetails(client, dayDocuments);
+      const programTargets = fetchProgramTargets(client, window);
+      const scaleMetrics = fetchScaleMetrics(client, window);
+      const microNutrition = fetchMicroNutrition(client, window);
+      const report = buildMacrofactorReport({
+        sourcePath: args.source === 'api' ? 'api://macrofactor/firestore' : SOURCE_PATH,
+        window,
+        dayDocuments,
+        customFoodDetails,
+        programTargets,
+        scaleMetrics,
+        microNutrition,
+        limit: args.limit,
+      });
 
-    const window = resolveWindow({
-      days: args.days,
-      start: args.start,
-      end: args.end,
-    });
-    const appMode = parseMacroFactorAppMode(args.app);
-    const client = await MacroFactorCacheClient.create({ appMode, window });
-    const dayDocuments = fetchFoodLogDays(client, window);
-    const customFoodDetails = fetchCustomFoodDetails(client, dayDocuments);
-    const programTargets = fetchProgramTargets(client, window);
-    const scaleMetrics = fetchScaleMetrics(client, window);
-    const microNutrition = fetchMicroNutrition(client, window);
-    const report = buildMacrofactorReport({
-      sourcePath: SOURCE_PATH,
-      window,
-      dayDocuments,
-      customFoodDetails,
-      programTargets,
-      scaleMetrics,
-      microNutrition,
-      limit: args.limit,
-    });
-
-    renderOutput({
-      report,
-      format: parseOutputFormat(args.format),
-      outputPath: args.output,
-      pretty: args.pretty,
-      full: args.full,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(message);
-    process.exit(1);
-  }
+      renderOutput({
+        report,
+        format: parseOutputFormat(args.format),
+        outputPath: args.output,
+        pretty: args.pretty,
+        full: args.full,
+      });
+    })
+    .parseAsync();
 }
 
-function fetchFoodLogDays(client: MacroFactorCacheClient, window: ResolvedWindow): CachedFoodLogDay[] {
+function fetchFoodLogDays(client: MacroFactorClient, window: ResolvedWindow): CachedFoodLogDay[] {
   return listFetchDateKeys(window).map(date => ({
     date,
     document: client.getFoodLogDocument(date),
   }));
 }
 
-function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWindow): ProgramTarget[] {
+function fetchProgramTargets(client: MacroFactorClient, window: ResolvedWindow): ProgramTarget[] {
   const documents = listYearDocuments(listProgramYears(window), year => client.getProgramDocument(year));
   const targets: ProgramTarget[] = [];
 
@@ -670,7 +678,7 @@ function fetchProgramTargets(client: MacroFactorCacheClient, window: ResolvedWin
 }
 
 function fetchScaleMetrics(
-  client: MacroFactorCacheClient,
+  client: MacroFactorClient,
   window: ResolvedWindow
 ): Record<string, ScaleMetrics> {
   const documents = listYearDocuments(listWindowYears(window), year => client.getScaleDocument(year));
@@ -695,7 +703,7 @@ function fetchScaleMetrics(
 }
 
 function fetchMicroNutrition(
-  client: MacroFactorCacheClient,
+  client: MacroFactorClient,
   window: ResolvedWindow
 ): Record<string, DailyNutritionTotals> {
   const documents = listYearDocuments(listWindowYears(window), year => client.getMicroDocument(year));
@@ -1160,7 +1168,7 @@ function buildRecipeBreakdown(
 }
 
 function fetchCustomFoodDetails(
-  client: MacroFactorCacheClient,
+  client: MacroFactorClient,
   dayDocuments: CachedFoodLogDay[]
 ): Record<string, CustomFoodDetails> {
   const ids = collectCustomFoodIds(dayDocuments);
@@ -1604,13 +1612,13 @@ function collectNutrientColumns(nutrientsList: Record<string, number>[]): string
   });
 }
 
-class MacroFactorCacheClient {
+class MacroFactorClient {
   private constructor(
     private readonly userPath: string,
     private readonly documents: Map<string, Record<string, unknown>>
   ) {}
 
-  static async create(options: { appMode: MacroFactorAppMode; window: ResolvedWindow }): Promise<MacroFactorCacheClient> {
+  static async create(options: { appMode: MacroFactorAppMode; window: ResolvedWindow }): Promise<MacroFactorClient> {
     const cacheDir = resolveFirestoreCacheDir();
     const dateKeys = listFetchDateKeys(options.window);
     const initialDocuments = await readCachedFirestoreDocuments(cacheDir);
@@ -1623,7 +1631,23 @@ class MacroFactorCacheClient {
     });
     const documents = shouldReread ? await readCachedFirestoreDocuments(cacheDir) : initialDocuments;
     const userPath = findCachedUserPath(documents);
-    return new MacroFactorCacheClient(userPath, documents);
+    return new MacroFactorClient(userPath, documents);
+  }
+
+  static async createFromApi(window: ResolvedWindow): Promise<MacroFactorClient> {
+    const api = await connectMacroFactor();
+    const suffixes = [
+      ...listFetchDateKeys(window).map(date => `food/${date}`),
+      ...listProgramYears(window).map(year => `program/${year}`),
+      ...listWindowYears(window).flatMap(year => [`scale/${year}`, `micro/${year}`]),
+    ];
+    const documents = await api.getDocuments(suffixes);
+    const days = listFetchDateKeys(window).map(date => ({ date, document: documents.get(`food/${date}`) ?? null }));
+    const customFoods = await api.getDocuments(collectCustomFoodIds(days).map(id => `customFoods/${id}`));
+    const userPath = `users/${api.userId}`;
+    return new MacroFactorClient(userPath, new Map(
+      [...documents, ...customFoods].map(([suffix, document]) => [`${userPath}/${suffix}`, document])
+    ));
   }
 
   getFoodLogDocument(date: string): Record<string, unknown> | null {
