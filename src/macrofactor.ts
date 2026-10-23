@@ -529,10 +529,14 @@ function resolveWindow(options: {
   }
 
   const nowUnixSeconds = options.nowUnixSeconds ?? Date.now() / 1000;
-  const endUnixSeconds = options.end ? parseDateArg(options.end, 'end') : nowUnixSeconds;
-  const startUnixSeconds = options.start
-    ? parseDateArg(options.start, 'start')
-    : endUnixSeconds - options.days * SECONDS_PER_DAY;
+  const explicitStart = options.start ? parseDateArg(options.start, 'start') : undefined;
+  // Report ranges are inclusive, so exclude the first millisecond of the following day.
+  const endUnixSeconds = options.end
+    ? parseDateArg(options.end, 'end')
+    : explicitStart != null
+      ? explicitStart + options.days * SECONDS_PER_DAY - 0.001
+      : nowUnixSeconds;
+  const startUnixSeconds = explicitStart ?? endUnixSeconds - options.days * SECONDS_PER_DAY;
 
   if (startUnixSeconds > endUnixSeconds) {
     throw new Error('Start date must be before end date.');
@@ -548,7 +552,7 @@ async function runCli(): Promise<void> {
         alias: ['d'],
         type: 'number',
         default: 7,
-        describe: 'Lookback window in days when --start is not set',
+        describe: 'Days from --start, or days back from --end/now; ignored when both --start and --end are set',
       })
       .option('start', {
         type: 'string',
