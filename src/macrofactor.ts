@@ -1707,6 +1707,8 @@ async function ensureMacroFactorCacheFresh(
     return false;
   }
 
+  assertAccessibilityAccess();
+
   let warmError: unknown;
   let closeError: unknown;
   try {
@@ -1792,6 +1794,24 @@ function parseLocalTimestampMs(value: string | null | undefined): number | null 
   }
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+// Reading another process's windows needs the same Accessibility grant as the clicks, so probing it
+// before launching MacroFactor fails fast instead of leaving the app open mid-walk.
+function assertAccessibilityAccess(): void {
+  const result = runAppleScriptExpression(
+    'tell application "System Events" to count windows of (first application process whose frontmost is true)'
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      [
+        `Refreshing the cache needs to control ${MACROFACTOR_APP_NAME}, but this terminal lacks macOS Accessibility access.`,
+        'Enable the terminal app in System Settings > Privacy & Security > Accessibility (remove and re-add it if it is already on), restart it, and rerun.',
+        'Pass --app none to read the existing cache without opening the app.',
+        commandError(result, 'osascript:'),
+      ].join('\n')
+    );
+  }
 }
 
 async function warmMacroFactorAppCache(cacheDir: string, dateKeys: string[]): Promise<void> {
