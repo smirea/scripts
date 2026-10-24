@@ -2,6 +2,7 @@
 import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -10,6 +11,9 @@ const BUILD_ROOT = path.join(os.homedir(), 'Library/Caches/iphone-release-builds
 const PROJECT_SEARCH_SKIP = new Set(['node_modules', 'DerivedData', 'Pods', 'build', '.git']);
 const PRODUCTION_ENVIRONMENT = /^(prod|production)$/i;
 const ENV_MANAGER_NOT_INITIALIZED = 3;
+// Public r2.dev bucket with a 7-day expiry rule; uploads sit under an unguessable random prefix.
+const LINK_BUCKET = 'iphone-push-app';
+const LINK_EXPIRY_DAYS = 7;
 
 interface Device {
   identifier: string;
@@ -55,7 +59,7 @@ interface XcodeProject {
 
 if (import.meta.main) {
   void createScript('iphone-push-app')
-    .command('$0 <apps..>', 'Fast-forward each app\'s git checkout, build it in Release, install it on a paired iPhone without deleting app data, and launch it', (y) => y
+    .command('$0 <apps..>', 'Fast-forward each app\'s git checkout, build it in Release, install it on a paired iPhone without deleting app data, and launch it (or upload it behind an install link with --link)', (y) => y
       .positional('apps', {
         type: 'string',
         array: true,
@@ -68,10 +72,21 @@ if (import.meta.main) {
       .option('env', {
         type: 'string',
         describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment',
-      }),
+      })
+      .option('link', {
+        type: 'boolean',
+        default: false,
+        describe: `Instead of installing over USB/network, upload a development-signed build and print an install link (works for devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`,
+      })
+      .conflicts('link', 'device'),
     async (argv) => {
       preflight();
+      const linkBase = argv.link ? linkBucketUrl() : undefined;
       const plans = argv.apps.map(resolveAppDir).map((dir) => planApp(dir, { scheme: argv.scheme, pull: argv.pull, env: argv.env }));
+      if (linkBase) {
+        for (const plan of plans) publishApp(plan, linkBase);
+        return;
+      }
       const device = selectDevice(argv.device);
       checkPhone(device);
       for (const plan of plans) pushApp(plan, device);
@@ -206,17 +221,13 @@ function withEnvironment<T>(env: EnvSelection, build: () => T): T {
   }
 }
 
-function pushApp({ dir, name, project, env }: AppPlan, device: Device) {
-  const buildDir = path.join(BUILD_ROOT, name);
-  mkdirSync(buildDir, { recursive: true });
-
+function xcodebuild({ dir, name, project, env }: AppPlan, buildDir: string, args: string[]) {
   const buildLog = path.join(buildDir, 'build.log');
   const runBuild = () => {
     console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release)... Log: ${buildLog}`);
     return runLogged('xcodebuild', [
-      project.flag, project.path, '-scheme', project.scheme,
-      '-configuration', 'Release', '-destination', `platform=iOS,id=${device.identifier}`,
-      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', 'build',
+      project.flag, project.path, '-scheme', project.scheme, '-configuration', 'Release',
+      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args,
     ], buildLog);
   };
   const build = env ? withEnvironment(env, runBuild) : runBuild();
@@ -228,6 +239,100 @@ function pushApp({ dir, name, project, env }: AppPlan, device: Device) {
         : 'Open the project in Xcode and build the Release scheme to see the compiler error.';
     throw new Error(`Build failed; see ${buildLog}. Nothing was installed for ${name}.\n${hint}`);
   }
+}
+
+function plistValue(plist: string, key: string): string | undefined {
+  const result = run('plutil', ['-extract', key, 'raw', '-o', '-', plist]);
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function linkBucketUrl(): string {
+  const result = run('wrangler', ['r2', 'bucket', 'dev-url', 'get', LINK_BUCKET]);
+  const url = result.stdout.match(/https:\/\/pub-[a-z0-9]+\.r2\.dev/)?.[0];
+  if (result.status !== 0 || !url) {
+    throw new Error([
+      `--link needs the public R2 bucket "${LINK_BUCKET}" (wrangler must be installed and logged in). Set it up once with:`,
+      `  wrangler r2 bucket create ${LINK_BUCKET}`,
+      `  wrangler r2 bucket dev-url enable ${LINK_BUCKET} --force`,
+      `  wrangler r2 bucket lifecycle add ${LINK_BUCKET} expire-builds --expire-days ${LINK_EXPIRY_DAYS} --force`,
+      (result.stderr || result.stdout).trim(),
+    ].join('\n'));
+  }
+  return url;
+}
+
+function escapeXml(value: string): string {
+  return value.replace(/[<>&'"]/g, (char) => `&#${char.charCodeAt(0)};`);
+}
+
+// Over-the-air install: iOS fetches the manifest from an itms-services:// link, which only
+// works from a tapped link in Safari, hence the HTML page. Development signing limits
+// installs to devices in the team's provisioning profile.
+function publishApp(plan: AppPlan, linkBase: string) {
+  const { name, project } = plan;
+  const buildDir = path.join(BUILD_ROOT, `${name}-link`);
+  const archivePath = path.join(buildDir, `${project.scheme}.xcarchive`);
+  const exportPath = path.join(buildDir, 'export');
+  mkdirSync(buildDir, { recursive: true });
+  xcodebuild(plan, buildDir, ['-destination', 'generic/platform=iOS', '-archivePath', archivePath, 'archive']);
+
+  const optionsPath = path.join(buildDir, 'ExportOptions.plist');
+  writeFileSync(optionsPath, `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>method</key><string>debugging</string><key>signingStyle</key><string>automatic</string></dict></plist>
+`);
+  const exportLog = path.join(buildDir, 'export.log');
+  console.log(`Exporting ${name}... Log: ${exportLog}`);
+  const exported = runLogged('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportPath, '-exportOptionsPlist', optionsPath, '-allowProvisioningUpdates'], exportLog);
+  if (!exported.ok) throw new Error(`Export failed; see ${exportLog}. Check that your iPhone is registered to your team in Xcode > Settings > Accounts.`);
+  const ipa = readdirSync(exportPath).find((entry) => entry.endsWith('.ipa'));
+  if (!ipa) throw new Error(`No .ipa found in ${exportPath}.`);
+
+  const appsDir = path.join(archivePath, 'Products/Applications');
+  const infoPlist = path.join(findBuiltApp(appsDir, project.scheme), 'Info.plist');
+  const bundleId = plistValue(infoPlist, 'CFBundleIdentifier');
+  if (!bundleId) throw new Error(`Could not read the bundle identifier from ${infoPlist}`);
+  const version = plistValue(infoPlist, 'CFBundleShortVersionString') ?? '1.0';
+  const build = plistValue(infoPlist, 'CFBundleVersion');
+  const title = plistValue(infoPlist, 'CFBundleDisplayName') ?? plistValue(infoPlist, 'CFBundleName') ?? name;
+
+  const prefix = `${randomBytes(16).toString('hex')}/${name}`;
+  const url = (file: string) => `${linkBase}/${prefix}/${file}`;
+  const manifest = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>items</key><array><dict>
+<key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${escapeXml(url('app.ipa'))}</string></dict></array>
+<key>metadata</key><dict><key>bundle-identifier</key><string>${escapeXml(bundleId)}</string><key>bundle-version</key><string>${escapeXml(version)}</string><key>kind</key><string>software</string><key>title</key><string>${escapeXml(title)}</string></dict>
+</dict></array></dict></plist>
+`;
+  const installHref = `itms-services://?action=download-manifest&url=${encodeURIComponent(url('manifest.plist'))}`;
+  const label = `${title} ${version}${build ? ` (${build})` : ''}${plan.env ? ` · ${plan.env.name}` : ''}`;
+  const page = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Install ${escapeXml(title)}</title>
+<style>body{font:17px -apple-system,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;text-align:center}a{display:inline-block;margin-top:16px;padding:14px 28px;border-radius:12px;background:#007aff;color:#fff;text-decoration:none;font-weight:600}p{color:#666}</style></head>
+<body><div><h1>${escapeXml(title)}</h1><p>${escapeXml(label)}<br>Built ${escapeXml(new Date().toLocaleString())}</p><a href="${escapeXml(installHref)}">Install</a></div></body></html>
+`;
+  writeFileSync(path.join(buildDir, 'manifest.plist'), manifest);
+  writeFileSync(path.join(buildDir, 'index.html'), page);
+
+  console.log(`Uploading ${name}...`);
+  for (const [file, local, contentType] of [
+    ['app.ipa', path.join(exportPath, ipa), 'application/octet-stream'],
+    ['manifest.plist', path.join(buildDir, 'manifest.plist'), 'text/xml'],
+    ['index.html', path.join(buildDir, 'index.html'), 'text/html; charset=utf-8'],
+  ] as const) {
+    runOrThrow('wrangler', ['r2', 'object', 'put', `${LINK_BUCKET}/${prefix}/${file}`, '--file', local, '--content-type', contentType, '--remote'], {
+      error: `Uploading ${file} to R2 failed`,
+    });
+  }
+  console.log(`${name} (${label}) is ready to install for ${LINK_EXPIRY_DAYS} days. Open on your iPhone:\n${url('index.html')}`);
+}
+
+function pushApp(plan: AppPlan, device: Device) {
+  const { name, project } = plan;
+  const buildDir = path.join(BUILD_ROOT, name);
+  mkdirSync(buildDir, { recursive: true });
+  xcodebuild(plan, buildDir, ['-destination', `platform=iOS,id=${device.identifier}`, 'build']);
 
   const appPath = findBuiltApp(path.join(buildDir, 'Build/Products/Release-iphoneos'), project.scheme);
   const bundleId = runOrThrow('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Info.plist')], {
