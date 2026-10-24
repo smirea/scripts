@@ -1,13 +1,15 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import { spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 const CODE_ROOT = path.join(os.homedir(), 'code');
 const BUILD_ROOT = path.join(os.homedir(), 'Library/Caches/iphone-release-builds');
 const PROJECT_SEARCH_SKIP = new Set(['node_modules', 'DerivedData', 'Pods', 'build', '.git']);
+const PRODUCTION_ENVIRONMENT = /^(prod|production)$/i;
+const ENV_MANAGER_NOT_INITIALIZED = 3;
 
 interface Device {
   identifier: string;
@@ -16,6 +18,30 @@ interface Device {
   physicalIOS: boolean;
   paired: boolean;
   developerModeDisabled: boolean;
+}
+
+interface EnvManagerInfo {
+  root: string;
+  local: boolean;
+  mode: 'targets' | 'single';
+  environment: { current: string; valuesLoadedFrom: string | null };
+  environments: string[] | null;
+  environmentsError: string | null;
+  outputs: { target: string | null; kind: 'values' | 'reader'; path: string }[];
+}
+
+interface EnvSelection {
+  name: string;
+  root: string;
+  current: string;
+  children: string[];
+}
+
+interface AppPlan {
+  dir: string;
+  name: string;
+  project: XcodeProject;
+  env: EnvSelection | null;
 }
 
 interface XcodeProject {
@@ -35,13 +61,17 @@ if (import.meta.main) {
       })
       .option('device', { type: 'string', describe: 'Device UDID; defaults to the only paired physical iPhone' })
       .option('scheme', { type: 'string', describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme' })
-      .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' }),
+      .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' })
+      .option('env', {
+        type: 'string',
+        describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment',
+      }),
     async (argv) => {
       preflight();
-      const dirs = argv.apps.map(resolveAppDir);
+      const plans = argv.apps.map(resolveAppDir).map((dir) => planApp(dir, { scheme: argv.scheme, pull: argv.pull, env: argv.env }));
       const device = selectDevice(argv.device);
       checkPhone(device);
-      for (const dir of dirs) pushApp(dir, device, { scheme: argv.scheme, pull: argv.pull });
+      for (const plan of plans) pushApp(plan, device);
     })
     .parseAsync();
 }
@@ -63,26 +93,119 @@ function resolveAppDir(app: string): string {
   return dir;
 }
 
-function pushApp(dir: string, device: Device, options: { scheme?: string; pull: boolean }) {
+// Everything that can reject an app runs for all apps before the first build starts.
+function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: string }): AppPlan {
   const name = path.basename(dir);
-  const buildDir = path.join(BUILD_ROOT, name);
-  mkdirSync(buildDir, { recursive: true });
-
   const repoRoot = gitRoot(dir);
   if (options.pull && repoRoot) fastForward(repoRoot, name);
   if (repoRoot && (existsSync(path.join(repoRoot, 'bun.lock')) || existsSync(path.join(repoRoot, 'bun.lockb')))) {
     console.log(`Installing ${name} dependencies...`);
     runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${repoRoot}` });
   }
+  const env = selectEnvironment(dir, repoRoot, options.env);
+  return { dir, name, env, project: findProject(dir, options.scheme) };
+}
 
-  const project = findProject(dir, options.scheme);
+function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
+  const result = spawnSync('env-manager', ['info'], { cwd: dir, encoding: 'utf8' });
+  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null;
+  if (result.status === ENV_MANAGER_NOT_INITIALIZED) return null;
+  if (result.status !== 0) throw new Error(`env-manager info failed in ${dir}:\n${(result.stderr || String(result.error)).trim()}`);
+  const info: EnvManagerInfo = JSON.parse(result.stdout);
+  // env-manager walks up to the nearest .env, which can belong to an unrelated parent directory.
+  if (repoRoot && path.relative(repoRoot, info.root).startsWith('..')) return null;
+  return info;
+}
+
+function selectEnvironment(dir: string, repoRoot: string | undefined, requested?: string): EnvSelection | null {
+  const name = path.basename(dir);
+  const info = readEnvManagerInfo(dir, repoRoot);
+  if (!info) {
+    if (requested) throw new Error(`--env ${requested} given, but ${name} has no env-manager setup (or env-manager is not installed).`);
+    return null;
+  }
+  if (info.local) {
+    if (requested) throw new Error(`--env ${requested} given, but ${name} uses env-manager local mode, which has no stored environments.`);
+    console.log(`${name}: env-manager local mode; building with the current local values.`);
+    return null;
+  }
+  if (!info.environments) throw new Error(`Cannot read ${name}'s env-manager environments: ${info.environmentsError}`);
+  const available = info.environments.join(', ') || 'none';
+  if (requested) {
+    if (!info.environments.includes(requested)) throw new Error(`Unknown env-manager environment "${requested}" for ${name}. Available: ${available}`);
+  } else if (!info.environments.length) {
+    console.log(`${name}: no stored env-manager environments; building with the current local values.`);
+    return null;
+  }
+
+  let selected = requested;
+  if (!selected) {
+    const production = info.environments.filter((env) => PRODUCTION_ENVIRONMENT.test(env));
+    if (production.length > 1) throw new Error(`${name} has several production environments (${production.join(', ')}); pass --env.`);
+    selected = production[0] ?? (info.environments.length === 1 ? info.environments[0] : undefined);
+    if (!selected) throw new Error(`${name} has no prod/production env-manager environment and several others (${available}); pass --env.`);
+  }
+  if (info.mode === 'single') {
+    const { current, valuesLoadedFrom } = info.environment;
+    if (current === selected && (valuesLoadedFrom ?? current) === selected) {
+      console.log(`${name}: building with the local values of env-manager environment "${selected}".`);
+      return null;
+    }
+    throw new Error(`${name} needs env-manager environment "${selected}", but its values file holds "${valuesLoadedFrom ?? current}". Single-project setups can only build the loaded environment: run 'env-manager env set ${selected}' in ${info.root}.`);
+  }
+  return {
+    name: selected,
+    root: info.root,
+    current: info.environment.current,
+    children: info.outputs.filter((output) => output.target && output.kind === 'values').map((output) => output.path),
+  };
+}
+
+// `gen --env` rewrites only the target children; restoring their bytes afterwards keeps the
+// checkout on its selected environment without another AWS round trip, even if the build
+// fails or is interrupted.
+function withEnvironment<T>(name: string, env: EnvSelection, build: () => T): T {
+  const snapshot = new Map(env.children.map((file) => [file, existsSync(file) ? readFileSync(file) : null]));
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    for (const [file, content] of snapshot) {
+      if (content) writeFileSync(file, content);
+      else if (existsSync(file)) unlinkSync(file);
+    }
+  };
+  const onSignal = () => {
+    restore();
+    process.exit(130);
+  };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  try {
+    console.log(`Rendering ${name} env-manager environment "${env.name}" (current: "${env.current}", restored after the build)...`);
+    runOrThrow('env-manager', ['gen', '--env', env.name], { cwd: env.root, error: `env-manager gen --env ${env.name} failed in ${env.root}` });
+    return build();
+  } finally {
+    restore();
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+  }
+}
+
+function pushApp({ dir, name, project, env }: AppPlan, device: Device) {
+  const buildDir = path.join(BUILD_ROOT, name);
+  mkdirSync(buildDir, { recursive: true });
+
   const buildLog = path.join(buildDir, 'build.log');
-  console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release)... Log: ${buildLog}`);
-  const build = runLogged('xcodebuild', [
-    project.flag, project.path, '-scheme', project.scheme,
-    '-configuration', 'Release', '-destination', `platform=iOS,id=${device.identifier}`,
-    '-derivedDataPath', buildDir, '-allowProvisioningUpdates', 'build',
-  ], buildLog);
+  const runBuild = () => {
+    console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release)... Log: ${buildLog}`);
+    return runLogged('xcodebuild', [
+      project.flag, project.path, '-scheme', project.scheme,
+      '-configuration', 'Release', '-destination', `platform=iOS,id=${device.identifier}`,
+      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', 'build',
+    ], buildLog);
+  };
+  const build = env ? withEnvironment(name, env, runBuild) : runBuild();
   if (!build.ok) {
     const hint = /provision|signing|certificate|development team/i.test(build.log)
       ? 'Check your Apple account and Signing & Capabilities in Xcode; select your team and automatic signing.'
