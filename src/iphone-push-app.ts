@@ -45,6 +45,7 @@ interface EnvSelection {
 }
 
 interface AppPlan {
+  team?: string;
   dir: string;
   name: string;
   project: XcodeProject;
@@ -67,6 +68,7 @@ if (import.meta.main) {
         describe: `App directories; a bare name resolves to ${CODE_ROOT}/<name>`,
       })
       .option('device', { type: 'string', describe: 'Device UDID; defaults to the only paired physical iPhone' })
+      .option('team', { type: 'string', describe: 'Apple development team ID for projects that do not set one; defaults to the team of your only Apple Development certificate' })
       .option('scheme', { type: 'string', describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme' })
       .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' })
       .option('env', {
@@ -82,7 +84,7 @@ if (import.meta.main) {
     async (argv) => {
       preflight();
       const linkBase = argv.link ? linkBucketUrl() : undefined;
-      const plans = argv.apps.map(resolveAppDir).map((dir) => planApp(dir, { scheme: argv.scheme, pull: argv.pull, env: argv.env }));
+      const plans = argv.apps.map(resolveAppDir).map((dir) => planApp(dir, { scheme: argv.scheme, pull: argv.pull, env: argv.env, team: argv.team }));
       if (linkBase) {
         for (const plan of plans) publishApp(plan, linkBase);
         return;
@@ -112,7 +114,7 @@ function resolveAppDir(app: string): string {
 }
 
 // Everything that can reject an app runs for all apps before the first build starts.
-function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: string }): AppPlan {
+function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: string; team?: string }): AppPlan {
   const name = path.basename(dir);
   const repoRoot = gitRoot(dir);
   if (options.pull && repoRoot) fastForward(repoRoot, name);
@@ -121,7 +123,7 @@ function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: s
     runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${repoRoot}` });
   }
   const env = selectEnvironment(dir, repoRoot, options.env);
-  return { dir, name, env, project: findProject(dir, options.scheme) };
+  return { dir, name, env, team: options.team, project: findProject(dir, options.scheme) };
 }
 
 function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
@@ -221,14 +223,37 @@ function withEnvironment<T>(env: EnvSelection, build: () => T): T {
   }
 }
 
-function xcodebuild({ dir, name, project, env }: AppPlan, buildDir: string, args: string[]) {
+function certificateTeam(): string | undefined {
+  const pem = run('security', ['find-certificate', '-a', '-c', 'Apple Development', '-p']).stdout;
+  const teams = new Set<string>();
+  for (const cert of pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []) {
+    const result = spawnSync('openssl', ['x509', '-noout', '-subject', '-checkend', '0'], { input: cert, encoding: 'utf8' });
+    const team = result.stdout.match(/OU\s*=\s*([A-Z0-9]{10})/)?.[1];
+    if (result.status === 0 && team) teams.add(team);
+  }
+  return teams.size === 1 ? [...teams][0] : undefined;
+}
+
+// Some projects deliberately leave DEVELOPMENT_TEAM out of version control and expect it
+// per machine, so a missing team is filled in and the build retried instead of failing.
+// Returns the team that was passed, if any.
+function xcodebuild({ dir, name, project, env, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
   const buildLog = path.join(buildDir, 'build.log');
-  const runBuild = () => {
-    console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release)... Log: ${buildLog}`);
+  let team = requestedTeam;
+  const runOnce = () => {
+    console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release${team ? `, team ${team}` : ''})... Log: ${buildLog}`);
     return runLogged('xcodebuild', [
       project.flag, project.path, '-scheme', project.scheme, '-configuration', 'Release',
-      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args,
+      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args, ...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
     ], buildLog);
+  };
+  const runBuild = () => {
+    const first = runOnce();
+    if (first.ok || team || !/requires a development team/i.test(first.log)) return first;
+    team = certificateTeam();
+    if (!team) throw new Error(`${name} does not set a development team and none could be picked from your Apple Development certificates; pass --team <TEAM_ID>.`);
+    console.log(`${name} does not set a development team; using ${team} from your Apple Development certificate.`);
+    return runOnce();
   };
   const build = env ? withEnvironment(env, runBuild) : runBuild();
   if (!build.ok) {
@@ -239,6 +264,7 @@ function xcodebuild({ dir, name, project, env }: AppPlan, buildDir: string, args
         : 'Open the project in Xcode and build the Release scheme to see the compiler error.';
     throw new Error(`Build failed; see ${buildLog}. Nothing was installed for ${name}.\n${hint}`);
   }
+  return team;
 }
 
 function plistValue(plist: string, key: string): string | undefined {
@@ -274,12 +300,12 @@ function publishApp(plan: AppPlan, linkBase: string) {
   const archivePath = path.join(buildDir, `${project.scheme}.xcarchive`);
   const exportPath = path.join(buildDir, 'export');
   mkdirSync(buildDir, { recursive: true });
-  xcodebuild(plan, buildDir, ['-destination', 'generic/platform=iOS', '-archivePath', archivePath, 'archive']);
+  const team = xcodebuild(plan, buildDir, ['-destination', 'generic/platform=iOS', '-archivePath', archivePath, 'archive']);
 
   const optionsPath = path.join(buildDir, 'ExportOptions.plist');
   writeFileSync(optionsPath, `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>method</key><string>debugging</string><key>signingStyle</key><string>automatic</string></dict></plist>
+<plist version="1.0"><dict><key>method</key><string>debugging</string><key>signingStyle</key><string>automatic</string>${team ? `<key>teamID</key><string>${team}</string>` : ''}</dict></plist>
 `);
   const exportLog = path.join(buildDir, 'export.log');
   console.log(`Exporting ${name}... Log: ${exportLog}`);
