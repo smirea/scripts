@@ -27,14 +27,17 @@ interface EnvManagerInfo {
   environment: { current: string; valuesLoadedFrom: string | null };
   environments: string[] | null;
   environmentsError: string | null;
+  storedSchema: 'in-sync' | 'differs' | 'missing' | null;
+  values: { path: string };
   outputs: { target: string | null; kind: 'values' | 'reader'; path: string }[];
 }
 
 interface EnvSelection {
   name: string;
   root: string;
-  current: string;
-  children: string[];
+  args: string[];
+  description: string;
+  restore: string[];
 }
 
 interface AppPlan {
@@ -145,27 +148,38 @@ function selectEnvironment(dir: string, repoRoot: string | undefined, requested?
     selected = production[0] ?? (info.environments.length === 1 ? info.environments[0] : undefined);
     if (!selected) throw new Error(`${name} has no prod/production env-manager environment and several others (${available}); pass --env.`);
   }
-  if (info.mode === 'single') {
-    const { current, valuesLoadedFrom } = info.environment;
-    if (current === selected && (valuesLoadedFrom ?? current) === selected) {
-      console.log(`${name}: building with the local values of env-manager environment "${selected}".`);
-      return null;
-    }
-    throw new Error(`${name} needs env-manager environment "${selected}", but its values file holds "${valuesLoadedFrom ?? current}". Single-project setups can only build the loaded environment: run 'env-manager env set ${selected}' in ${info.root}.`);
+  const { current, valuesLoadedFrom } = info.environment;
+  if (info.mode === 'targets') {
+    return {
+      name: selected,
+      root: info.root,
+      args: ['gen', '--env', selected],
+      description: `Rendering ${name} env-manager environment "${selected}" (current: "${current}", restored after the build)`,
+      restore: info.outputs.filter((output) => output.target && output.kind === 'values').map((output) => output.path),
+    };
+  }
+
+  // Single-project values files are the build input, so they come from `down`. It also
+  // replaces .env with the stored schema, which would silently regress a newer local one.
+  if (info.storedSchema !== 'in-sync') {
+    throw new Error(`${name}'s .env differs from the schema stored in AWS, and env-manager down would replace it. In ${info.root}, run 'env-manager up' if the local .env is newer or 'env-manager down' if AWS is, then retry.`);
+  }
+  if (current === selected && (valuesLoadedFrom ?? current) === selected) {
+    return { name: selected, root: info.root, args: ['down'], description: `Downloading ${name} env-manager environment "${selected}"`, restore: [] };
   }
   return {
     name: selected,
     root: info.root,
-    current: info.environment.current,
-    children: info.outputs.filter((output) => output.target && output.kind === 'values').map((output) => output.path),
+    args: ['down', '--env', selected],
+    description: `Downloading ${name} env-manager environment "${selected}" (current: "${current}", restored after the build)`,
+    restore: [...new Set([info.values.path, path.join(info.root, '.env.local')])],
   };
 }
 
-// `gen --env` rewrites only the target children; restoring their bytes afterwards keeps the
-// checkout on its selected environment without another AWS round trip, even if the build
-// fails or is interrupted.
-function withEnvironment<T>(name: string, env: EnvSelection, build: () => T): T {
-  const snapshot = new Map(env.children.map((file) => [file, existsSync(file) ? readFileSync(file) : null]));
+// Restoring the touched files byte for byte keeps the checkout on its selected environment
+// without another AWS round trip, even if the build fails or is interrupted.
+function withEnvironment<T>(env: EnvSelection, build: () => T): T {
+  const snapshot = new Map(env.restore.map((file) => [file, existsSync(file) ? readFileSync(file) : null]));
   let restored = false;
   const restore = () => {
     if (restored) return;
@@ -182,8 +196,8 @@ function withEnvironment<T>(name: string, env: EnvSelection, build: () => T): T 
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
-    console.log(`Rendering ${name} env-manager environment "${env.name}" (current: "${env.current}", restored after the build)...`);
-    runOrThrow('env-manager', ['gen', '--env', env.name], { cwd: env.root, error: `env-manager gen --env ${env.name} failed in ${env.root}` });
+    console.log(`${env.description}...`);
+    runOrThrow('env-manager', env.args, { cwd: env.root, error: `env-manager ${env.args.join(' ')} failed in ${env.root}` });
     return build();
   } finally {
     restore();
@@ -205,7 +219,7 @@ function pushApp({ dir, name, project, env }: AppPlan, device: Device) {
       '-derivedDataPath', buildDir, '-allowProvisioningUpdates', 'build',
     ], buildLog);
   };
-  const build = env ? withEnvironment(name, env, runBuild) : runBuild();
+  const build = env ? withEnvironment(env, runBuild) : runBuild();
   if (!build.ok) {
     const hint = /provision|signing|certificate|development team/i.test(build.log)
       ? 'Check your Apple account and Signing & Capabilities in Xcode; select your team and automatic signing.'
