@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
+import chalk from 'chalk';
 import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -14,6 +15,7 @@ const ENV_MANAGER_NOT_INITIALIZED = 3;
 // Public r2.dev bucket with a 7-day expiry rule; uploads sit under an unguessable random prefix.
 const LINK_BUCKET = 'iphone-push-app';
 const LINK_EXPIRY_DAYS = 7;
+const LABEL_WIDTH = 9;
 
 interface Device {
   identifier: string;
@@ -40,7 +42,6 @@ interface EnvSelection {
   name: string;
   root: string;
   args: string[];
-  description: string;
   restore: string[];
 }
 
@@ -89,48 +90,51 @@ if (import.meta.main) {
         for (const plan of plans) publishApp(plan, linkBase);
         return;
       }
-      const device = selectDevice(argv.device);
-      checkPhone(device);
+      header('iPhone');
+      const device = task('device', argv.device ?? 'paired iPhone', () => selectDevice(argv.device), (d) => d.name);
+      task('reach', 'lock state', () => checkPhone(device), () => 'unlocked');
       for (const plan of plans) pushApp(plan, device);
     })
     .parseAsync();
 }
 
 function preflight() {
-  if (process.platform !== 'darwin') throw new Error('Run this on a Mac with Xcode installed.');
+  if (process.platform !== 'darwin') throw new Error('Needs macOS with Xcode.');
   if (run('xcodebuild', ['-version']).status !== 0) {
-    throw new Error('Xcode is not ready. Open Xcode, finish its first-run setup, and select it in Xcode > Settings > Locations > Command Line Tools.');
+    throw new Error('Xcode is not set up. Open it once, then select it under Settings > Locations > Command Line Tools.');
   }
   if (run('xcrun', ['--find', 'devicectl']).status !== 0) {
-    throw new Error('The selected Xcode does not provide devicectl. Select your current Xcode in Settings > Locations.');
+    throw new Error('The selected Xcode has no devicectl. Select a current Xcode under Settings > Locations.');
   }
   mkdirSync(BUILD_ROOT, { recursive: true });
 }
 
 function resolveAppDir(app: string): string {
   const dir = app.includes('/') || app.startsWith('.') ? path.resolve(app.replace(/^~(?=\/|$)/, os.homedir())) : path.join(CODE_ROOT, app);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`App directory not found: ${dir}`);
+  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`No app directory at ${tilde(dir)}.`);
   return dir;
 }
 
 // Everything that can reject an app runs for all apps before the first build starts.
 function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: string; team?: string }): AppPlan {
   const name = path.basename(dir);
+  header(name, tilde(dir));
   const repoRoot = gitRoot(dir);
-  if (options.pull && repoRoot) fastForward(repoRoot, name);
+  if (options.pull && repoRoot) task('git', 'pull --ff-only', () => fastForward(repoRoot), (summary) => summary);
   if (repoRoot && (existsSync(path.join(repoRoot, 'bun.lock')) || existsSync(path.join(repoRoot, 'bun.lockb')))) {
-    console.log(`Installing ${name} dependencies...`);
-    runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${repoRoot}` });
+    task('deps', 'bun install', () => runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${tilde(repoRoot)}` }));
   }
   const env = selectEnvironment(dir, repoRoot, options.env);
-  return { dir, name, env, team: options.team, project: findProject(dir, options.scheme) };
+  const project = findProject(dir, options.scheme);
+  line('project', `${path.relative(dir, project.path) || project.path} ${chalk.dim('·')} scheme ${project.scheme}`);
+  return { dir, name, env, team: options.team, project };
 }
 
 function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
   const result = spawnSync('env-manager', ['info'], { cwd: dir, encoding: 'utf8' });
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null;
   if (result.status === ENV_MANAGER_NOT_INITIALIZED) return null;
-  if (result.status !== 0) throw new Error(`env-manager info failed in ${dir}:\n${(result.stderr || String(result.error)).trim()}`);
+  if (result.status !== 0) throw new Error(`env-manager info failed in ${tilde(dir)}:\n${(result.stderr || String(result.error)).trim()}`);
   const info: EnvManagerInfo = JSON.parse(result.stdout);
   // env-manager walks up to the nearest .env, which can belong to an unrelated parent directory.
   if (repoRoot && path.relative(repoRoot, info.root).startsWith('..')) return null;
@@ -141,37 +145,39 @@ function selectEnvironment(dir: string, repoRoot: string | undefined, requested?
   const name = path.basename(dir);
   const info = readEnvManagerInfo(dir, repoRoot);
   if (!info) {
-    if (requested) throw new Error(`--env ${requested} given, but ${name} has no env-manager setup (or env-manager is not installed).`);
+    if (requested) throw new Error(`--env ${requested}: ${name} has no env-manager setup (or env-manager is not installed).`);
+    line('env', chalk.dim('no env-manager setup'));
     return null;
   }
   if (info.local) {
-    if (requested) throw new Error(`--env ${requested} given, but ${name} uses env-manager local mode, which has no stored environments.`);
-    console.log(`${name}: env-manager local mode; building with the current local values.`);
+    if (requested) throw new Error(`--env ${requested}: ${name} uses env-manager local mode, which has no stored environments.`);
+    line('env', `current local values ${chalk.dim('(local mode)')}`);
     return null;
   }
-  if (!info.environments) throw new Error(`Cannot read ${name}'s env-manager environments: ${info.environmentsError}`);
+  if (!info.environments) throw new Error(`Can't read ${name}'s env-manager environments: ${info.environmentsError}`);
   const available = info.environments.join(', ') || 'none';
   if (requested) {
-    if (!info.environments.includes(requested)) throw new Error(`Unknown env-manager environment "${requested}" for ${name}. Available: ${available}`);
+    if (!info.environments.includes(requested)) throw new Error(`Unknown environment "${requested}" for ${name}. Available: ${available}.`);
   } else if (!info.environments.length) {
-    console.log(`${name}: no stored env-manager environments; building with the current local values.`);
+    line('env', `current local values ${chalk.dim('(none stored)')}`);
     return null;
   }
 
   let selected = requested;
   if (!selected) {
     const production = info.environments.filter((env) => PRODUCTION_ENVIRONMENT.test(env));
-    if (production.length > 1) throw new Error(`${name} has several production environments (${production.join(', ')}); pass --env.`);
+    if (production.length > 1) throw new Error(`${name} has several production environments (${production.join(', ')}); pick one with --env.`);
     selected = production[0] ?? (info.environments.length === 1 ? info.environments[0] : undefined);
-    if (!selected) throw new Error(`${name} has no prod/production env-manager environment and several others (${available}); pass --env.`);
+    if (!selected) throw new Error(`${name} has no prod environment; pick one with --env. Available: ${available}.`);
   }
   const { current, valuesLoadedFrom } = info.environment;
+  const restored = chalk.dim(`(currently ${current}, restored after the build)`);
   if (info.mode === 'targets') {
+    line('env', `${selected} ${restored}`);
     return {
       name: selected,
       root: info.root,
       args: ['gen', '--env', selected],
-      description: `Rendering ${name} env-manager environment "${selected}" (current: "${current}", restored after the build)`,
       restore: info.outputs.filter((output) => output.target && output.kind === 'values').map((output) => output.path),
     };
   }
@@ -179,16 +185,20 @@ function selectEnvironment(dir: string, repoRoot: string | undefined, requested?
   // Single-project values files are the build input, so they come from `down`. It also
   // replaces .env with the stored schema, which would silently regress a newer local one.
   if (info.storedSchema !== 'in-sync') {
-    throw new Error(`${name}'s .env differs from the schema stored in AWS, and env-manager down would replace it. In ${info.root}, run 'env-manager up' if the local .env is newer or 'env-manager down' if AWS is, then retry.`);
+    throw new Error([
+      `${name}'s .env differs from the schema stored in AWS, so env-manager down would overwrite it.`,
+      `In ${tilde(info.root)}, run env-manager up (local is newer) or env-manager down (AWS is newer), then retry.`,
+    ].join('\n'));
   }
   if (current === selected && (valuesLoadedFrom ?? current) === selected) {
-    return { name: selected, root: info.root, args: ['down'], description: `Downloading ${name} env-manager environment "${selected}"`, restore: [] };
+    line('env', selected);
+    return { name: selected, root: info.root, args: ['down'], restore: [] };
   }
+  line('env', `${selected} ${restored}`);
   return {
     name: selected,
     root: info.root,
     args: ['down', '--env', selected],
-    description: `Downloading ${name} env-manager environment "${selected}" (current: "${current}", restored after the build)`,
     restore: [...new Set([info.values.path, path.join(info.root, '.env.local')])],
   };
 }
@@ -213,8 +223,8 @@ function withEnvironment<T>(env: EnvSelection, build: () => T): T {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
-    console.log(`${env.description}...`);
-    runOrThrow('env-manager', env.args, { cwd: env.root, error: `env-manager ${env.args.join(' ')} failed in ${env.root}` });
+    const command = `env-manager ${env.args.join(' ')}`;
+    task('env', command, () => runOrThrow('env-manager', env.args, { cwd: env.root, error: `${command} failed in ${tilde(env.root)}` }));
     return build();
   } finally {
     restore();
@@ -237,32 +247,29 @@ function certificateTeam(): string | undefined {
 // Some projects deliberately leave DEVELOPMENT_TEAM out of version control and expect it
 // per machine, so a missing team is filled in and the build retried instead of failing.
 // Returns the team that was passed, if any.
-function xcodebuild({ dir, name, project, env, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
+function xcodebuild({ name, project, env, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
   const buildLog = path.join(buildDir, 'build.log');
   let team = requestedTeam;
-  const runOnce = () => {
-    console.log(`Building ${name} (${path.relative(dir, project.path) || project.path}, scheme ${project.scheme}, Release${team ? `, team ${team}` : ''})... Log: ${buildLog}`);
-    return runLogged('xcodebuild', [
-      project.flag, project.path, '-scheme', project.scheme, '-configuration', 'Release',
-      '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args, ...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
-    ], buildLog);
-  };
+  const runOnce = () => task('build', `Release${team ? ` ${chalk.dim('·')} team ${team}` : ''}`, () => runLogged('xcodebuild', [
+    project.flag, project.path, '-scheme', project.scheme, '-configuration', 'Release',
+    '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args, ...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
+  ], buildLog));
   const runBuild = () => {
     const first = runOnce();
     if (first.ok || team || !/requires a development team/i.test(first.log)) return first;
     team = certificateTeam();
-    if (!team) throw new Error(`${name} does not set a development team and none could be picked from your Apple Development certificates; pass --team <TEAM_ID>.`);
-    console.log(`${name} does not set a development team; using ${team} from your Apple Development certificate.`);
+    if (!team) throw new Error(`${name} sets no development team, and your Apple Development certificates don't name exactly one. Pass --team <TEAM_ID>.`);
+    line('team', `${team} ${chalk.dim('(project sets none; taken from your Apple Development certificate)')}`);
     return runOnce();
   };
   const build = env ? withEnvironment(env, runBuild) : runBuild();
   if (!build.ok) {
     const hint = /provision|signing|certificate|development team/i.test(build.log)
-      ? 'Check your Apple account and Signing & Capabilities in Xcode; select your team and automatic signing.'
+      ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
       : /destination|device.*unavailable|device.*locked/i.test(build.log)
-        ? 'Reconnect and unlock your iPhone, then retry.'
-        : 'Open the project in Xcode and build the Release scheme to see the compiler error.';
-    throw new Error(`Build failed; see ${buildLog}. Nothing was installed for ${name}.\n${hint}`);
+        ? 'Reconnect and unlock the iPhone, then retry.'
+        : 'Build the Release scheme in Xcode to see the error.';
+    throw new Error(`Build failed for ${name}; nothing was installed.\nLog: ${tilde(buildLog)}\n${hint}`);
   }
   return team;
 }
@@ -277,7 +284,7 @@ function linkBucketUrl(): string {
   const url = result.stdout.match(/https:\/\/pub-[a-z0-9]+\.r2\.dev/)?.[0];
   if (result.status !== 0 || !url) {
     throw new Error([
-      `--link needs the public R2 bucket "${LINK_BUCKET}" (wrangler must be installed and logged in). Set it up once with:`,
+      `--link needs the public R2 bucket "${LINK_BUCKET}" and a logged-in wrangler. One-time setup:`,
       `  wrangler r2 bucket create ${LINK_BUCKET}`,
       `  wrangler r2 bucket dev-url enable ${LINK_BUCKET} --force`,
       `  wrangler r2 bucket lifecycle add ${LINK_BUCKET} expire-builds --expire-days ${LINK_EXPIRY_DAYS} --force`,
@@ -300,6 +307,7 @@ function publishApp(plan: AppPlan, linkBase: string) {
   const archivePath = path.join(buildDir, `${project.scheme}.xcarchive`);
   const exportPath = path.join(buildDir, 'export');
   mkdirSync(buildDir, { recursive: true });
+  header(name, 'install link');
   const team = xcodebuild(plan, buildDir, ['-destination', 'generic/platform=iOS', '-archivePath', archivePath, 'archive']);
 
   const optionsPath = path.join(buildDir, 'ExportOptions.plist');
@@ -308,16 +316,15 @@ function publishApp(plan: AppPlan, linkBase: string) {
 <plist version="1.0"><dict><key>method</key><string>debugging</string><key>signingStyle</key><string>automatic</string>${team ? `<key>teamID</key><string>${team}</string>` : ''}</dict></plist>
 `);
   const exportLog = path.join(buildDir, 'export.log');
-  console.log(`Exporting ${name}... Log: ${exportLog}`);
-  const exported = runLogged('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportPath, '-exportOptionsPlist', optionsPath, '-allowProvisioningUpdates'], exportLog);
-  if (!exported.ok) throw new Error(`Export failed; see ${exportLog}. Check that your iPhone is registered to your team in Xcode > Settings > Accounts.`);
+  const exported = task('export', 'development .ipa', () => runLogged('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportPath, '-exportOptionsPlist', optionsPath, '-allowProvisioningUpdates'], exportLog));
+  if (!exported.ok) throw new Error(`Export failed for ${name}.\nLog: ${tilde(exportLog)}\nCheck that the iPhone is registered to your team (Xcode > Settings > Accounts).`);
   const ipa = readdirSync(exportPath).find((entry) => entry.endsWith('.ipa'));
-  if (!ipa) throw new Error(`No .ipa found in ${exportPath}.`);
+  if (!ipa) throw new Error(`Export produced no .ipa in ${tilde(exportPath)}.`);
 
   const appsDir = path.join(archivePath, 'Products/Applications');
   const infoPlist = path.join(findBuiltApp(appsDir, project.scheme), 'Info.plist');
   const bundleId = plistValue(infoPlist, 'CFBundleIdentifier');
-  if (!bundleId) throw new Error(`Could not read the bundle identifier from ${infoPlist}`);
+  if (!bundleId) throw new Error(`No bundle identifier in ${tilde(infoPlist)}.`);
   const version = plistValue(infoPlist, 'CFBundleShortVersionString') ?? '1.0';
   const build = plistValue(infoPlist, 'CFBundleVersion');
   const title = plistValue(infoPlist, 'CFBundleDisplayName') ?? plistValue(infoPlist, 'CFBundleName') ?? name;
@@ -341,40 +348,44 @@ function publishApp(plan: AppPlan, linkBase: string) {
   writeFileSync(path.join(buildDir, 'manifest.plist'), manifest);
   writeFileSync(path.join(buildDir, 'index.html'), page);
 
-  console.log(`Uploading ${name}...`);
-  for (const [file, local, contentType] of [
+  const uploads = [
     ['app.ipa', path.join(exportPath, ipa), 'application/octet-stream'],
     ['manifest.plist', path.join(buildDir, 'manifest.plist'), 'text/xml'],
     ['index.html', path.join(buildDir, 'index.html'), 'text/html; charset=utf-8'],
-  ] as const) {
-    runOrThrow('wrangler', ['r2', 'object', 'put', `${LINK_BUCKET}/${prefix}/${file}`, '--file', local, '--content-type', contentType, '--remote'], {
-      error: `Uploading ${file} to R2 failed`,
-    });
-  }
-  console.log(`${name} (${label}) is ready to install for ${LINK_EXPIRY_DAYS} days. Open on your iPhone:\n${url('index.html')}`);
+  ] as const;
+  task('upload', `R2 bucket ${LINK_BUCKET}`, () => {
+    for (const [file, local, contentType] of uploads) {
+      runOrThrow('wrangler', ['r2', 'object', 'put', `${LINK_BUCKET}/${prefix}/${file}`, '--file', local, '--content-type', contentType, '--remote'], {
+        error: `Uploading ${file} to R2 failed.`,
+      });
+    }
+  });
+  line('ready', `${label} ${chalk.dim(`· expires in ${LINK_EXPIRY_DAYS} days`)}`);
+  line('', chalk.bold.underline(url('index.html')));
 }
 
 function pushApp(plan: AppPlan, device: Device) {
   const { name, project } = plan;
   const buildDir = path.join(BUILD_ROOT, name);
   mkdirSync(buildDir, { recursive: true });
+  header(name, device.name);
   xcodebuild(plan, buildDir, ['-destination', `platform=iOS,id=${device.identifier}`, 'build']);
 
   const appPath = findBuiltApp(path.join(buildDir, 'Build/Products/Release-iphoneos'), project.scheme);
   const bundleId = runOrThrow('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Info.plist')], {
-    error: `Could not read the bundle identifier of ${appPath}`,
+    error: `No bundle identifier in ${tilde(appPath)}.`,
   }).trim();
 
-  checkPhone(device);
-  console.log(`Installing ${name} (${bundleId}) on ${device.name}...`);
   const installLog = path.join(buildDir, 'install.log');
-  const install = runLogged('xcrun', ['devicectl', 'device', 'install', 'app', '--device', device.identifier, '--timeout', '180', appPath], installLog);
-  if (!install.ok) deviceFailure(`${name} could not be installed`, installLog, install.log);
+  const install = task('install', bundleId, () => {
+    checkPhone(device);
+    return runLogged('xcrun', ['devicectl', 'device', 'install', 'app', '--device', device.identifier, '--timeout', '180', appPath], installLog);
+  });
+  if (!install.ok) deviceFailure(`Install failed for ${name}`, installLog, install.log);
 
   const launchLog = path.join(buildDir, 'launch.log');
-  const launch = runLogged('xcrun', ['devicectl', 'device', 'process', 'launch', '--device', device.identifier, '--timeout', '30', '--terminate-existing', bundleId], launchLog);
-  if (!launch.ok) deviceFailure(`${name} was installed, but automatic launch failed. Try opening it manually`, launchLog, launch.log);
-  console.log(`${name} updated and launched.`);
+  const launch = task('launch', bundleId, () => runLogged('xcrun', ['devicectl', 'device', 'process', 'launch', '--device', device.identifier, '--timeout', '30', '--terminate-existing', bundleId], launchLog));
+  if (!launch.ok) deviceFailure(`${name} is installed, but launching it failed; open it manually`, launchLog, launch.log);
 }
 
 function gitRoot(dir: string): string | undefined {
@@ -382,13 +393,17 @@ function gitRoot(dir: string): string | undefined {
   return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
-function fastForward(repoRoot: string, name: string) {
-  console.log(`Fast-forwarding ${name}...`);
+function fastForward(repoRoot: string): string {
+  const head = () => run('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD']).stdout.trim();
+  const before = head();
   const result = run('git', ['-C', repoRoot, 'pull', '--ff-only']);
   if (result.status !== 0) {
-    throw new Error(`git pull --ff-only failed in ${repoRoot}. Resolve it manually or pass --no-pull.\n${result.stderr.trim()}`);
+    throw new Error(`git pull --ff-only failed in ${tilde(repoRoot)}. Resolve it, or pass --no-pull.\n${result.stderr.trim()}`);
   }
-  console.log(result.stdout.trim());
+  const after = head();
+  if (before === after) return 'up to date';
+  const count = Number(run('git', ['-C', repoRoot, 'rev-list', '--count', `${before}..${after}`]).stdout.trim());
+  return `${count} new commit${count === 1 ? '' : 's'} (${before}..${after})`;
 }
 
 function findProject(dir: string, scheme?: string): XcodeProject {
@@ -403,9 +418,9 @@ function findProject(dir: string, scheme?: string): XcodeProject {
       .flatMap((entry) => candidates(path.join(dir, entry.name)));
   }
   const projectPath = found[0];
-  if (!projectPath) throw new Error(`No .xcodeproj or .xcworkspace found in ${dir} or its immediate subdirectories.`);
+  if (!projectPath) throw new Error(`No .xcodeproj or .xcworkspace in ${tilde(dir)} or one level down.`);
   if (new Set(found.map((p) => path.dirname(p))).size > 1) {
-    throw new Error(`Multiple Xcode projects found; pass the directory containing the one you want:\n${found.join('\n')}`);
+    throw new Error(`Several Xcode projects found; pass the directory of the one you want:\n${found.map((p) => `  ${tilde(p)}`).join('\n')}`);
   }
 
   const flag = projectPath.endsWith('.xcworkspace') ? '-workspace' : '-project';
@@ -415,21 +430,20 @@ function findProject(dir: string, scheme?: string): XcodeProject {
   const schemes: string[] = info?.schemes ?? [];
   const projectName = path.basename(projectPath).replace(/\.(xcworkspace|xcodeproj)$/, '');
   const picked = schemes.find((s) => s === (info?.name ?? projectName)) ?? (schemes.length === 1 ? schemes[0] : undefined);
-  if (!picked) throw new Error(`Cannot pick a scheme for ${projectPath}; pass --scheme. Available: ${schemes.join(', ') || 'none'}`);
+  if (!picked) throw new Error(`Can't pick a scheme for ${tilde(projectPath)}; pass --scheme. Available: ${schemes.join(', ') || 'none'}.`);
   return { flag, path: projectPath, scheme: picked };
 }
 
 function findBuiltApp(productsDir: string, scheme: string): string {
   const apps = existsSync(productsDir) ? readdirSync(productsDir).filter((entry) => entry.endsWith('.app')) : [];
   const app = apps.length === 1 ? apps[0] : apps.find((entry) => entry === `${scheme}.app`);
-  if (!app) throw new Error(`Cannot find the built app in ${productsDir} (found: ${apps.join(', ') || 'none'}).`);
+  if (!app) throw new Error(`No built app in ${tilde(productsDir)} (found: ${apps.join(', ') || 'none'}).`);
   return path.join(productsDir, app);
 }
 
 function selectDevice(requested?: string): Device {
   const output = path.join(BUILD_ROOT, 'devices.json');
   const log = path.join(BUILD_ROOT, 'device-check.log');
-  console.log('Checking iPhone connection...');
   const list = runLogged('xcrun', ['devicectl', 'list', 'devices', '--timeout', '20', '--json-output', output], log);
   if (!list.ok) deviceFailure('Xcode could not list devices', log, list.log);
 
@@ -451,19 +465,21 @@ function selectDevice(requested?: string): Device {
   let device: Device | undefined;
   if (requested) {
     device = devices.find((d) => requested === d.identifier || requested === d.udid);
-    if (!device) throw new Error(`Phone not found: ${requested}. Connect it by USB and unlock it. Run 'xcrun devicectl list devices' to check the UDID.`);
+    if (!device) throw new Error(`No device ${requested}. Connect it by USB and unlock it; list UDIDs with xcrun devicectl list devices.`);
     if (!device.physicalIOS) throw new Error(`${device.name} is not a physical iOS device.`);
   } else {
     const phones = devices.filter((d) => d.physicalIOS && d.paired);
     if (phones.length !== 1) {
+      const ids = phones.map((d) => d.udid ?? d.identifier);
+      const width = Math.max(0, ...ids.map((id) => id.length));
       throw new Error(phones.length
-        ? `Multiple paired iPhones; pass --device:\n${phones.map((d) => `  ${d.udid ?? d.identifier}  ${d.name}`).join('\n')}`
-        : 'No paired iPhone found. Connect it by USB, unlock it, accept Trust This Computer, and pair it in Xcode.');
+        ? `Several paired iPhones; pick one with --device:\n${phones.map((d, i) => `  ${ids[i]!.padEnd(width)}  ${d.name}`).join('\n')}`
+        : 'No paired iPhone. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.');
     }
     device = phones[0]!;
   }
-  if (!device.paired) throw new Error(`${device.name} is not paired. Connect it by USB, unlock it, accept Trust This Computer, and pair it in Xcode.`);
-  if (device.developerModeDisabled) throw new Error('Enable Developer Mode in iPhone Settings > Privacy & Security, complete the restart, and retry.');
+  if (!device.paired) throw new Error(`${device.name} is not paired. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.`);
+  if (device.developerModeDisabled) throw new Error('Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the iPhone, and retry.');
   return device;
 }
 
@@ -472,27 +488,27 @@ function checkPhone(device: Device) {
   const log = path.join(BUILD_ROOT, 'device-check.log');
   // A disconnected tunnel in the device list can reconnect on demand, so probe the phone directly.
   const probe = runLogged('xcrun', ['devicectl', 'device', 'info', 'lockState', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
-  if (!probe.ok) deviceFailure(`${device.name} is paired, but Xcode could not reach it`, log, probe.log);
+  if (!probe.ok) deviceFailure(`${device.name} is paired but unreachable`, log, probe.log);
   const state = JSON.parse(readFileSync(output, 'utf8')).result;
   if (!('passcodeRequired' in state) && !('unlockedSinceBoot' in state)) {
-    throw new Error('Xcode returned an unknown lock status. Unlock your phone and check it in Xcode.');
+    throw new Error('Xcode reported an unknown lock state. Unlock the iPhone and check it in Xcode.');
   }
   if (state.passcodeRequired === true || state.unlockedSinceBoot === false) {
-    throw new Error('Your iPhone needs unlocking. Enter its passcode, keep it awake, and retry.');
+    throw new Error('The iPhone is locked. Unlock it, keep it awake, and retry.');
   }
 }
 
 function deviceFailure(stage: string, logPath: string, log: string): never {
   const hint = /locked|passcode|unlock/i.test(log)
-    ? 'Unlock your iPhone with its passcode, keep it awake, and retry.'
+    ? 'Unlock the iPhone, keep it awake, and retry.'
     : /developer mode/i.test(log)
-      ? 'Enable Developer Mode in iPhone Settings > Privacy & Security, complete the restart, and retry.'
+      ? 'Turn on Developer Mode in Settings > Privacy & Security, restart the iPhone, and retry.'
       : /provision|signature|signing|certificate|integrity/i.test(log)
-        ? 'Open the project in Xcode and check Signing & Capabilities: select your team and automatic signing.'
+        ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
         : /space|storage/i.test(log)
-          ? 'Check free storage in iPhone Settings > General > iPhone Storage.'
-          : 'Connect the iPhone by USB, unlock it, and accept Trust This Computer. Check that it appears in Xcode\'s device window. Same-tailnet connectivity alone is not sufficient.';
-  throw new Error(`${stage}. Details: ${logPath}\n${hint}`);
+          ? 'Free up storage under Settings > General > iPhone Storage.'
+          : 'Connect the iPhone by USB, unlock it, and tap Trust; it must show up in Xcode > Devices. Being on the same tailnet is not enough.';
+  throw new Error(`${stage}.\nLog: ${tilde(logPath)}\n${hint}`);
 }
 
 function run(command: string, args: string[], cwd?: string) {
@@ -511,4 +527,47 @@ function runLogged(command: string, args: string[], logPath: string) {
   const result = spawnSync(command, args, { stdio: ['ignore', fd, fd] });
   closeSync(fd);
   return { ok: !result.error && result.status === 0, log: readFileSync(logPath, 'utf8') };
+}
+
+function tilde(file: string): string {
+  return file.startsWith(os.homedir()) ? `~${file.slice(os.homedir().length)}` : file;
+}
+
+function header(title: string, detail?: string) {
+  console.log(`\n${chalk.bold(title)}${detail ? chalk.dim(` ${detail}`) : ''}`);
+}
+
+function labelled(label: string, detail: string): string {
+  return `  ${chalk.cyan(label.padEnd(LABEL_WIDTH))}${detail}`;
+}
+
+function line(label: string, detail: string) {
+  console.log(labelled(label, detail));
+}
+
+function elapsed(since: number): string {
+  const seconds = (Date.now() - since) / 1000;
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return `${Math.floor(seconds / 60)}m${String(Math.round(seconds % 60)).padStart(2, '0')}s`;
+}
+
+// Prints the step up front so long builds show what is running, then appends the outcome
+// on the same line; work must not log. A `{ ok: false }` result counts as a failure.
+function task<T>(label: string, detail: string, work: () => T, summarize?: (result: T) => string): T {
+  process.stdout.write(`${labelled(label, detail)}  `);
+  const started = Date.now();
+  const finish = (ok: boolean, note?: string) => {
+    const mark = ok ? chalk.green('✓') : chalk.red('✗');
+    process.stdout.write(`${mark}${note ? ` ${note}` : ''} ${chalk.dim(elapsed(started))}\n`);
+  };
+  try {
+    const result = work();
+    const ok = (result as { ok?: boolean } | undefined)?.ok !== false;
+    finish(ok, ok && summarize ? summarize(result) : undefined);
+    return result;
+  } catch (error) {
+    finish(false);
+    throw error;
+  }
 }

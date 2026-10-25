@@ -3,7 +3,7 @@ import fs, { writeSync } from 'fs';
 import { inspect } from 'node:util';
 import path from 'path';
 
-import chalk from 'chalk';
+import chalk, { chalkStderr } from 'chalk';
 import { formatDate } from 'date-fns';
 import _ from 'lodash';
 
@@ -29,7 +29,7 @@ export function createScript(name: string, args = hideBin(process.argv), localDe
   };
   const fail = (error: unknown): never => {
     if (!exitProcess) throw error;
-    writeSync(process.stderr.fd, `${error instanceof Error ? error.message : String(error)}\n`);
+    writeSync(process.stderr.fd, `\n${chalkStderr.red(error instanceof Error ? error.message : String(error))}\n`);
     if (error && typeof error === 'object' && 'data' in error) writeSync(process.stderr.fd, `error.data = ${inspect(error.data)}\n`);
     process.exit(1);
   };
@@ -105,8 +105,9 @@ export function createScript(name: string, args = hideBin(process.argv), localDe
   return parser;
 }
 
+// yargs only passes an error for exceptions from handlers; help is noise for those.
 function failWithFullHelp(message: string, error: Error, parser: Argv): never {
-  parser.showHelp(help => writeSync(process.stderr.fd, `${help}\n`));
+  if (!error) parser.showHelp(help => writeSync(process.stderr.fd, `${help}\n`));
   throw error ?? new Error(message);
 }
 
