@@ -24,7 +24,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'cron-bgstats-sync', source: 'src/cron-bgstats-sync.ts' },
   { name: 'email-inbox', source: 'src/email-inbox.ts' },
   { name: 'sms-inbox', source: 'src/sms-inbox.ts' },
-  { name: 'iphone-push-app', source: 'src/iphone-push-app.ts' },
+  { name: 'iphone-deploy', source: 'src/iphone-deploy.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {

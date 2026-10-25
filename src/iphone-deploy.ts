@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import chalk from 'chalk';
+import type { Argv } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -13,7 +14,7 @@ const PROJECT_SEARCH_SKIP = new Set(['node_modules', 'DerivedData', 'Pods', 'bui
 const PRODUCTION_ENVIRONMENT = /^(prod|production)$/i;
 const ENV_MANAGER_NOT_INITIALIZED = 3;
 // Public r2.dev bucket with a 7-day expiry rule; uploads sit under an unguessable random prefix.
-const LINK_BUCKET = 'iphone-push-app';
+const LINK_BUCKET = 'iphone-push-app'; // name predates the iphone-deploy rename
 const LINK_EXPIRY_DAYS = 7;
 const LABEL_WIDTH = 9;
 
@@ -60,50 +61,47 @@ interface XcodeProject {
 }
 
 if (import.meta.main) {
-  void createScript('iphone-push-app')
-    .command('$0 <apps..>', 'Fast-forward each app\'s git checkout, build it in Release, install it on a paired iPhone without deleting app data, and launch it (or upload it behind an install link with --link)', (y) => y
-      .positional('apps', {
-        type: 'string',
-        array: true,
-        demandOption: true,
-        describe: `App directories; a bare name resolves to ${CODE_ROOT}/<name>`,
-      })
-      .option('device', { type: 'string', describe: 'Device UDID; defaults to the only paired physical iPhone' })
-      .option('team', { type: 'string', describe: 'Apple development team ID for projects that do not set one; defaults to the team of your only Apple Development certificate' })
-      .option('scheme', { type: 'string', describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme' })
-      .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' })
-      .option('env', {
-        type: 'string',
-        describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment',
-      })
-      .option('link', {
-        type: 'boolean',
-        default: false,
-        describe: `Instead of installing over USB/network, upload a development-signed build and print an install link (works for devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`,
-      })
-      .conflicts('link', 'device'),
+  const appOptions = <T>(y: Argv<T>) => y
+    .positional('apps', {
+      type: 'string',
+      array: true,
+      demandOption: true,
+      describe: `App directories; a bare name resolves to ${CODE_ROOT}/<name>`,
+    })
+    .option('env', { type: 'string', describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment' })
+    .option('scheme', { type: 'string', describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme' })
+    .option('team', { type: 'string', describe: 'Apple development team ID for projects that set none; defaults to the team of your Apple Development certificate' })
+    .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' });
+  const plan = (argv: { apps: string[]; scheme?: string; pull: boolean; env?: string; team?: string }) =>
+    argv.apps.map(resolveAppDir).map((dir) => planApp(dir, argv));
+
+  void createScript('iphone-deploy')
+    .command('push <apps..>', 'Build each app in Release, install it on a paired iPhone (keeping app data), and launch it', (y) => appOptions(y)
+      .option('device', { type: 'string', describe: 'Device UDID; defaults to the only paired physical iPhone' }),
     async (argv) => {
-      preflight();
-      const linkBase = argv.link ? linkBucketUrl() : undefined;
-      const plans = argv.apps.map(resolveAppDir).map((dir) => planApp(dir, { scheme: argv.scheme, pull: argv.pull, env: argv.env, team: argv.team }));
-      if (linkBase) {
-        for (const plan of plans) publishApp(plan, linkBase);
-        return;
-      }
+      preflight({ devicectl: true });
+      const plans = plan(argv);
       header('iPhone');
       const device = task('device', argv.device ?? 'paired iPhone', () => selectDevice(argv.device), (d) => d.name);
       task('reach', 'lock state', () => checkPhone(device), () => 'unlocked');
-      for (const plan of plans) pushApp(plan, device);
+      for (const app of plans) pushApp(app, device);
     })
+    .command('link <apps..>', `Build a development-signed .ipa of each app and upload it behind an install link (devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`, appOptions,
+    async (argv) => {
+      preflight({ devicectl: false });
+      const linkBase = linkBucketUrl();
+      for (const app of plan(argv)) publishApp(app, linkBase);
+    })
+    .demandCommand(1)
     .parseAsync();
 }
 
-function preflight() {
+function preflight(options: { devicectl: boolean }) {
   if (process.platform !== 'darwin') throw new Error('Needs macOS with Xcode.');
   if (run('xcodebuild', ['-version']).status !== 0) {
     throw new Error('Xcode is not set up. Open it once, then select it under Settings > Locations > Command Line Tools.');
   }
-  if (run('xcrun', ['--find', 'devicectl']).status !== 0) {
+  if (options.devicectl && run('xcrun', ['--find', 'devicectl']).status !== 0) {
     throw new Error('The selected Xcode has no devicectl. Select a current Xcode under Settings > Locations.');
   }
   mkdirSync(BUILD_ROOT, { recursive: true });
@@ -284,7 +282,7 @@ function linkBucketUrl(): string {
   const url = result.stdout.match(/https:\/\/pub-[a-z0-9]+\.r2\.dev/)?.[0];
   if (result.status !== 0 || !url) {
     throw new Error([
-      `--link needs the public R2 bucket "${LINK_BUCKET}" and a logged-in wrangler. One-time setup:`,
+      `iphone-deploy link needs the public R2 bucket "${LINK_BUCKET}" and a logged-in wrangler. One-time setup:`,
       `  wrangler r2 bucket create ${LINK_BUCKET}`,
       `  wrangler r2 bucket dev-url enable ${LINK_BUCKET} --force`,
       `  wrangler r2 bucket lifecycle add ${LINK_BUCKET} expire-builds --expire-days ${LINK_EXPIRY_DAYS} --force`,
