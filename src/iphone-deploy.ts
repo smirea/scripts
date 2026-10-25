@@ -262,12 +262,15 @@ function xcodebuild({ name, project, env, team: requestedTeam }: AppPlan, buildD
   };
   const build = env ? withEnvironment(env, runBuild) : runBuild();
   if (!build.ok) {
-    const hint = /provision|signing|certificate|development team/i.test(build.log)
-      ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
-      : /destination|device.*unavailable|device.*locked/i.test(build.log)
-        ? 'Reconnect and unlock the iPhone, then retry.'
-        : 'Build the Release scheme in Xcode to see the error.';
-    throw new Error(`Build failed for ${name}; nothing was installed.\nLog: ${tilde(buildLog)}\n${hint}`);
+    const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5).map(error => chalk.red(`  ${error}`));
+    const hint = /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(build.log)
+      ? 'The App Group is enabled on that target\'s App ID but not assigned to it, which xcodebuild doesn\'t fix on its own. In Xcode > target > Signing & Capabilities > App Groups, tick the group (or developer.apple.com > Identifiers > that bundle ID > App Groups > Configure), then retry.'
+      : /provision|signing|certificate|development team/i.test(build.log)
+        ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
+        : /destination|device.*unavailable|device.*locked/i.test(build.log)
+          ? 'Reconnect and unlock the iPhone, then retry.'
+          : 'Build the Release scheme in Xcode to see the error.';
+    throw new Error([`Build failed for ${name}; nothing was installed.`, ...errors, `Log: ${tilde(buildLog)}`, hint].join('\n'));
   }
   return team;
 }
