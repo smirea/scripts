@@ -7,6 +7,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'gai', source: 'src/git-commit-ai.ts' },
   { name: 'git-ai-cim', source: 'src/git-commit-ai.ts' },
   { name: 'git-worktree', source: 'src/git-worktree.ts' },
+  { name: 'worktree-cache-clean', source: 'src/worktree-cache-clean.ts' },
   { name: 'git-invite-ai-to-repos', source: 'src/git-invite-ai-to-repos.ts' },
   { name: 'wt', source: 'src/git-worktree.ts' },
   { name: 'whoop-pull', source: 'src/whoop.ts' },

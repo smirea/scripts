@@ -37,3 +37,9 @@ enabled for device location. If macOS blocks the helper, allow it in System
 Settings → Privacy & Security. On permission failures, the script prints instructions and opens the Location
 Services settings pane. Device lookup times out after 12 seconds;
 if both location sources fail, searches continue without an explicit bias.
+
+## Worktree build caches
+
+`worktree-cache-clean [directory] [--dry-run]` removes wholly ignored `DerivedData` or `app-ios/DerivedData` from an idle linked worktree. It never removes a main checkout, source, env files, or databases. Tracked cache files, links to another directory, running T3 turns (including children), and open build files prevent deletion. An unreadable T3 database or failed open-file inspection fails closed.
+
+Use it as a T3 **Run on settle** script: `if [ -f .git ]; then worktree-cache-clean; fi`. This reclaims generated output even when T3 retains the checkout because its branch metadata differs from Git. The next build recreates the cache. Keep whole-worktree cleanup's local-change protections enabled.
