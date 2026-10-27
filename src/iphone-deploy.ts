@@ -48,6 +48,7 @@ interface EnvSelection {
 
 interface AppPlan {
   team?: string;
+  prepareDir?: string;
   dir: string;
   name: string;
   project: XcodeProject;
@@ -124,8 +125,12 @@ function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: s
   }
   const env = selectEnvironment(dir, repoRoot, options.env);
   const project = findProject(dir, options.scheme);
+  const prepareDir = [...new Set([dir, repoRoot].filter((dir): dir is string => Boolean(dir)))].find((dir) => {
+    const manifest = path.join(dir, 'package.json');
+    return existsSync(manifest) && Boolean(JSON.parse(readFileSync(manifest, 'utf8')).scripts?.['env:ios']);
+  });
   line('project', `${path.relative(dir, project.path) || project.path} ${chalk.dim('·')} scheme ${project.scheme}`);
-  return { dir, name, env, team: options.team, project };
+  return { dir, name, env, prepareDir, team: options.team, project };
 }
 
 function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
@@ -245,7 +250,7 @@ function certificateTeam(): string | undefined {
 // Some projects deliberately leave DEVELOPMENT_TEAM out of version control and expect it
 // per machine, so a missing team is filled in and the build retried instead of failing.
 // Returns the team that was passed, if any.
-function xcodebuild({ name, project, env, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
+function xcodebuild({ name, project, env, prepareDir, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
   const buildLog = path.join(buildDir, 'build.log');
   let team = requestedTeam;
   const runOnce = () => task('build', `Release${team ? ` ${chalk.dim('·')} team ${team}` : ''}`, () => runLogged('xcodebuild', [
@@ -253,6 +258,10 @@ function xcodebuild({ name, project, env, team: requestedTeam }: AppPlan, buildD
     '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args, ...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
   ], buildLog));
   const runBuild = () => {
+    if (prepareDir) task('prepare', 'bun run env:ios', () => runOrThrow(process.execPath, ['run', 'env:ios'], {
+      cwd: prepareDir,
+      error: `Release preparation failed for ${name}`,
+    }));
     const first = runOnce();
     if (first.ok || team || !/requires a development team/i.test(first.log)) return first;
     team = certificateTeam();
@@ -262,15 +271,16 @@ function xcodebuild({ name, project, env, team: requestedTeam }: AppPlan, buildD
   };
   const build = env ? withEnvironment(env, runBuild) : runBuild();
   if (!build.ok) {
-    const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5).map(error => chalk.red(`  ${error}`));
-    const hint = /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(build.log)
+    const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5);
+    const diagnosis = errors.length ? errors.join('\n') : build.log;
+    const hint = /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(diagnosis)
       ? 'The App Group is enabled on that target\'s App ID but not assigned to it, which xcodebuild doesn\'t fix on its own. In Xcode > target > Signing & Capabilities > App Groups, tick the group (or developer.apple.com > Identifiers > that bundle ID > App Groups > Configure), then retry.'
-      : /provision|signing|certificate|development team/i.test(build.log)
+      : /provision|signing|certificate|development team/i.test(diagnosis)
         ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
-        : /destination|device.*unavailable|device.*locked/i.test(build.log)
+        : /destination|device.*unavailable|device.*locked/i.test(diagnosis)
           ? 'Reconnect and unlock the iPhone, then retry.'
           : 'Build the Release scheme in Xcode to see the error.';
-    throw new Error([`Build failed for ${name}; nothing was installed.`, ...errors, `Log: ${tilde(buildLog)}`, hint].join('\n'));
+    throw new Error([`Build failed for ${name}; nothing was installed.`, ...errors.map(error => chalk.red(`  ${error}`)), `Log: ${tilde(buildLog)}`, hint].join('\n'));
   }
   return team;
 }
