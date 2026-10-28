@@ -81,8 +81,9 @@ async function runCli(): Promise<void> {
 
     const checks = await inviteMissingAiCollaborator(ownerToken, repos, args);
     const accepted = aiToken ? acceptPendingInvitations(aiToken, args, repos) : skipAcceptPreview(args);
+    const ignored = aiToken ? ignoreRepoNotifications(aiToken, args, checks, accepted) : [];
 
-    printSummary(checks, accepted, args.dryRun);
+    printSummary(checks, accepted, ignored, args.dryRun);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
@@ -235,6 +236,36 @@ function acceptPendingInvitations(aiToken: string, args: CliArgs, repos: GithubR
   return accepted;
 }
 
+function ignoreRepoNotifications(
+  aiToken: string,
+  args: CliArgs,
+  checks: RepoCheck[],
+  accepted: GithubInvitation[]
+): string[] {
+  const repoNames = [
+    ...checks.filter(check => check.status === "already-collaborator").map(check => check.repo.full_name),
+    ...accepted.map(invitation => invitation.repository.full_name),
+  ];
+  for (const fullName of new Set(repoNames)) {
+    if (args.dryRun) {
+      console.log(`ignore  ${fullName} would ignore notifications for ${args.ai}`);
+      continue;
+    }
+    ghApiRaw(aiToken, [
+      "api",
+      "--method",
+      "PUT",
+      `/repos/${fullName.split("/").map(encodePath).join("/")}/subscription`,
+      "-F",
+      "subscribed=false",
+      "-F",
+      "ignored=true",
+    ]);
+    console.log(`ignore  ${fullName} ignoring notifications for ${args.ai}`);
+  }
+  return Array.from(new Set(repoNames));
+}
+
 function skipAcceptPreview(args: CliArgs): GithubInvitation[] {
   console.log(`Skipping invite acceptance preview because gh is not authenticated as ${args.ai}.`);
   return [];
@@ -276,7 +307,12 @@ function printRepoList(args: CliArgs, cutoff: Date, repos: GithubRepo[]): void {
   }
 }
 
-function printSummary(checks: RepoCheck[], accepted: GithubInvitation[], dryRun: boolean): void {
+function printSummary(
+  checks: RepoCheck[],
+  accepted: GithubInvitation[],
+  ignored: string[],
+  dryRun: boolean
+): void {
   const count = (status: RepoCheck["status"]) => checks.filter(check => check.status === status).length;
   const actionVerb = dryRun ? "would accept" : "accepted";
   console.log("");
@@ -285,6 +321,7 @@ function printSummary(checks: RepoCheck[], accepted: GithubInvitation[], dryRun:
   console.log(`pending invitations:   ${count("pending-invite")}`);
   console.log(`${dryRun ? "would invite" : "invited"}:             ${count(dryRun ? "would-invite" : "invited")}`);
   console.log(`${actionVerb}:          ${accepted.length}`);
+  console.log(`${dryRun ? "would ignore" : "ignored"}:             ${ignored.length}`);
 }
 
 function isCollaborator(ownerToken: string, repo: GithubRepo, username: string): boolean {
