@@ -251,19 +251,34 @@ function ignoreRepoNotifications(
       console.log(`ignore  ${fullName} would ignore notifications for ${args.ai}`);
       continue;
     }
-    ghApiRaw(aiToken, [
-      "api",
-      "--method",
-      "PUT",
-      `/repos/${fullName.split("/").map(encodePath).join("/")}/subscription`,
-      "-F",
-      "subscribed=false",
-      "-F",
-      "ignored=true",
-    ]);
+    ignoreSubscription(aiToken, fullName);
     console.log(`ignore  ${fullName} ignoring notifications for ${args.ai}`);
   }
   return Array.from(new Set(repoNames));
+}
+
+// Access from a just-accepted invitation takes a few seconds to propagate; until then this 404s.
+function ignoreSubscription(aiToken: string, fullName: string): void {
+  const args = [
+    "api",
+    "--method",
+    "PUT",
+    `/repos/${fullName.split("/").map(encodePath).join("/")}/subscription`,
+    "-F",
+    "subscribed=false",
+    "-F",
+    "ignored=true",
+  ];
+  for (let attempt = 1; ; attempt++) {
+    const result = runGh(args, { token: aiToken, allowFailure: true });
+    if (result.status === 0) {
+      return;
+    }
+    if (attempt >= 10 || !isHttpStatus(result, 404)) {
+      throw new Error(formatGhError(`ignoring notifications for ${fullName}`, result));
+    }
+    Bun.sleepSync(2000);
+  }
 }
 
 function skipAcceptPreview(args: CliArgs): GithubInvitation[] {
