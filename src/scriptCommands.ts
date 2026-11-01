@@ -26,6 +26,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'email-inbox', source: 'src/email-inbox.ts' },
   { name: 'sms-inbox', source: 'src/sms-inbox.ts' },
   { name: 'iphone-deploy', source: 'src/iphone-deploy.ts' },
+  { name: 'x', source: 'src/x.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
