@@ -223,10 +223,22 @@ function normalizeCommitArgs(args: string[]): string[] {
     }
     args = rest;
   }
+  // Agents often add a redundant -m (`gai -m feat: x`), which would make git treat later words as pathspecs.
+  const [first, ...rest] = args;
+  if (first === "-m" && rest.length > 0 && !rest.some(isFlag)) {
+    return ["-m", rest.join(" ")];
+  }
+  if (/^-m\s/.test(first)) {
+    args = [first.replace(/^-m\s+/, ""), ...rest];
+  }
   if (!args[0].startsWith("-")) {
     return ["-m", args.join(" ")];
   }
   return args;
+}
+
+function isFlag(arg: string): boolean {
+  return /^--?[A-Za-z]/.test(arg);
 }
 
 function runGitCommit(identity: AiIdentity, args: string[]): void {
