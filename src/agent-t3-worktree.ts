@@ -27,7 +27,7 @@ await createScript('agent-t3-worktree')
     for (const line of settle(process.cwd(), { dryRun: argv.dryRun })) console.log(line);
   })
   .command('gc', 'Remove worktrees and branches whose PR merged, with their servers and simulators; then simulator gc', y => y
-    .option('repo', { type: 'string', describe: 'only this repository (default: every repo in ~/code and T3\'s worktrees)' })
+    .option('repo', { type: 'string', describe: 'only this repository (default: every T3 Code project)' })
     .option('dry-run', { type: 'boolean', default: false }), argv => {
     const mains = argv.repo ? [checkout(argv.repo)?.main ?? argv.repo] : repositories();
     for (const line of [...gc(mains, { dryRun: argv.dryRun }), ...simulatorGc({ dryRun: argv.dryRun }), simulatorStatus()]) console.log(line);

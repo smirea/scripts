@@ -13,7 +13,6 @@ const T3_DATABASE = join(homedir(), '.t3/userdata/statev2.sqlite');
 
 /** Child output goes to stderr, so a hook's stdout carries only the summary. */
 const step = (cmd: string[], cwd: string) => run(cmd, { cwd, inherit: true });
-const log = (message: string) => console.error(message);
 
 /** Written into the worktree's own git dir, so it survives `git clean` and never shows up as a file. */
 type Stamp = { root: string; lockHash: string | null; created: string[] };
