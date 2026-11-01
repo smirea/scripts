@@ -42,11 +42,27 @@ export function claim(device: Pick<Device, 'dataPath'>, worktree: string) {
   for (const name of LEGACY_CLAIM_FILES) if (existsSync(join(device.dataPath, name))) unlinkSync(join(device.dataPath, name));
 }
 
-/** The simulators a worktree owns: claimed by it, or named after its directory (`<dir>` and `<dir>-<n>`). */
+const namedFor = (worktree: string) => new RegExp(`^${RegExp.escape(simulatorName(worktree))}(-[\\w]+)?$`);
+
+/** The simulators a worktree owns: claimed by it, or unclaimed and named after its directory (`<dir>`, `<dir>-<n>`). */
 export function ownedBy(worktree: string, all = devices()): Device[] {
-  const name = simulatorName(worktree);
-  const named = new RegExp(`^${RegExp.escape(name)}(-\\d+)?$`);
-  return all.filter(device => isPhone(device) && (owner(device)?.worktree === worktree || named.test(device.name)));
+  return all.filter(device => {
+    if (!isPhone(device)) return false;
+    const claimed = owner(device);
+    return claimed ? claimed.worktree === worktree : namedFor(worktree).test(device.name);
+  });
+}
+
+function unclaim(device: Device) {
+  for (const name of [CLAIM_FILE, ...LEGACY_CLAIM_FILES]) if (existsSync(join(device.dataPath, name))) unlinkSync(join(device.dataPath, name));
+}
+
+const SESSIONS = join(homedir(), '.t3/userdata/device/agent-device/sessions');
+
+/** agent-device, which T3's `device_open` drives through, logs each request with the UDID in its session folder. */
+function drivenRecently(udid: string): boolean {
+  if (!existsSync(SESSIONS)) return false;
+  return run(['find', SESSIONS, '-type', 'f', '-mmin', `-${IDLE_MS / 60_000}`, '-exec', 'grep', '-l', udid, '{}', '+'], { allowFail: true }) !== '';
 }
 
 export const simulatorName = (worktree: string, n?: number) => `${basename(worktree).replaceAll(/[^\w.-]/g, '-')}${n ? `-${n}` : ''}`;
@@ -65,8 +81,17 @@ export function remove(device: Device) {
 
 /** The worktree's simulator, created on the newest iOS runtime as its newest iPhone Pro when missing. */
 export function ensure(worktree: string, n?: number): Device {
-  const name = simulatorName(worktree, n);
-  const existing = devices().find(device => device.name === name && isPhone(device));
+  const all = devices();
+  const takenByOther = (device: Device) => {
+    const claimed = owner(device)?.worktree;
+    return Boolean(claimed && claimed !== worktree && existsSync(join(claimed, '.git')));
+  };
+  // Worktree directories repeat across projects (two `agent-migrate` checkouts), so a name another live worktree holds
+  // gets a suffix from this worktree's path.
+  let name = simulatorName(worktree, n);
+  const clash = all.find(device => device.name === name && isPhone(device));
+  if (clash && takenByOther(clash)) name = `${name}-${Bun.hash(worktree).toString(36).slice(0, 6)}`;
+  const existing = all.find(device => device.name === name && isPhone(device) && !takenByOther(device));
   if (existing) return existing;
   const { runtimes } = JSON.parse(simctl('list', 'runtimes', '--json')) as {
     runtimes: { identifier: string; version: string; platform: string; isAvailable: boolean; supportedDeviceTypes: { identifier: string; name: string }[] }[];
@@ -148,9 +173,13 @@ export function gc({ dryRun = false } = {}): string[] {
   for (const device of devices()) {
     const claimed = owner(device);
     if (!claimed) continue;
+    const inUse = processes.some(line => line.includes(device.udid)) || drivenRecently(device.udid);
     if (!existsSync(join(claimed.worktree, '.git'))) {
-      act(`delete simulator ${device.name}; its worktree ${claimed.worktree} is gone`, () => remove(device));
-    } else if (device.state === 'Booted' && Date.now() - claimed.lastUsed > IDLE_MS && !processes.some(line => line.includes(device.udid))) {
+      // Only a simulator made for that worktree is deleted; a stock one it borrowed just loses the claim.
+      if (!namedFor(claimed.worktree).test(device.name)) act(`release ${device.name}, claimed by the removed ${claimed.worktree}`, () => unclaim(device));
+      else if (device.state !== 'Shutdown' || inUse) messages.push(`keep ${device.name}: booted or in use, though its worktree ${claimed.worktree} is gone`);
+      else act(`delete simulator ${device.name}; its worktree ${claimed.worktree} is gone`, () => remove(device));
+    } else if (device.state === 'Booted' && Date.now() - claimed.lastUsed > IDLE_MS && !inUse) {
       act(`shut down ${device.name}, idle ${Math.round((Date.now() - claimed.lastUsed) / 60_000)} minutes`, () => shutdown(device));
     }
   }

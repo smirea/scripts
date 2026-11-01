@@ -28,14 +28,16 @@ await createScript('agent-t3-worktree')
   })
   .command('gc', 'Remove worktrees and branches whose PR merged, with their servers and simulators; then simulator gc', y => y
     .option('repo', { type: 'string', describe: 'only this repository (default: every T3 Code project)' })
+    .option('include-open-threads', { type: 'boolean', default: false, describe: 'also remove merged worktrees whose T3 thread was never settled' })
     .option('dry-run', { type: 'boolean', default: false }), argv => {
     const mains = argv.repo ? [checkout(argv.repo)?.main ?? argv.repo] : repositories();
-    for (const line of [...gc(mains, { dryRun: argv.dryRun }), ...simulatorGc({ dryRun: argv.dryRun }), simulatorStatus()]) console.log(line);
+    for (const line of [...gc(mains, { dryRun: argv.dryRun, includeOpenThreads: argv.includeOpenThreads }), ...simulatorGc({ dryRun: argv.dryRun }), simulatorStatus()]) console.log(line);
   })
   .command('teardown <worktree>', 'Remove one worktree (path, branch, or directory name) once its PR merged', y => y
     .positional('worktree', { type: 'string', demandOption: true })
-    .option('force', { type: 'boolean', default: false, describe: 'remove it even without a merged PR' }), argv => {
-    console.log(teardown(process.cwd(), argv.worktree, { force: argv.force }));
+    .option('force', { type: 'boolean', default: false, describe: 'remove it even without a merged PR (its branch stays)' })
+    .option('delete-branch', { type: 'boolean', default: false, describe: 'with --force, also delete its branch locally and on origin' }), argv => {
+    console.log(teardown(process.cwd(), argv.worktree, { force: argv.force, deleteBranch: argv.deleteBranch }));
   })
   .demandCommand(1)
   .parseAsync();

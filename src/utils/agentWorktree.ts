@@ -15,7 +15,7 @@ const T3_DATABASE = join(homedir(), '.t3/userdata/statev2.sqlite');
 const step = (cmd: string[], cwd: string) => run(cmd, { cwd, inherit: true });
 
 /** Written into the worktree's own git dir, so it survives `git clean` and never shows up as a file. */
-type Stamp = { root: string; lockHash: string | null; created: string[] };
+type Stamp = { root: string; lockHash: string | null; created: string[]; block?: number };
 
 const stampPath = (root: string) => join(git(root, 'rev-parse', '--path-format=absolute', '--git-dir'), 'agent-t3-worktree.json');
 const lockfile = (root: string) => ['bun.lock', 'bun.lockb'].map(name => join(root, name)).find(existsSync);
@@ -68,16 +68,29 @@ const portFree = (port: number) => new Promise<boolean>(resolve => {
   const server = createServer().once('error', () => resolve(false)).listen(port, '127.0.0.1', () => server.close(() => resolve(true)));
 });
 
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 async function withLock<T>(main: string, action: () => Promise<T>): Promise<T> {
-  // Parallel setups would otherwise pick the same port block; mkdir is atomic, so it serves as the lock.
+  // Parallel setups would otherwise pick the same port block; mkdir is atomic, so it serves as the lock. Only a lock whose
+  // holder is dead is broken, so a waiter never removes a live holder's lock.
   const lock = join(main, '.git', 'agent-t3-worktree.lock');
   for (const started = Date.now(); ; await Bun.sleep(100)) {
     try {
       mkdirSync(lock);
+      writeFileSync(join(lock, 'pid'), String(process.pid));
       break;
     } catch {
+      const pidFile = join(lock, 'pid');
+      const holder = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8') || 0) : 0;
       const age = Date.now() - (statSync(lock, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
-      if (age > 60_000) rmSync(lock, { recursive: true, force: true });
+      if (holder ? !alive(holder) : age > 60_000) rmSync(lock, { recursive: true, force: true });
       if (Date.now() - started > 120_000) throw new Error(`Timed out waiting for ${lock}.`);
     }
   }
@@ -118,9 +131,7 @@ async function assignPorts(current: Checkout, plan: PortPlan): Promise<number> {
       ...Object.entries(plan.ports).map(([key, original]) => `${key}=${port(original)}`),
       ...Object.entries(plan.urls).map(([key, url]) => `${key}=${url.prefix}${port(url.port)}${url.suffix}`),
     ];
-    const file = join(current.root, portFile(current.root));
-    if (file.endsWith(OVERRIDE)) writeFileSync(file, `${lines.join('\n')}\n`);
-    else upsert(file, lines);
+    upsert(join(current.root, portFile(current.root)), lines);
     return base;
   });
 }
@@ -136,13 +147,14 @@ export async function setup(cwd: string, { resetData = false } = {}): Promise<st
   if (lockfile(root)) step(['bun', 'install', '--frozen-lockfile'], root);
 
   const plan = portPlan(root);
+  let block: number | undefined;
   const ports = async () => {
     if (!plan) return;
-    const base = await assignPorts(current, plan);
+    const base = (block = await assignPorts(current, plan));
     summary.push(`  ports  ${base}-${base + SLOT - 1} (${portFile(root)}: ${Object.keys(plan.ports).join(', ')})`);
   };
   const env = join(root, '.env');
-  if (existsSync(env) && /^#\s*env-manager:/.test(readFileSync(env, 'utf8'))) {
+  if (existsSync(env) && /^#\s*env-manager:/m.test(readFileSync(env, 'utf8'))) {
     // Offline from the schema defaults: a worktree never pulls cloud values, so it needs no AWS access.
     const pinned = join(root, 'node_modules/.bin/env-manager');
     const gen = () => step([existsSync(pinned) ? pinned : 'env-manager', 'gen', '--local'], root);
@@ -178,20 +190,26 @@ export async function setup(cwd: string, { resetData = false } = {}): Promise<st
   }
 
   const after = ignored(root);
-  const stamp: Stamp = { root, lockHash: lockHash(root), created: [...after].filter(path => !before.has(path)).sort() };
+  const stamp: Stamp = { root, lockHash: lockHash(root), created: [...after].filter(path => !before.has(path)).sort(), ...(block ? { block } : {}) };
   const previous = readStamp(root);
   if (previous?.root === root) stamp.created = [...new Set([...previous.created.filter(path => after.has(path)), ...stamp.created])].sort();
   writeFileSync(stampPath(root), `${JSON.stringify(stamp, null, 2)}\n`);
   return summary.join('\n');
 }
 
-/** What is wrong with the worktree's setup; empty when it is ready or `cwd` is the main checkout. */
+/** Worktrees agents get: T3's, and the `Agent` tool's under `.claude/worktrees`. Only these are healed or removed. */
+const isAgentWorktree = (root: string) => root.startsWith(`${T3_WORKTREES}/`) || root.includes('/.claude/worktrees/');
+
+/**
+ * What is wrong with the worktree's setup; empty when it is ready, `cwd` is the main checkout, or it is a hand-made
+ * worktree that setup never ran in.
+ */
 export function check(cwd: string): string[] {
   const current = checkout(cwd);
   if (!current?.linked) return [];
   const { root } = current;
   const stamp = readStamp(root);
-  if (!stamp) return ['setup has not run in this worktree'];
+  if (!stamp) return isAgentWorktree(root) ? ['setup has not run in this worktree'] : [];
   const problems: string[] = [];
   if (stamp.root !== root) problems.push(`setup ran for ${stamp.root}, not ${root}`);
   if (stamp.lockHash !== lockHash(root)) problems.push('the lockfile changed since the last install');
@@ -216,15 +234,35 @@ export function worktreeEntries(main: string): Entry[] {
   });
 }
 
-export type Pr = { number: number; headRefName: string; headRefOid: string; url: string };
+export type Pr = { number: number; headRefName: string; headRefOid: string; baseRefName: string; url: string };
 type Prs = { merged: Pr[]; open: Set<string> };
 
-/** The repo's merged PRs and open PR branches, or undefined when `gh` can't answer (no remote, no auth). */
+/**
+ * The repo's PRs merged into its default branch, and its open PR branches; undefined when `gh` can't answer either
+ * list. A PR merged into another branch (a stack) doesn't count: its commits may never reach the default branch.
+ */
 function pullRequests(main: string): Prs | undefined {
-  const list = (state: string) => run(['gh', 'pr', 'list', '--state', state, '--limit', '1000', '--json', 'number,headRefName,headRefOid,url'], { cwd: main, allowFail: true });
+  const list = (state: string) => run(['gh', 'pr', 'list', '--state', state, '--limit', '1000', '--json', 'number,headRefName,headRefOid,baseRefName,url'], { cwd: main, allowFail: true });
   const merged = list('merged');
-  if (!merged) return undefined;
-  return { merged: JSON.parse(merged) as Pr[], open: new Set((JSON.parse(list('open') || '[]') as Pr[]).map(pr => pr.headRefName)) };
+  const open = list('open');
+  if (!merged || !open) return undefined;
+  const base = defaultBranch(main);
+  return { merged: (JSON.parse(merged) as Pr[]).filter(pr => pr.baseRefName === base), open: new Set((JSON.parse(open) as Pr[]).map(pr => pr.headRefName)) };
+}
+
+/** Whether a T3 thread on `root` is still open: not deleted, not archived, and not settled (or unsettled since). */
+function openThread(root: string): boolean {
+  if (!existsSync(T3_DATABASE)) return false;
+  const db = new Database(T3_DATABASE, { readonly: true });
+  try {
+    return db.query(`SELECT 1 FROM orchestration_v2_projection_threads
+      WHERE json_extract(payload_json, '$.worktreePath') = ? AND deleted_at IS NULL AND archived_at IS NULL
+        AND (json_extract(payload_json, '$.settledAt') IS NULL
+          OR json_extract(payload_json, '$.unsettledAt') > json_extract(payload_json, '$.settledAt'))
+      LIMIT 1`).get(root) !== null;
+  } finally {
+    db.close();
+  }
 }
 
 /** The branch T3 recorded for the thread working in `root`, which an agent's later branch switch doesn't update. */
@@ -258,34 +296,41 @@ function processCwds(): string[] {
   for (let pid = String(process.pid); pid && pid !== '0' && pid !== '1'; pid = run(['ps', '-o', 'ppid=', '-p', pid], { allowFail: true }).trim()) own.add(pid);
   const cwds: string[] = [];
   let pid = '';
-  for (const line of run(['lsof', '-a', '-d', 'cwd', '-F', 'pn'], { allowFail: true }).split('\n')) {
+  const listing = Bun.spawnSync(['lsof', '-a', '-d', 'cwd', '-F', 'pn'], { stderr: 'ignore' }).stdout.toString();
+  // Without the list every worktree could be in use, so gc stops instead of guessing.
+  if (!listing.trim()) throw new Error('lsof listed no process working directories; not removing anything.');
+  for (const line of listing.split('\n')) {
     if (line.startsWith('p')) pid = line.slice(1);
     else if (line.startsWith('n') && !own.has(pid)) cwds.push(line.slice(1));
   }
   return cwds;
 }
 
-/** Every listener in the worktree's port block, including ports a repo derives from it, such as e2e servers. */
+/**
+ * Every listener in the port block setup assigned, including ports a repo derives from it, such as e2e servers. Only an
+ * assigned block counts, so a stray `*_PORT` value such as 5432 never makes it stop unrelated servers.
+ */
 function listeningPids(root: string): string[] {
-  const text = [OVERRIDE, VALUES].map(name => join(root, name)).filter(existsSync).map(path => readFileSync(path, 'utf8')).join('\n');
-  const values = [...text.matchAll(/^(?:[A-Z][A-Z0-9_]*_)?PORT=(\d+)/gm)].map(([, port]) => Number(port));
-  if (!values.length) return [];
-  const base = Math.min(...values);
+  const plan = existsSync(root) ? portPlan(root) : undefined;
+  const base = readStamp(root)?.block ?? (plan && blockOf(root, plan));
+  if (!base) return [];
   const ports = Array.from({ length: SLOT }, (_, offset) => `-iTCP:${base + offset}`);
   return [...new Set(run(['lsof', '-t', '-sTCP:LISTEN', ...ports], { allowFail: true }).split('\n').filter(Boolean))];
 }
 
 export type Verdict = { remove: true; pr?: Pr; why: string } | { remove: false; why: string };
 
-type Facts = { exists: boolean; dirty: boolean; busy: boolean; running: boolean; pr?: Pr; prsKnown: boolean };
+type Facts = { exists: boolean; agent: boolean; dirty: boolean; busy: boolean; running: boolean; open: boolean; pr?: Pr; prsKnown: boolean };
 
 /** Pure: whether gc may remove a linked worktree. Removing needs a merged PR holding all its commits, and nothing in use. */
 export function classify(entry: Entry, facts: Facts): Verdict {
   if (!facts.exists || entry.prunable) return { remove: true, why: 'its directory is gone' };
+  if (!facts.agent) return { remove: false, why: 'not an agent worktree' };
   if (entry.locked) return { remove: false, why: 'locked' };
   if (facts.dirty) return { remove: false, why: 'uncommitted or untracked files' };
   if (facts.busy) return { remove: false, why: 'a process is running in it' };
   if (facts.running) return { remove: false, why: 'a T3 run is active in it' };
+  if (facts.open) return { remove: false, why: 'a T3 thread on it is still open' };
   if (!facts.prsKnown) return { remove: false, why: 'gh could not list PRs' };
   if (!facts.pr) return { remove: false, why: entry.branch ? `no merged PR holds ${entry.branch}` : 'detached, with no merged PR holding its HEAD' };
   return { remove: true, pr: facts.pr, why: `merged in ${facts.pr.url}` };
@@ -325,7 +370,13 @@ export function repositories(): string[] {
   }
 }
 
-export function gc(mains: string[], { dryRun = false } = {}): string[] {
+/** A failing `git status`, such as one blocked by another command's index.lock, counts as dirty. */
+function dirty(path: string): boolean {
+  const result = Bun.spawnSync(['git', '-C', path, 'status', '--porcelain'], { stderr: 'ignore' });
+  return result.exitCode !== 0 || result.stdout.toString().trim() !== '';
+}
+
+export function gc(mains: string[], { dryRun = false, includeOpenThreads = false } = {}): string[] {
   const report: string[] = [];
   const act = (message: string, action: () => void) => {
     report.push(`${dryRun ? 'would ' : ''}${message}`);
@@ -341,9 +392,11 @@ export function gc(mains: string[], { dryRun = false } = {}): string[] {
       const exists = existsSync(entry.path);
       const verdict = classify(entry, {
         exists,
-        dirty: exists && run(['git', '-C', entry.path, 'status', '--porcelain'], { allowFail: true }) !== '',
+        agent: isAgentWorktree(entry.path),
+        dirty: exists && dirty(entry.path),
         busy: cwds.some(path => path === entry.path || path.startsWith(`${entry.path}/`)),
         running: exists && runningT3Worktree(entry.path),
+        open: !includeOpenThreads && openThread(entry.path),
         prsKnown: Boolean(prs),
         pr: prs && mergedPrFor(main, prs, entry.head, [entry.branch, t3Branch(entry.path)]),
       });
@@ -378,7 +431,7 @@ export function gc(mains: string[], { dryRun = false } = {}): string[] {
   return report;
 }
 
-export function teardown(cwd: string, target: string, { force = false } = {}): string {
+export function teardown(cwd: string, target: string, { force = false, deleteBranch = false } = {}): string {
   const current = checkout(cwd);
   if (!current) throw new Error('Not inside a git checkout.');
   const entries = worktreeEntries(current.main).filter(entry => !entry.main);
@@ -389,7 +442,7 @@ export function teardown(cwd: string, target: string, { force = false } = {}): s
   const prs = pullRequests(current.main);
   const pr = prs && mergedPrFor(current.main, prs, entry.head, [entry.branch, t3Branch(entry.path)]);
   if (!pr && !force) throw new Error(`No merged PR holds every commit of ${entry.path}. Pass --force to tear it down anyway.`);
-  removeWorktree(current.main, entry, Boolean(pr) || force);
+  removeWorktree(current.main, entry, Boolean(pr) || deleteBranch);
   const main = defaultBranch(current.main);
   if (git(current.main, 'branch', '--show-current') === main) run(['git', '-C', current.main, 'pull', '--ff-only', 'origin', main], { allowFail: true });
   else run(['git', '-C', current.main, 'fetch', 'origin', `${main}:${main}`], { allowFail: true });

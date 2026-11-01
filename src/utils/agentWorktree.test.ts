@@ -25,9 +25,10 @@ function repoWithWorktree(env: string) {
   writeFileSync(join(main, '.gitignore'), '.env.override\n.env.local\n');
   git(main, 'add', '.');
   git(main, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'fixture');
-  const worktree = join(dir, 'worktree');
+  // Under `.claude/worktrees`, so it counts as an agent worktree.
+  const worktree = join(dir, 'repo/.claude/worktrees/feature');
   git(main, 'worktree', 'add', '-qb', 'feature', worktree);
-  return { main, worktree };
+  return { dir, main, worktree };
 }
 
 test('without env-manager targets, setup writes each port key and localhost URL into .env.local at the same offset in a free block', async () => {
@@ -48,11 +49,18 @@ test('without env-manager targets, setup writes each port key and localhost URL 
 
 test('with env-manager targets, setup writes the ports to .env.override, keeping other worktrees\' blocks', async () => {
   const { main, worktree } = repoWithWorktree('# env-manager: fixture\n# env-manager target: web format=ts path=.env.local\nCLIENT_PORT=6000 # {int}\nAPI_PORT=6001 # {int}\nAPI_URL=http://127.0.0.1:6001 # {url}\n');
-  const other = join(main, '..', 'other');
+  const other = join(main, '..', 'repo/.claude/worktrees/other');
   git(main, 'worktree', 'add', '-qb', 'other', other);
   writeFileSync(join(other, '.env.override'), 'CLIENT_PORT=16000\n');
   await setup(worktree).catch(() => undefined);
   expect(readFileSync(join(worktree, '.env.override'), 'utf8')).toBe('CLIENT_PORT=17000\nAPI_PORT=17001\nAPI_URL=http://127.0.0.1:17001\n');
+});
+
+test('check leaves a hand-made worktree that setup never ran in alone', () => {
+  const { dir, main } = repoWithWorktree('CLIENT_PORT=6000\n');
+  const manual = join(dir, 'manual');
+  git(main, 'worktree', 'add', '-qb', 'manual', manual);
+  expect(check(manual)).toEqual([]);
 });
 
 test('setup in the main checkout changes nothing', async () => {
@@ -62,8 +70,8 @@ test('setup in the main checkout changes nothing', async () => {
 });
 
 const entry: Entry = { path: '/w', head: 'abc', branch: 'feature', locked: false, prunable: false, main: false };
-const facts = { exists: true, dirty: false, busy: false, running: false, prsKnown: true };
-const pr = { number: 7, headRefName: 'feature', headRefOid: 'abc', url: 'https://github.com/o/r/pull/7' };
+const facts = { exists: true, agent: true, dirty: false, busy: false, running: false, open: false, prsKnown: true };
+const pr = { number: 7, headRefName: 'feature', headRefOid: 'abc', baseRefName: 'master', url: 'https://github.com/o/r/pull/7' };
 
 test('gc removes a worktree only when a merged PR holds its commits and nothing uses it', () => {
   expect(classify(entry, { ...facts, pr })).toEqual({ remove: true, pr, why: 'merged in https://github.com/o/r/pull/7' });
@@ -71,6 +79,8 @@ test('gc removes a worktree only when a merged PR holds its commits and nothing 
   expect(classify(entry, { ...facts, pr, dirty: true })).toEqual({ remove: false, why: 'uncommitted or untracked files' });
   expect(classify(entry, { ...facts, pr, busy: true })).toEqual({ remove: false, why: 'a process is running in it' });
   expect(classify(entry, { ...facts, pr, running: true })).toEqual({ remove: false, why: 'a T3 run is active in it' });
+  expect(classify(entry, { ...facts, pr, open: true })).toEqual({ remove: false, why: 'a T3 thread on it is still open' });
+  expect(classify(entry, { ...facts, pr, agent: false })).toEqual({ remove: false, why: 'not an agent worktree' });
   expect(classify(entry, { ...facts, pr, prsKnown: false })).toEqual({ remove: false, why: 'gh could not list PRs' });
   expect(classify({ ...entry, locked: true }, { ...facts, pr })).toEqual({ remove: false, why: 'locked' });
   expect(classify({ ...entry, prunable: true }, { ...facts, exists: false })).toEqual({ remove: true, why: 'its directory is gone' });
