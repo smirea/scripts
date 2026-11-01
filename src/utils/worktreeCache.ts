@@ -50,7 +50,7 @@ export function cleanWorktreeCache(directory: string, options: {
   if (realpathSync(gitDir) === realpathSync(commonDir)) return ['Kept: main checkout.'];
   if ((options.isRunning ?? runningT3Worktree)(root)) return ['Kept: a T3 run still uses this worktree.'];
 
-  const paths = ['DerivedData', 'app-ios/DerivedData'].filter(name => existsSync(join(root, name)));
+  const paths = ['DerivedData', 'app-ios/DerivedData', '.build', 'app-ios/.build'].filter(name => existsSync(join(root, name)));
   if (!paths.length) return ['No worktree build caches.'];
   const opened = (options.openPaths ?? openFiles)();
   const messages: string[] = [];

@@ -38,8 +38,13 @@ Settings → Privacy & Security. On permission failures, the script prints instr
 Services settings pane. Device lookup times out after 12 seconds;
 if both location sources fail, searches continue without an explicit bias.
 
-## Worktree build caches
+## Agent worktrees and simulators
 
-`worktree-cache-clean [directory] [--dry-run]` removes wholly ignored `DerivedData` or `app-ios/DerivedData` from an idle linked worktree. It never removes a main checkout, source, env files, or databases. Tracked cache files, links to another directory, running T3 turns (including children), and open build files prevent deletion. An unreadable T3 database or failed open-file inspection fails closed.
+T3 Code creates agent worktrees, names their branches, and runs two global scripts (`defaultProjectScripts` in `~/.t3/userdata/settings.json`): `"$HOME/bin/agent-t3-worktree" setup` on create and `"$HOME/bin/agent-t3-worktree" settle` on settle. `sidebarAutoSettleOnMerge` makes a merged PR settle its thread. Nothing runs on a schedule.
 
-Use it as a T3 **Run on settle** script: `if [ -f .git ]; then worktree-cache-clean; fi`. This reclaims generated output even when T3 retains the checkout because its branch metadata differs from Git. The next build recreates the cache. Keep whole-worktree cleanup's local-change protections enabled.
+- `agent-t3-worktree setup` runs `bun install --frozen-lockfile`, gives the worktree its own 10-port block (every `*PORT` default in the root `.env` and each localhost `*_URL` on one of them, at main + 10000 + (n - 1) * 1000), writes it to `.env.override` (env-manager targets) or `.env.local` (single-project or no env-manager), runs `env-manager gen --local`, then the repo's `worktree:setup` package script. It records what it created in the worktree's git dir.
+- `agent-t3-worktree check [--heal]` fails when that record is missing or a created file, `node_modules`, or the lockfile changed; `--heal` reruns setup. A global Claude Code `SessionStart` hook and each repo's pre-commit run it.
+- `agent-t3-worktree settle` stops the worktree's servers and simulators, removes ignored `DerivedData` and `.build` caches when no T3 run or open file uses them, and runs `gc` on its repository.
+- `agent-t3-worktree gc [--repo <path>] [--dry-run]` covers T3's projects only. It removes a worktree when a merged PR holds every commit of its HEAD and it is clean, unused by any process, and not in an active T3 run, along with its servers, simulators, and branch (local and origin); it deletes merged branches that no worktree uses, and empty leftover T3 directories. Everything else is listed, never touched.
+- `agent-t3-worktree teardown <path|branch> [--force]` removes one worktree that way and updates the default branch.
+- `agent-simulator udid [n]` creates and claims the worktree's simulator (named after its directory, the newest iPhone Pro on the newest iOS runtime); `wait [udid]` holds a boot while CPU is above 70% or 4 simulators are booted (`AGENT_SIMULATOR_MAX_BOOTED`), exiting 3 after 3 minutes; `stop`, `remove <worktree>`, `gc`, and `status` do the rest. Driving the simulator is T3's `device_open`.
