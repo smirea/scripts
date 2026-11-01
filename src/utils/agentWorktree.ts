@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
 import { checkout, git, run, type Checkout } from './shell';
-import { ownedBy, remove as removeSimulator, shutdown } from './simulators';
+import { gc as simulatorGc, ownedBy, remove as removeSimulator, shutdown, status } from './simulators';
 import { cleanWorktreeCache, runningT3Worktree } from './worktreeCache';
 
 const T3_WORKTREES = join(homedir(), '.t3/worktrees');
@@ -266,13 +266,13 @@ function processCwds(): string[] {
   return cwds;
 }
 
+/** Every listener in the worktree's port block, including ports a repo derives from it, such as e2e servers. */
 function listeningPids(root: string): string[] {
-  const file = join(root, OVERRIDE);
-  const values = join(root, VALUES);
-  const text = [file, values].filter(existsSync).map(path => readFileSync(path, 'utf8')).join('\n');
-  if (!text) return [];
-  const ports = [...text.matchAll(/^(?:[A-Z][A-Z0-9_]*_)?PORT=(\d+)/gm)].map(([, port]) => `-iTCP:${port}`);
-  if (!ports.length) return [];
+  const text = [OVERRIDE, VALUES].map(name => join(root, name)).filter(existsSync).map(path => readFileSync(path, 'utf8')).join('\n');
+  const values = [...text.matchAll(/^(?:[A-Z][A-Z0-9_]*_)?PORT=(\d+)/gm)].map(([, port]) => Number(port));
+  if (!values.length) return [];
+  const base = Math.min(...values);
+  const ports = Array.from({ length: SLOT }, (_, offset) => `-iTCP:${base + offset}`);
   return [...new Set(run(['lsof', '-t', '-sTCP:LISTEN', ...ports], { allowFail: true }).split('\n').filter(Boolean))];
 }
 
@@ -417,6 +417,6 @@ export function settle(cwd: string, { dryRun = false } = {}): string[] {
       report.push(`kept build caches: ${(error as Error).message}`);
     }
   }
-  report.push(...gc([current.main], { dryRun }));
+  report.push(...gc([current.main], { dryRun }), ...simulatorGc({ dryRun }), status());
   return report;
 }
