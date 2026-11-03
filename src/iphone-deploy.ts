@@ -136,14 +136,21 @@ function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: s
 }
 
 function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
+  // env-manager walks up to the nearest .env, which can belong to an unrelated parent directory
+  // (and may not even parse, like a shell dotfile at ~/.env).
+  if (repoRoot && !hasEnvFileWithin(dir, repoRoot)) return null;
   const result = spawnSync('env-manager', ['info'], { cwd: dir, encoding: 'utf8' });
   if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null;
   if (result.status === ENV_MANAGER_NOT_INITIALIZED) return null;
   if (result.status !== 0) throw new Error(`env-manager info failed in ${tilde(dir)}:\n${(result.stderr || String(result.error)).trim()}`);
-  const info: EnvManagerInfo = JSON.parse(result.stdout);
-  // env-manager walks up to the nearest .env, which can belong to an unrelated parent directory.
-  if (repoRoot && path.relative(repoRoot, info.root).startsWith('..')) return null;
-  return info;
+  return JSON.parse(result.stdout);
+}
+
+function hasEnvFileWithin(dir: string, root: string): boolean {
+  for (let current = dir; ; current = path.dirname(current)) {
+    if (existsSync(path.join(current, '.env'))) return true;
+    if (current === root || current === path.dirname(current)) return false;
+  }
 }
 
 function selectEnvironment(dir: string, repoRoot: string | undefined, requested?: string): EnvSelection | null {
