@@ -1,0 +1,914 @@
+{
+  "name": "Recomp v3 (6-day)",
+  "cycles": 10,
+  "days": [
+    {
+      "name": "Mon — Upper A (push)",
+      "exercises": [
+        {
+          "name": "Smith Machine Bench Press",
+          "notes": "Main lift. Log every set's load. After lifting: 30 min Z2. When all sets hit 8 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            }
+          ]
+        },
+        {
+          "name": "45° Incline Dumbbell Press",
+          "notes": "When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Chest-Supported T-Bar Row",
+          "notes": "When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Seated Dumbbell Overhead Press",
+          "notes": "When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Standing Dumbbell Lateral Raise",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Cable Rope Triceps Pushdown",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Tue — Lower A (squat)",
+      "exercises": [
+        {
+          "name": "Smith Machine Back Squat",
+          "notes": "Main lift. First leg sessions in a long time: keep weights very light in weeks 1–2, soreness will be heavy. Add leg extension 2×12–15 and calf raises 3×12–15 manually if the catalog lacks them. After lifting: 20 min Z2 bike. When all sets hit 8 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            },
+            {
+              "reps": [
+                5,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            }
+          ]
+        },
+        {
+          "name": "Romanian Deadlift",
+          "notes": "When all sets hit 8 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                8,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                8,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            }
+          ]
+        },
+        {
+          "name": "Leg Press",
+          "notes": "When all sets hit 12 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Kneeling Cable Crunch",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Wed — Upper B (pull) + intervals",
+      "exercises": [
+        {
+          "name": "Lat Pulldown",
+          "notes": "Main lift (swap for pull-ups once you can do 4×6). After lifting: 4×4 intervals on bike/rower, 4 min at ~90% max HR, 3 min easy. Weeks 1–2: no intervals; weeks 3–4: 3×4. When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                6,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                6,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                6,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                6,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Neutral Grip Cable Row",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Single Arm Elbow-In Dumbbell Row",
+          "notes": "When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            }
+          ]
+        },
+        {
+          "name": "Pin-Loaded Machine Chest Press",
+          "notes": "When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            }
+          ]
+        },
+        {
+          "name": "Neutral Grip Machine Rear Delt Fly",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Incline Dumbbell Biceps Curl",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Thu — Z2 + core",
+      "exercises": [
+        {
+          "name": "Standing Cable Crunch",
+          "notes": "Main work today is 60 min Z2 (incline walk / bike / rower, conversational pace). Track watts or pace at a fixed HR on the same machine every week. When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Cable Face Pull",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                15,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                15,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Fri — Lower B (hinge)",
+      "exercises": [
+        {
+          "name": "Romanian Deadlift",
+          "notes": "Main lift today, heavier than Tuesday (swap for trap-bar deadlift 3×4–6 once form is dialed in; add it manually if the catalog lacks it). Add seated leg curl 3×10–12 manually. After lifting: 20 min Z2. When all sets hit 8 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                6,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            },
+            {
+              "reps": [
+                6,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            },
+            {
+              "reps": [
+                6,
+                8
+              ],
+              "rir": 2,
+              "restSeconds": 180
+            }
+          ]
+        },
+        {
+          "name": "45 Degree Leg Press",
+          "notes": "When all sets hit 12 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            },
+            {
+              "reps": [
+                8,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 150
+            }
+          ]
+        },
+        {
+          "name": "Smith Machine Good Morning",
+          "notes": "When all sets hit 12 reps at the target RIR, add 10 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Ab Crunch Machine",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Sun — Upper C (aesthetic)",
+      "exercises": [
+        {
+          "name": "Neutral Grip Pin-Loaded Machine Shoulder Press",
+          "notes": "After lifting: 45 min Z2. When all sets hit 10 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            },
+            {
+              "reps": [
+                8,
+                10
+              ],
+              "rir": 2,
+              "restSeconds": 120
+            }
+          ]
+        },
+        {
+          "name": "Standing Dumbbell Lateral Raise",
+          "notes": "When all sets hit 20 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                12,
+                20
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                20
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                20
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                12,
+                20
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Pec Deck Fly",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Overhand Grip Cable Lat Pulldown",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 90
+            }
+          ]
+        },
+        {
+          "name": "Standing Dumbbell Hammer Curl",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Cable Rope Overhead Triceps Extension",
+          "notes": "When all sets hit 12 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                10,
+                12
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        },
+        {
+          "name": "Low Pulley Face Pull",
+          "notes": "When all sets hit 15 reps at the target RIR, add 5 lb next time. Weeks 1–2: do only 2 sets at 3 RIR. Weeks 3–4: all sets at 2 RIR. Week 5+: last set at 1 RIR.",
+          "sets": [
+            {
+              "reps": [
+                15,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            },
+            {
+              "reps": [
+                15,
+                15
+              ],
+              "rir": 2,
+              "restSeconds": 60
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
