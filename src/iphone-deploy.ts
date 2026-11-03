@@ -17,6 +17,8 @@ const ENV_MANAGER_NOT_INITIALIZED = 3;
 const LINK_BUCKET = 'iphone-push-app'; // name predates the iphone-deploy rename
 const LINK_EXPIRY_DAYS = 7;
 const LABEL_WIDTH = 9;
+const PROBE_ATTEMPTS = 3;
+const PROBE_RETRY_MS = 3_000;
 
 interface Device {
   identifier: string;
@@ -498,7 +500,14 @@ function checkPhone(device: Device) {
   const output = path.join(BUILD_ROOT, 'lock-state.json');
   const log = path.join(BUILD_ROOT, 'device-check.log');
   // A disconnected tunnel in the device list can reconnect on demand, so probe the phone directly.
-  const probe = runLogged('xcrun', ['devicectl', 'device', 'info', 'lockState', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
+  // Over Wi-Fi the first call after the phone sleeps or roams often hits a dead tunnel
+  // ("Connection reset by peer") while the next call builds a fresh one, so retry before blaming USB.
+  const probeLockState = () => runLogged('xcrun', ['devicectl', 'device', 'info', 'lockState', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
+  let probe = probeLockState();
+  for (let attempt = 1; !probe.ok && attempt < PROBE_ATTEMPTS; attempt++) {
+    Bun.sleepSync(PROBE_RETRY_MS);
+    probe = probeLockState();
+  }
   if (!probe.ok) deviceFailure(`${device.name} is paired but unreachable`, log, probe.log);
   const state = JSON.parse(readFileSync(output, 'utf8')).result;
   if (!('passcodeRequired' in state) && !('unlockedSinceBoot' in state)) {
