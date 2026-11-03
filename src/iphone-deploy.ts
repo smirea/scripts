@@ -28,6 +28,7 @@ interface Device {
   os?: string;
   simulated: boolean;
   physicalIOS: boolean;
+  iPhone: boolean;
   paired: boolean;
   booted: boolean;
   transport?: string;
@@ -85,13 +86,16 @@ if (import.meta.main) {
 
   void createScript('iphone-deploy')
     .command('push <apps..>', 'Build each app in Release, install it on a paired iPhone (keeping app data), and launch it', (y) => appOptions(y)
-      .option('device', { type: 'string', describe: 'Device UDID; defaults to the only paired physical iPhone' }),
+      .option('device', { type: 'string', describe: 'Device index, name, or UDID, as listed by the devices command; defaults to the only paired physical iPhone' }),
     async (argv) => {
       preflight({ devicectl: true });
       const plans = plan(argv);
-      header('iPhone');
+      header('Device');
       const device = task('device', argv.device ?? 'paired iPhone', () => selectDevice(argv.device), (d) => d.name);
-      task('reach', 'lock state', () => checkPhone(device), () => 'unlocked');
+      task('reach', 'lock state, Developer Mode', () => {
+        checkPhone(device);
+        checkDeveloperMode(device);
+      }, () => 'ready');
       for (const app of plans) pushApp(app, device);
     })
     .command('link <apps..>', `Build a development-signed .ipa of each app and upload it behind an install link (devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`, appOptions,
@@ -291,7 +295,9 @@ function xcodebuild({ name, project, env, prepareDir, team: requestedTeam }: App
   if (!build.ok) {
     const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5);
     const diagnosis = errors.length ? errors.join('\n') : build.log;
-    const hint = /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(diagnosis)
+    const hint = /Developer Mode disabled/i.test(build.log)
+      ? 'Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the device, and retry.'
+      : /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(diagnosis)
       ? 'The App Group is enabled on that target\'s App ID but not assigned to it, which xcodebuild doesn\'t fix on its own. In Xcode > target > Signing & Capabilities > App Groups, tick the group (or developer.apple.com > Identifiers > that bundle ID > App Groups > Configure), then retry.'
       : /provision|signing|certificate|development team/i.test(diagnosis)
         ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
@@ -476,7 +482,7 @@ function listDevices(): Device[] {
   const list = runLogged('xcrun', ['devicectl', 'list', 'devices', '--timeout', '20', '--json-output', output], log);
   if (!list.ok) deviceFailure('Xcode could not list devices', log, list.log);
 
-  return JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
+  const devices: Device[] = JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
     const props = raw.properties ?? {};
     const hardware = props.hardware ?? raw.hardwareProperties ?? {};
     const connection = props.connection ?? raw.connectionProperties ?? {};
@@ -490,20 +496,23 @@ function listDevices(): Device[] {
       os: deviceProps.osVersionNumber && `${hardware.platform ?? ''} ${deviceProps.osVersionNumber}`.trim(),
       // Real devices Xcode has not fully probed report reality as null, so only "simulated" is trusted here.
       simulated: hardware.reality === 'simulated',
-      physicalIOS: hardware.reality === 'physical' && hardware.platform === 'iOS',
+      physicalIOS: hardware.reality !== 'simulated' && hardware.platform === 'iOS',
+      iPhone: hardware.deviceType === 'iPhone',
       paired: connection.pairingState === 'paired',
       booted: deviceProps.bootState === 'booted',
       transport: connection.transportType,
       developerModeDisabled: mode === 'disabled',
     };
   });
+  return devices.sort((a, b) => Number(a.simulated) - Number(b.simulated));
 }
 
 function printDevices(devices: Device[]) {
   const transports: Record<string, string> = { wired: 'USB', localNetwork: 'Wi-Fi' };
-  const rows = devices.map((d) => ({
+  const rows = devices.map((d, i) => ({
     device: d,
     cells: [
+      String(i + 1),
       d.name,
       d.model ?? '',
       d.os ?? '',
@@ -521,8 +530,8 @@ function printDevices(devices: Device[]) {
   for (const group of groups) {
     header(group.title, group.rows.length ? undefined : 'none');
     for (const { cells } of group.rows) {
-      const [name, ...rest] = cells.map((cell, i) => (i === cells.length - 1 ? cell : cell.padEnd(widths[i]!)));
-      console.log(`  ${name}  ${chalk.dim(rest.join('  '))}`);
+      const [index, name, ...rest] = cells.map((cell, i) => (i === 0 ? cell.padStart(widths[i]!) : i === cells.length - 1 ? cell : cell.padEnd(widths[i]!)));
+      console.log(`  ${chalk.cyan(index)}  ${name}  ${chalk.dim(rest.join('  '))}`);
     }
   }
 }
@@ -531,11 +540,19 @@ function selectDevice(requested?: string): Device {
   const devices = listDevices();
   let device: Device | undefined;
   if (requested) {
-    device = devices.find((d) => requested === d.identifier || requested === d.udid);
+    // Typed names usually have a straight apostrophe where devices use a curly one ("Stefan’s iPad").
+    const normalize = (name: string) => name.replaceAll('’', "'").toLowerCase();
+    const byName = devices.filter((d) => normalize(d.name) === normalize(requested));
+    if (byName.length > 1) {
+      throw new Error(`Several devices are named ${requested}; pick one by UDID:\n${byName.map((d) => `  ${d.udid ?? d.identifier}  ${d.model ?? ''}`).join('\n')}`);
+    }
+    device = /^\d+$/.test(requested)
+      ? devices[Number(requested) - 1]
+      : devices.find((d) => requested === d.identifier || requested === d.udid) ?? byName[0];
     if (!device) throw new Error(`No device ${requested}. Connect it by USB and unlock it; list them with iphone-deploy devices.`);
     if (!device.physicalIOS) throw new Error(`${device.name} is not a physical iOS device.`);
   } else {
-    const phones = devices.filter((d) => d.physicalIOS && d.paired);
+    const phones = devices.filter((d) => d.physicalIOS && d.iPhone && d.paired);
     if (phones.length !== 1) {
       const ids = phones.map((d) => d.udid ?? d.identifier);
       const width = Math.max(0, ...ids.map((id) => id.length));
@@ -569,6 +586,17 @@ function checkPhone(device: Device) {
   }
   if (state.passcodeRequired === true || state.unlockedSinceBoot === false) {
     throw new Error('The iPhone is locked. Unlock it, keep it awake, and retry.');
+  }
+}
+
+// The device list leaves developerModeStatus null for devices Xcode has not probed in detail.
+function checkDeveloperMode(device: Device) {
+  const output = path.join(BUILD_ROOT, 'device-details.json');
+  const log = path.join(BUILD_ROOT, 'device-check.log');
+  const details = runLogged('xcrun', ['devicectl', 'device', 'info', 'details', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
+  if (!details.ok) deviceFailure(`${device.name} is paired but unreachable`, log, details.log);
+  if (JSON.parse(readFileSync(output, 'utf8')).result.deviceProperties?.developerModeStatus === 'disabled') {
+    throw new Error(`Developer Mode is off on ${device.name}. Turn it on in Settings > Privacy & Security, restart the device, and retry.`);
   }
 }
 
