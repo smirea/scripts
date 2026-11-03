@@ -24,8 +24,13 @@ interface Device {
   identifier: string;
   name: string;
   udid?: string;
+  model?: string;
+  os?: string;
+  simulated: boolean;
   physicalIOS: boolean;
   paired: boolean;
+  booted: boolean;
+  transport?: string;
   developerModeDisabled: boolean;
 }
 
@@ -94,6 +99,10 @@ if (import.meta.main) {
       preflight({ devicectl: false });
       const linkBase = linkBucketUrl();
       for (const app of plan(argv)) publishApp(app, linkBase);
+    })
+    .command('devices', 'List devices Xcode knows about, real ones before simulators', {}, async () => {
+      preflight({ devicectl: true });
+      printDevices(listDevices());
     })
     .demandCommand(1)
     .parseAsync();
@@ -461,31 +470,69 @@ function findBuiltApp(productsDir: string, scheme: string): string {
   return path.join(productsDir, app);
 }
 
-function selectDevice(requested?: string): Device {
+function listDevices(): Device[] {
   const output = path.join(BUILD_ROOT, 'devices.json');
   const log = path.join(BUILD_ROOT, 'device-check.log');
   const list = runLogged('xcrun', ['devicectl', 'list', 'devices', '--timeout', '20', '--json-output', output], log);
   if (!list.ok) deviceFailure('Xcode could not list devices', log, list.log);
 
-  const devices: Device[] = JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
+  return JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
     const props = raw.properties ?? {};
     const hardware = props.hardware ?? raw.hardwareProperties ?? {};
     const connection = props.connection ?? raw.connectionProperties ?? {};
+    const deviceProps = raw.deviceProperties ?? props;
     const mode = props.state?.developerModeStatus ?? raw.deviceProperties?.developerModeStatus;
     return {
       identifier: raw.identifier,
-      name: raw.deviceProperties?.name ?? props.name ?? raw.identifier,
+      name: deviceProps.name ?? raw.identifier,
       udid: hardware.udid,
+      model: hardware.marketingName ?? hardware.productType,
+      os: deviceProps.osVersionNumber && `${hardware.platform ?? ''} ${deviceProps.osVersionNumber}`.trim(),
+      // Real devices Xcode has not fully probed report reality as null, so only "simulated" is trusted here.
+      simulated: hardware.reality === 'simulated',
       physicalIOS: hardware.reality === 'physical' && hardware.platform === 'iOS',
       paired: connection.pairingState === 'paired',
+      booted: deviceProps.bootState === 'booted',
+      transport: connection.transportType,
       developerModeDisabled: mode === 'disabled',
     };
   });
+}
 
+function printDevices(devices: Device[]) {
+  const transports: Record<string, string> = { wired: 'USB', localNetwork: 'Wi-Fi' };
+  const rows = devices.map((d) => ({
+    device: d,
+    cells: [
+      d.name,
+      d.model ?? '',
+      d.os ?? '',
+      d.simulated
+        ? (d.booted ? 'booted' : 'shutdown')
+        : [d.transport && (transports[d.transport] ?? d.transport), !d.paired && 'unpaired', d.developerModeDisabled && 'dev mode off'].filter(Boolean).join(', '),
+      d.udid ?? d.identifier,
+    ],
+  }));
+  const widths = rows[0]?.cells.map((_, i) => Math.max(...rows.map((r) => r.cells[i]!.length))) ?? [];
+  const groups = [
+    { title: 'Real', rows: rows.filter((r) => !r.device.simulated) },
+    { title: 'Simulators', rows: rows.filter((r) => r.device.simulated) },
+  ];
+  for (const group of groups) {
+    header(group.title, group.rows.length ? undefined : 'none');
+    for (const { cells } of group.rows) {
+      const [name, ...rest] = cells.map((cell, i) => (i === cells.length - 1 ? cell : cell.padEnd(widths[i]!)));
+      console.log(`  ${name}  ${chalk.dim(rest.join('  '))}`);
+    }
+  }
+}
+
+function selectDevice(requested?: string): Device {
+  const devices = listDevices();
   let device: Device | undefined;
   if (requested) {
     device = devices.find((d) => requested === d.identifier || requested === d.udid);
-    if (!device) throw new Error(`No device ${requested}. Connect it by USB and unlock it; list UDIDs with xcrun devicectl list devices.`);
+    if (!device) throw new Error(`No device ${requested}. Connect it by USB and unlock it; list them with iphone-deploy devices.`);
     if (!device.physicalIOS) throw new Error(`${device.name} is not a physical iOS device.`);
   } else {
     const phones = devices.filter((d) => d.physicalIOS && d.paired);
