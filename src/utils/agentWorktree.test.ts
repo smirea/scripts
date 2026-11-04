@@ -63,6 +63,23 @@ test('check leaves a hand-made worktree that setup never ran in alone', () => {
   expect(check(manual)).toEqual([]);
 });
 
+test('setup waits for T3 to replace the placeholder branch so the agent starts on the final name', async () => {
+  const { main } = repoWithWorktree('CLIENT_PORT=6000\n');
+  const worktree = join(main, '..', 'repo/.claude/worktrees/placeholder');
+  git(main, 'worktree', 'add', '-qb', 't3/0a1b2c3d', worktree);
+  const rename = Bun.sleep(400).then(() => git(worktree, 'branch', '-m', 't3/0a1b2c3d', 'set-main-accent-color'));
+  const summary = await setup(worktree);
+  await rename;
+  expect(summary).toContain('  branch set-main-accent-color');
+});
+
+test('setup gives up on a placeholder branch T3 never renames', async () => {
+  const { main } = repoWithWorktree('CLIENT_PORT=6000\n');
+  const worktree = join(main, '..', 'repo/.claude/worktrees/placeholder');
+  git(main, 'worktree', 'add', '-qb', 't3/0a1b2c3d', worktree);
+  expect(await setup(worktree, { branchTimeoutMs: 300 })).toContain('  branch t3/0a1b2c3d (T3 didn\'t rename it within 0.3s)');
+});
+
 test('setup in the main checkout changes nothing', async () => {
   const { main } = repoWithWorktree('CLIENT_PORT=6000\n');
   expect(await setup(main)).toBe('Main checkout: nothing to set up.');

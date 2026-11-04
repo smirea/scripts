@@ -136,7 +136,25 @@ async function assignPorts(current: Checkout, plan: PortPlan): Promise<number> {
   });
 }
 
-export async function setup(cwd: string, { resetData = false } = {}): Promise<string> {
+// Mirrors T3 Code's TEMP_WORKTREE_BRANCH_PATTERN: the placeholder branch a new worktree gets before T3 renames it.
+const T3_TEMPORARY_BRANCH = /^(?:t3[-/][0-9a-f]{8}|t3code(?:[-/][0-9a-f]{8}|\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}))$/;
+
+/**
+ * T3 Code (0.1.7) names the branch with an LLM call it forks beside the setup script, then starts the agent once setup
+ * exits without waiting for that rename, so the agent sees one branch and pushes another. Setup is the only step T3
+ * blocks the agent on, so it holds here until the rename lands. A failed rename leaves the placeholder, hence the cap.
+ */
+async function awaitBranchName(root: string, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let branch = git(root, 'branch', '--show-current');
+  while (T3_TEMPORARY_BRANCH.test(branch) && Date.now() < deadline) {
+    await Bun.sleep(250);
+    branch = git(root, 'branch', '--show-current');
+  }
+  return branch;
+}
+
+export async function setup(cwd: string, { resetData = false, branchTimeoutMs = 60_000 } = {}): Promise<string> {
   const current = checkout(cwd);
   if (!current) throw new Error('Not inside a git checkout.');
   if (!current.linked) return 'Main checkout: nothing to set up.';
@@ -188,6 +206,10 @@ export async function setup(cwd: string, { resetData = false } = {}): Promise<st
     step(['bun', legacy], root);
     summary.push('  repo   bun scripts/setup-worktree.ts');
   }
+
+  const branch = await awaitBranchName(root, branchTimeoutMs);
+  if (T3_TEMPORARY_BRANCH.test(branch)) summary.push(`  branch ${branch} (T3 didn't rename it within ${branchTimeoutMs / 1000}s)`);
+  else if (branch) summary.push(`  branch ${branch}`);
 
   const after = ignored(root);
   const stamp: Stamp = { root, lockHash: lockHash(root), created: [...after].filter(path => !before.has(path)).sort(), ...(block ? { block } : {}) };
