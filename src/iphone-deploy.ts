@@ -20,7 +20,7 @@ const LABEL_WIDTH = 9;
 const PROBE_ATTEMPTS = 3;
 const PROBE_RETRY_MS = 3_000;
 
-interface Device {
+export interface Device {
   identifier: string;
   name: string;
   udid?: string;
@@ -28,6 +28,7 @@ interface Device {
   os?: string;
   simulated: boolean;
   physicalIOS: boolean;
+  physicalWatch: boolean;
   iPhone: boolean;
   paired: boolean;
   booted: boolean;
@@ -421,6 +422,29 @@ function pushApp(plan: AppPlan, device: Device) {
   const launchLog = path.join(buildDir, 'launch.log');
   const launch = task('launch', bundleId, () => runLogged('xcrun', ['devicectl', 'device', 'process', 'launch', '--device', device.identifier, '--timeout', '30', '--terminate-existing', bundleId], launchLog));
   if (!launch.ok) deviceFailure(`${name} is installed, but launching it failed; open it manually`, launchLog, launch.log);
+
+  const watchNote = watchAppNote(appPath, listDevices());
+  if (watchNote) line('watch', watchNote);
+}
+
+// devicectl installs only the iPhone app. A development-signed watch app then installs from the
+// iPhone's Watch app, and only on a watch its provisioning profile lists, which automatic signing
+// adds once Xcode has paired with that watch. Without one the watch app silently never appears.
+export function watchAppNote(appPath: string, devices: Device[]): string | null {
+  const watchDir = path.join(appPath, 'Watch');
+  const watchApp = existsSync(watchDir) && statSync(watchDir).isDirectory() ? readdirSync(watchDir).find((entry) => entry.endsWith('.app')) : undefined;
+  if (!watchApp) return null;
+  const profile = path.join(watchDir, watchApp, 'embedded.mobileprovision');
+  const decoded = run('security', ['cms', '-D', '-i', profile]);
+  const provisioned = new Set(decoded.status === 0 ? [...decoded.stdout.matchAll(/<string>([0-9A-Fa-f-]{20,})<\/string>/g)].map((match) => match[1]!.toUpperCase()) : []);
+  const watch = devices.find((device) => device.physicalWatch && device.udid && provisioned.has(device.udid.toUpperCase()));
+  if (watch) return `${watchApp} is signed for ${watch.name}; install it from the iPhone's Watch app > Available Apps.`;
+  return chalk.yellow([
+    `${watchApp} is not signed for any watch Xcode knows, so no watch can install it.`,
+    'Pair the watch once (iPhone on USB or Wi-Fi, Developer Mode on in the watch\'s Settings > Privacy & Security,',
+    'then Xcode > Window > Devices and Simulators), rerun, then install it from the iPhone\'s Watch app > Available Apps.',
+    'Or use the TestFlight build, which installs on any watch.',
+  ].join('\n' + ' '.repeat(LABEL_WIDTH + 1)));
 }
 
 function gitRoot(dir: string): string | undefined {
@@ -497,6 +521,7 @@ function listDevices(): Device[] {
       // Real devices Xcode has not fully probed report reality as null, so only "simulated" is trusted here.
       simulated: hardware.reality === 'simulated',
       physicalIOS: hardware.reality !== 'simulated' && hardware.platform === 'iOS',
+      physicalWatch: hardware.reality !== 'simulated' && hardware.platform === 'watchOS',
       iPhone: hardware.deviceType === 'iPhone',
       paired: connection.pairingState === 'paired',
       booted: deviceProps.bootState === 'booted',
