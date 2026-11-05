@@ -10,6 +10,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'agent-t3-worktree', source: 'src/agent-t3-worktree.ts' },
   { name: 'agent-simulator', source: 'src/agent-simulator.ts' },
   { name: 'pr-ship', source: 'src/pr-ship.ts' },
+  { name: 'procrastimate', source: 'src/procrastimate.ts' },
   { name: 'git-invite-ai-to-repos', source: 'src/git-invite-ai-to-repos.ts' },
   { name: 'wt', source: 'src/git-worktree.ts' },
   { name: 'whoop-pull', source: 'src/whoop.ts' },
