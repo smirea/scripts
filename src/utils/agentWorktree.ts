@@ -308,8 +308,16 @@ const contains = (main: string, descendant: string, commit: string) =>
 /** The merged PR that already holds every commit of `head`, found by `head`'s own branch or T3's recorded one. */
 function mergedPrFor(main: string, prs: Prs, head: string | undefined, branches: (string | undefined)[]): Pr | undefined {
   if (!head) return undefined;
-  const candidates = prs.merged.filter(pr => pr.headRefOid === head || branches.includes(pr.headRefName));
-  return candidates.find(pr => contains(main, pr.headRefOid, head));
+  const tip = belowEnvManagerCommits(main, head);
+  const candidates = prs.merged.filter(pr => pr.headRefOid === tip || branches.includes(pr.headRefName));
+  return candidates.find(pr => contains(main, pr.headRefOid, tip));
+}
+
+// After a merge, a worker uploads new settings with `env-manager up`, which commits locally and is never pushed.
+function belowEnvManagerCommits(main: string, head: string): string {
+  let tip = head;
+  while (run(['git', '-C', main, 'log', '-1', '--format=%s', tip], { allowFail: true }).trim() === 'chore: env manager update') tip = `${tip}^`;
+  return tip === head ? head : run(['git', '-C', main, 'rev-parse', tip], { allowFail: true }).trim() || head;
 }
 
 /** The working directories of every process except this one and its ancestors, so settle can remove its own worktree. */
