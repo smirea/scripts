@@ -103,6 +103,10 @@ class Api {
   }
 }
 
+const webOrigin = new URL(env.PROCRASTIMATE_API_URL).origin;
+const taskUrl = (id: string) => `${webOrigin}/inbox?task=${encodeURIComponent(id)}`;
+const taskRef = (task: Pick<Task, 'id' | 'title'>) => `[${task.title.replace(/[[\]\\]/g, '\\$&')}](${taskUrl(task.id)})`;
+
 function projectId(view: View, nameOrId: string): string {
   const matches = view.projects.filter(p => p.id === nameOrId || p.name === nameOrId);
   if (matches.length !== 1)
@@ -142,7 +146,7 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
 \`procrastimate GET /docs/agent\` is the full API guide.`)
   .command(
     'tasks <project>',
-    'Open tasks with section, parent, priority, label names, and notes.',
+    'Open tasks with section, parent, priority, label names, notes, and each title as a markdown link to the task in the app.',
     command => command.positional('project', { type: 'string', demandOption: true, describe: 'Project name or id.' }),
     async argv => {
       const view = await new Api().view();
@@ -154,7 +158,7 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
           `${t.id} p${t.priority} section=${sections.get(t.sectionId ?? '') ?? '-'} parent=${t.parentId ?? '-'}`
             + ` labels=${t.labelIds.map(id => labels.get(id)).join(',')} attachments=${t.attachments.length}`,
         );
-        console.log(`  ${t.title}`);
+        console.log(`  ${taskRef(t)}`);
         if (t.notes) console.log(`  ${t.notes.replaceAll('\n', '\n  ')}`);
       }
     },
@@ -214,8 +218,17 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
     },
   )
   .command(
+    'ref <tasks..>',
+    'Print "[<title>](<url>)" for each task: the markdown link to cite a task to Stefan, opening it in the signed-in app. Publishes nothing.',
+    command => command.positional('tasks', { type: 'string', array: true, demandOption: true, describe: 'Task ids.' }),
+    async argv => {
+      const view = await new Api().view();
+      for (const id of argv.tasks) console.log(taskRef(findTask(view, id)));
+    },
+  )
+  .command(
     'link <tasks..>',
-    'Print "<id> <public read-only link>" for each task.',
+    'Publish each task as a read-only page anyone can open without signing in, and print "<id> <url>". Only to share a task with someone other than Stefan; `ref` links it for him.',
     command => command
       .positional('tasks', { type: 'string', array: true, demandOption: true, describe: 'Task ids.' })
       .option('dry-run', dryRun),
@@ -254,7 +267,7 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
   )
   .command(
     'file <project> <title> [notes]',
-    'Add a task unless an open one in the project has this title, and print "<id> <public link>"; safe to rerun.',
+    'Add a task unless an open one in the project has this title, and print "<id> [<title>](<url>)"; safe to rerun.',
     command => command
       .positional('project', { type: 'string', demandOption: true, describe: 'Project name or id.' })
       .positional('title', { type: 'string', demandOption: true })
@@ -275,13 +288,11 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
         ...(argv.parent && { parentId: argv.parent }),
       };
       const existing = await find();
-      if (!existing && api.skip(describeRequest('POST', '/tasks', body))) {
-        await api.link('<new task id>');
-      } else {
+      if (existing || !api.skip(describeRequest('POST', '/tasks', body))) {
         const post = async () => (await api.json<{ id: string }>('POST', '/tasks', body)).id;
         // A failed POST may still have created the task, so look again before the one retry.
         const id = existing ?? (await post().catch(find)) ?? (await post());
-        console.log(`${id} ${await api.link(id)}`);
+        console.log(`${id} ${taskRef({ id, title: argv.title })}`);
       }
       api.report();
     },
