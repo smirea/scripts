@@ -105,7 +105,8 @@ class Api {
 
 const webOrigin = new URL(env.PROCRASTIMATE_API_URL).origin;
 const taskUrl = (id: string) => `${webOrigin}/inbox?task=${encodeURIComponent(id)}`;
-const taskRef = (task: Pick<Task, 'id' | 'title'>) => `[${task.title.replace(/[[\]\\]/g, '\\$&')}](${taskUrl(task.id)})`;
+const escapeTitle = (title: string) => title.replace(/[[\]\\]/g, '\\$&');
+const taskRef = (task: Pick<Task, 'id' | 'title'>) => `[${escapeTitle(task.title)}](${taskUrl(task.id)})`;
 
 function projectId(view: View, nameOrId: string): string {
   const matches = view.projects.filter(p => p.id === nameOrId || p.name === nameOrId);
@@ -218,23 +219,19 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
     },
   )
   .command(
-    'ref <tasks..>',
-    'Print "[<title>](<url>)" for each task: the markdown link to cite a task to Stefan, opening it in the signed-in app. Publishes nothing.',
-    command => command.positional('tasks', { type: 'string', array: true, demandOption: true, describe: 'Task ids.' }),
-    async argv => {
-      const view = await new Api().view();
-      for (const id of argv.tasks) console.log(taskRef(findTask(view, id)));
-    },
-  )
-  .command(
     'link <tasks..>',
-    'Publish each task as a read-only page anyone can open without signing in, and print "<id> <url>". Only to share a task with someone other than Stefan; `ref` links it for him.',
+    'Print "[<title>](<url>)" for each task, linking to it in the signed-in app. --public publishes a read-only page anyone can open and links that instead.',
     command => command
       .positional('tasks', { type: 'string', array: true, demandOption: true, describe: 'Task ids.' })
+      .option('public', { type: 'boolean', default: false, describe: 'Publish a public read-only link, only to share a task with someone other than Stefan.' })
       .option('dry-run', dryRun),
     async argv => {
       const api = new Api(argv.dryRun);
-      for (const task of argv.tasks) console.log(`${task} ${await api.link(task)}`);
+      const view = await api.view();
+      for (const id of argv.tasks) {
+        const task = findTask(view, id);
+        console.log(argv.public ? `[${escapeTitle(task.title)}](${await api.link(id)})` : taskRef(task));
+      }
       api.report();
     },
   )
