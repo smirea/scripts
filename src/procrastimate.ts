@@ -26,6 +26,13 @@ const repoRoot = path.resolve(import.meta.dir, '..');
 const describeRequest = (method: string, pathname: string, body?: unknown) =>
   `${method} ${pathname}${body === undefined ? '' : ` ${typeof body === 'string' ? body : JSON.stringify(body)}`}`;
 
+// A proxy or Worker crash answers with a whole HTML page, which buried the status and the hint under markup.
+function errorBody(text: string): string {
+  if (!/^\s*</.test(text)) return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+  const title = text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim();
+  return `(HTML error page${title ? `: ${title}` : ''})`;
+}
+
 /** One command's session with the API. Under `dryRun`, reads still run and every write lands in `plan` instead. */
 class Api {
   readonly plan: string[] = [];
@@ -51,8 +58,9 @@ class Api {
         if (res.ok) return res;
         const hint = res.status === 401
           ? `; the token may be stale: run \`env-manager down\` in ${repoRoot}`
-          : res.status === 404 ? '; check the id with `procrastimate tasks <project>`, or the path with `procrastimate GET /docs/agent`' : '';
-        const error = new Error(`${method} ${pathname}: ${res.status} ${await res.text()}${hint}`);
+          : res.status === 404 ? '; check the id with `procrastimate tasks <project>`, or the path with `procrastimate GET /docs/agent`'
+          : res.status >= 500 && method !== 'GET' ? '; the write may still have landed: check with `procrastimate tasks <project>` before rerunning' : '';
+        const error = new Error(`${method} ${pathname}: ${res.status} ${errorBody(await res.text())}${hint}`);
         if (method !== 'GET' || attempt >= 3 || res.status < 500) throw Object.assign(error, { final: true });
       } catch (error) {
         if (method !== 'GET' || attempt >= 3 || (error as { final?: boolean }).final) throw error;
