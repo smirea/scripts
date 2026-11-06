@@ -292,6 +292,51 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
       for (const task of argv.tasks) await api.complete(task, comment, argv.pr ?? comment);
       api.report();
     },
+  )
+  .command(
+    'webhook',
+    'Webhooks that POST to a URL when a human adds a task or comments. `procrastimate webhook <command> --help`.',
+    command => command
+      .command(
+        'register <url> [projects..]',
+        'Register the URL, or register it again, and print it as JSON with its signing `secret`. A disabled hook turns back on from now; safe to rerun.',
+        sub => sub
+          .positional('url', { type: 'string', demandOption: true, describe: 'HTTPS URL to POST to, such as a T3 webhook task\'s webhookUrl.' })
+          .positional('projects', { type: 'string', array: true, default: [] as string[], describe: 'Project names or ids to watch; none watches the whole space.' })
+          .option('dry-run', dryRun),
+        async argv => {
+          const api = new Api(argv.dryRun);
+          const view = await api.view();
+          const body = { url: argv.url, projectIds: argv.projects.map(p => projectId(view, p)) };
+          if (!api.skip(describeRequest('POST', '/webhooks', body)))
+            console.log(JSON.stringify(await api.json('POST', '/webhooks', body), null, 2));
+          api.report();
+        },
+      )
+      .command(
+        'list',
+        'The space\'s webhooks with their delivery state: `disabledAt` and `lastError` say why one stopped.',
+        sub => sub,
+        async () => console.log(JSON.stringify((await new Api().json<{ webhooks: unknown[] }>('GET', '/webhooks')).webhooks, null, 2)),
+      )
+      .command(
+        'delete <id>',
+        'Delete a webhook by id, from `procrastimate webhook list`.',
+        sub => sub
+          .positional('id', { type: 'string', demandOption: true })
+          .option('dry-run', dryRun),
+        async argv => {
+          const api = new Api(argv.dryRun);
+          const target = `/webhooks?id=${argv.id}`;
+          if (!api.skip(describeRequest('DELETE', target))) {
+            await api.call('DELETE', target);
+            console.log(`deleted ${argv.id}`);
+          }
+          api.report();
+        },
+      )
+      .demandCommand(1, 'Choose a webhook command: register, list, or delete.'),
+    () => {},
   );
 
 for (const method of ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'] as const) {
