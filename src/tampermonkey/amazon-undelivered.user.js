@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.7.0
+// @version      1.8.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -202,18 +202,18 @@
     return ((Number(m[1]) % 12) + (m[3].toLowerCase() === 'p' ? 12 : 0)) * 60 + Number(m[2] ?? 0);
   }
 
-  // Returns arrays of { item, shipment }, one per arrival day, in display order.
+  // Returns { range, rows: [{ item, shipment }] }, one per arrival day, in display order.
   function groupByDay(shipments, today) {
     const groups = new Map();
     for (const shipment of shipments) {
       const rank = groupRank(fromIsoRange(shipment.arrival), today);
       const key = rank.join('|');
-      if (!groups.has(key)) groups.set(key, { rank, rows: [] });
+      if (!groups.has(key)) groups.set(key, { rank, range: fromIsoRange(shipment.arrival), rows: [] });
       groups.get(key).rows.push(...shipment.items.map((item) => ({ item, shipment })));
     }
     return [...groups.values()]
       .toSorted((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2])
-      .map((group) => group.rows.toSorted((a, b) => clockMinutes(a.shipment.status) - clockMinutes(b.shipment.status)));
+      .map(({ range, rows }) => ({ range, rows: rows.toSorted((a, b) => clockMinutes(a.shipment.status) - clockMinutes(b.shipment.status)) }));
   }
 
   function shortTitle(title) {
@@ -354,18 +354,22 @@
     #aud-panel { position: fixed; top: 110px; left: 16px; z-index: 9999; width: min(360px, calc(100vw - 32px));
       max-height: calc(100vh - 130px); overflow: auto; background: #fff; color: #0f1111; border: 1px solid #d5d9d9;
       border-radius: 8px; box-shadow: 0 4px 16px rgba(15,17,17,.15); font: 13px/1.4 "Amazon Ember", Arial, sans-serif; }
-    #aud-panel header { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    #aud-panel header { position: sticky; top: 0; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; padding: 4px 10px;
       background: #f0f2f2; border-bottom: 1px solid #d5d9d9; font-weight: 700; }
-    #aud-panel header span { flex: 1; }
     #aud-panel header button { border: 0; background: none; cursor: pointer; font-size: 15px; color: #565959; padding: 0 2px; }
     #aud-panel header button:hover { color: #0f1111; }
-    #aud-panel .aud-body { padding: 4px 12px 10px; }
-    #aud-panel hr { margin: 6px -12px; border: 0; border-top: 1px solid #d5d9d9; }
+    #aud-panel .aud-body { padding: 0 12px 10px; }
+    #aud-panel .aud-section { margin: 0 -12px; padding: 0 12px 4px; }
+    #aud-panel .aud-delivered { background: #f5f6f6; }
+    #aud-panel .aud-sep { display: flex; align-items: center; gap: 8px; margin: 0 -12px; padding: 6px 12px 0 0; color: #8a8f8f;
+      font-size: 11px; line-height: 1; }
+    #aud-panel .aud-sep::before { content: ''; flex: 1; border-top: 1px solid #d5d9d9; }
+    #aud-panel .aud-section:first-child .aud-sep::before { border-color: transparent; }
+    #aud-panel hr { margin: 4px -12px; border: 0; border-top: 1px solid #e3e6e6; }
     #aud-panel .aud-grid { display: grid; grid-template-columns: repeat(auto-fill, 44px); gap: 6px; padding: 6px 0; }
     #aud-panel .aud-grid a { position: relative; display: block; line-height: 0; }
     #aud-panel .aud-qty { position: absolute; right: -3px; bottom: -3px; padding: 0 4px; background: #fff; border: 1px solid #d5d9d9;
       border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 14px; color: #0f1111; }
-    #aud-panel .aud-caption { margin-bottom: -4px; text-align: right; color: #8a8f8f; font-size: 11px; line-height: 1.2; }
     #aud-panel .aud-grid img, #aud-panel .aud-grid .aud-noimg { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
     #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
     #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
@@ -400,13 +404,12 @@
   function mountPanel() {
     document.getElementById('aud-panel')?.remove();
     if (!document.getElementById('aud-style')) document.head.append(h('style', { id: 'aud-style', textContent: CSS }));
-    const title = h('span', { textContent: 'Not delivered yet' });
     const refresh = h('button', { title: 'Rescan all pages, ignoring the cache', textContent: '↻', onclick: () => run({ useCache: false }) });
     const close = h('button', { title: 'Close', textContent: '×', onclick: () => { hideTooltip(); panel.remove(); } });
     const body = h('div', { className: 'aud-body' });
-    const panel = h('section', { id: 'aud-panel' }, [h('header', {}, [title, refresh, close]), body]);
+    const panel = h('section', { id: 'aud-panel' }, [h('header', {}, [refresh, close]), body]);
     document.body.append(panel);
-    return { title, body };
+    return body;
   }
 
   function relativeDay(date, today) {
@@ -421,11 +424,13 @@
 
   // "Arriving tomorrow" -> "Tomorrow". Relative days are recomputed from the scraped date, since a cached
   // "tomorrow" may already be today.
+  // The section label already names the day, so dated rows keep only the time ("1:55 PM - 2:10 PM", "by 10 PM").
+  // Late and undated rows keep the full status, since their section label doesn't say when.
   function etaText(shipment, today) {
-    let eta = shipment.status.replace(/^((now )?arriving|estimated to arrive)\s+/i, '');
+    const eta = shipment.status.replace(/^((now )?arriving|estimated to arrive)\s+/i, '');
     const arrival = fromIsoRange(shipment.arrival);
-    if (arrival && dayDiff(arrival.start, arrival.end) === 0) eta = eta.replace(RELATIVE_DAY, relativeDay(arrival.start, today));
-    return eta.charAt(0).toUpperCase() + eta.slice(1);
+    if (!arrival || dayDiff(arrival.start, today) < 0) return capitalize(eta);
+    return eta.replace(new RegExp(MONTH_DAY, 'gi'), '').replace(new RegExp(RELATIVE_DAY, 'gi'), '').replace(/^[\s,\-–]+|[\s,\-–]+$/g, '');
   }
 
   function timeAgo(ms) {
@@ -486,7 +491,7 @@
     return itemLink(row, 'aud-row', [
       itemImage(row),
       h('div', { className: 'aud-text' }, [
-        h('div', { className: 'aud-eta', textContent: etaText(row.shipment, startOfToday()) }),
+        ...[etaText(row.shipment, startOfToday())].filter(Boolean).map((eta) => h('div', { className: 'aud-eta', textContent: eta })),
         h('div', { className: 'aud-name', textContent: `${row.item.quantity > 1 ? `${row.item.quantity} × ` : ''}${shortTitle(row.item.title)}` }),
       ]),
     ]);
@@ -499,6 +504,20 @@
     ])));
   }
 
+  const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+
+  function sectionName(range, today) {
+    if (!range) return 'No date yet';
+    if (dayDiff(range.start, today) < 0) return 'Late';
+    const start = relativeDay(range.start, today);
+    if (dayDiff(range.end, range.start) === 0) return capitalize(start);
+    const short = (date) => fmtDate(date, { month: 'short', day: 'numeric' });
+    return `${short(range.start)} – ${short(range.end)}`;
+  }
+
+  const section = (name, className, children) =>
+    h('div', { className: `aud-section ${className}` }, [h('div', { className: 'aud-sep', textContent: name }), ...children]);
+
   function renderResults(container, deliveredToday, pending, today) {
     const sections = [];
     const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
@@ -506,18 +525,15 @@
       const grids = [delivered.filter((row) => row.item.imageOnly), delivered.filter((row) => !row.item.imageOnly)]
         .filter((rows) => rows.length > 0)
         .map(renderGrid);
-      sections.push(h('div', {}, [
-        ...grids.flatMap((grid, i) => (i === 0 ? [grid] : [h('hr'), grid])),
-        h('div', { className: 'aud-caption', textContent: 'delivered today' }),
-      ]));
+      sections.push(section('Delivered today', 'aud-delivered', grids.flatMap((grid, i) => (i === 0 ? [grid] : [h('hr'), grid]))));
     }
     // Items with no name on the page (grocery) render as images clustered at the top of their day.
-    for (const rows of groupByDay(pending, today)) {
+    for (const { range, rows } of groupByDay(pending, today)) {
       const images = rows.filter((row) => row.item.imageOnly);
       const named = rows.filter((row) => !row.item.imageOnly);
-      sections.push(h('div', {}, [...(images.length > 0 ? [renderGrid(images)] : []), ...named.map(renderRow)]));
+      sections.push(section(sectionName(range, today), '', [...(images.length > 0 ? [renderGrid(images)] : []), ...named.map(renderRow)]));
     }
-    container.replaceChildren(...sections.flatMap((section, i) => (i === 0 ? [section] : [h('hr'), section])));
+    container.replaceChildren(...sections);
   }
 
   let activeRun = 0;
@@ -525,7 +541,7 @@
   async function run({ useCache }) {
     const runId = (activeRun += 1);
     hideTooltip();
-    const { title, body } = mountPanel();
+    const body = mountPanel();
     const results = h('div');
     const note = h('div', { className: 'aud-note', textContent: 'Scanning page 1…' });
     body.append(results, note);
@@ -541,7 +557,6 @@
         if (page.cached) cachedPages += 1;
         pending.push(...page.pending);
         deliveredToday.push(...page.deliveredToday);
-        title.textContent = `Not delivered yet (${pending.reduce((sum, s) => sum + s.items.length, 0)})`;
         renderResults(results, deliveredToday, pending, today);
         const pages = `${pageNumber === 1 ? '1 page' : `${pageNumber} pages`}${cachedPages ? ` (${cachedPages} cached, ↻ to refresh)` : ''}`;
         note.textContent = stopReason ? `Scanned ${pages}; stopped because ${stopReason}.` : `Scanning page ${pageNumber + 1}…`;
