@@ -14,6 +14,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'git-invite-ai-to-repos', source: 'src/git-invite-ai-to-repos.ts' },
   { name: 'wt', source: 'src/git-worktree.ts' },
   { name: 'whoop-pull', source: 'src/whoop.ts' },
+  { name: 'garmin', source: 'src/garmin.ts' },
   { name: 'macrofactor', source: 'src/macrofactor.ts' },
   { name: 'workouts', source: 'src/workouts.ts' },
   { name: 'voice-memo-parse', source: 'src/voice-memo-parse.ts' },
