@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.2.0
+// @version      1.3.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -17,7 +17,9 @@
 
   const MAX_PAGES = 5;
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
-  const CACHE_PREFIX = 'amazon-undelivered:page:';
+  const CACHE_ROOT = 'amazon-undelivered:page:';
+  // Bump when parsing changes so pages cached by an older parser are refetched.
+  const CACHE_PREFIX = `${CACHE_ROOT}v2:`;
   const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -25,7 +27,9 @@
   // Headings inside an order that aren't shipment statuses (e.g. a "Buy it again" carousel) must not swallow product links.
   const STATUS_WORDS = /arriv|ship|deliver|transit|prepar|expect|late|delay|out for|pick ?up|not yet|package|cancel|refund|return/i;
   const PRODUCT_HREF = /\/(dp|gp\/product)\//;
-  const ASIN = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i;
+  const AD_HREF = /\/sspa\/|\/gp\/r\.html|aax-|amazon-adsystem/;
+  const ASIN = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})|[?&]asin=([A-Z0-9]{10})/i;
+  const CLOCK = /\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b|\bnoon\b/i;
   // Leaf text under a shipment that isn't a control or hidden popover content, e.g. "Your package was left in the mail room."
   const NOT_NOTE = 'a, button, [role="button"], .a-button, .a-hidden, [hidden], [aria-hidden="true"], script, style, noscript, template';
 
@@ -40,6 +44,7 @@
     let orderHeader = null;
     let shipment = null;
     let statusHeading = null;
+    let lastProduct = null;
 
     const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT);
     for (let el = walker.nextNode(); el; el = walker.nextNode()) {
@@ -61,12 +66,15 @@
           shipment = null;
           statusHeading = null;
         }
+        lastProduct = null;
         continue;
       }
 
       if (shipment && el.childElementCount === 0 && !statusHeading.contains(el) && !el.closest(NOT_NOTE)) {
         const note = norm(el.textContent);
-        if (note && note.length <= 200 && !shipment.notes.includes(note)) shipment.notes.push(note);
+        // Grocery orders show quantity as a bare number badge right after the item's image link.
+        if (/^\d+$/.test(note) && lastProduct) lastProduct.quantity = Number(note);
+        else if (note && note.length <= 200 && !shipment.notes.includes(note)) shipment.notes.push(note);
       }
 
       if (el.tagName !== 'A' || !order) continue;
@@ -76,19 +84,25 @@
         order.detailsUrl = new URL(href, location.origin).href;
         continue;
       }
-      if (!shipment || !PRODUCT_HREF.test(href)) continue;
-      const asin = href.match(ASIN)?.[1] ?? '';
+      if (!shipment || AD_HREF.test(href)) continue;
+      const img = el.querySelector('img');
+      const alt = norm(img?.getAttribute('alt'));
+      if (!PRODUCT_HREF.test(href) && !alt) continue;
+      const asin = href.match(ASIN)?.slice(1).find(Boolean) ?? '';
       const productId = asin || href;
-      // Each product renders as an image link followed by a title link to the same product.
-      const product = shipment.products.get(productId) ?? { title: '', image: '', asin };
-      product.title ||= text;
-      product.image ||= imageSrc(el.querySelector('img'));
+      // Most products render as an image link followed by a title link to the same product;
+      // grocery items are a lone image link whose only name is the image's alt text.
+      const product = shipment.products.get(productId) ?? { title: '', fallbackTitle: '', image: '', asin, quantity: 1 };
+      if (!/^\d*$/.test(text)) product.title ||= text;
+      product.fallbackTitle ||= alt || norm(el.getAttribute('aria-label') ?? el.getAttribute('title'));
+      product.image ||= imageSrc(img);
       shipment.products.set(productId, product);
+      lastProduct = product;
     }
 
     return {
       shipments: shipments
-        .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].filter((p) => p.title) }))
+        .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].map(({ fallbackTitle, ...p }) => ({ ...p, title: p.title || fallbackTitle })).filter((p) => p.title) }))
         .filter((s) => s.items.length > 0),
       nextUrl: findNextUrl(doc),
     };
@@ -175,6 +189,14 @@
     return [startDiff < 0 ? 2 : 1, startDiff, dayDiff(range.end, today)];
   }
 
+  // Minutes after midnight of the first clock time in the status ("11 AM – 2 PM" -> 660); untimed statuses sort last.
+  function clockMinutes(status) {
+    const m = status.match(CLOCK);
+    if (!m) return 24 * 60;
+    if (!m[1]) return 12 * 60;
+    return ((Number(m[1]) % 12) + (m[3].toLowerCase() === 'p' ? 12 : 0)) * 60 + Number(m[2] ?? 0);
+  }
+
   // Returns arrays of { item, shipment }, one per arrival day, in display order.
   function groupByDay(shipments, today) {
     const groups = new Map();
@@ -186,7 +208,7 @@
     }
     return [...groups.values()]
       .toSorted((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2])
-      .map((group) => group.rows);
+      .map((group) => group.rows.toSorted((a, b) => clockMinutes(a.shipment.status) - clockMinutes(b.shipment.status)));
   }
 
   function shortTitle(title) {
@@ -267,7 +289,7 @@
   function writeCache(key, page) {
     try {
       for (const stale of Object.keys(localStorage)) {
-        if (stale.startsWith(CACHE_PREFIX) && !readCache(stale)) localStorage.removeItem(stale);
+        if (stale.startsWith(CACHE_ROOT) && (!stale.startsWith(CACHE_PREFIX) || !readCache(stale))) localStorage.removeItem(stale);
       }
       localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), page }));
     } catch (error) {
@@ -404,6 +426,7 @@
       ['Placed', order.placed],
       ['Total', order.total],
       ['Ship to', order.shipTo],
+      ['Quantity', item.quantity > 1 ? String(item.quantity) : ''],
       ['ASIN', item.asin],
       ['Page', String(shipment.pageNumber)],
       ['Scraped', timeAgo(shipment.scrapedAt)],
@@ -442,7 +465,7 @@
       itemImage(row),
       h('div', { className: 'aud-text' }, [
         h('div', { className: 'aud-eta', textContent: etaText(row.shipment, startOfToday()) }),
-        h('div', { className: 'aud-name', textContent: shortTitle(row.item.title) }),
+        h('div', { className: 'aud-name', textContent: `${row.item.quantity > 1 ? `${row.item.quantity} × ` : ''}${shortTitle(row.item.title)}` }),
       ]),
     ]);
   }
