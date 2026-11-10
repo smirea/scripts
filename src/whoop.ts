@@ -205,6 +205,12 @@ async function runCli(): Promise<void> {
         default: 'table',
         describe: 'Output format',
       })
+      .option('raw', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Print the WHOOP API responses as JSON keyed by data type (e.g. workout zone durations) instead of daily rows',
+      })
       .option('auth-code', {
         type: 'string',
         describe:
@@ -301,6 +307,11 @@ async function runCli(): Promise<void> {
         end,
         limit,
       });
+    }
+
+    if (args.raw) {
+      console.log(JSON.stringify(data, null, 2));
+      return;
     }
 
     const rows = buildDailyStatsRows(data).filter(row =>
