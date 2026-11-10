@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.4.0
+// @version      1.4.1
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -19,7 +19,7 @@
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const CACHE_ROOT = 'amazon-undelivered:page:';
   // Bump when parsing changes so pages cached by an older parser are refetched.
-  const CACHE_PREFIX = `${CACHE_ROOT}v3:`;
+  const CACHE_PREFIX = `${CACHE_ROOT}v4:`;
   const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -55,6 +55,9 @@
         const text = norm(el.textContent);
         if (/^order placed\b/i.test(text)) {
           order = parseOrderHeader(text);
+          // The heading's text also holds the hidden address popover, so the name comes from the ship-to link alone.
+          const shipTo = [...el.querySelectorAll('a')].map((a) => norm(a.textContent)).find((t) => t && !/^view\b/i.test(t));
+          if (shipTo) order.shipTo = shipTo;
           orderHeader = el;
           shipment = null;
           statusHeading = null;
@@ -362,15 +365,19 @@
     #aud-panel .aud-status { color: #565959; font-size: 12px; }
     #aud-panel .aud-note { color: #565959; font-size: 12px; margin-top: 10px; }
     #aud-panel .aud-error { color: #b12704; }
-    #aud-tip { position: fixed; z-index: 10000; display: none; width: 300px; padding: 10px 12px; background: #fff; color: #0f1111;
+    #aud-tip { position: fixed; z-index: 10000; display: none; width: 280px; padding: 12px; background: #fff; color: #0f1111;
       border: 1px solid #d5d9d9; border-radius: 8px; box-shadow: 0 4px 16px rgba(15,17,17,.2);
       font: 12px/1.4 "Amazon Ember", Arial, sans-serif; pointer-events: none; }
-    #aud-tip .aud-tip-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
-    #aud-tip .aud-tip-status { font-weight: 700; color: #007600; }
-    #aud-tip .aud-tip-note { color: #565959; }
-    #aud-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 6px 0 0; }
-    #aud-tip dt { color: #565959; }
-    #aud-tip dd { margin: 0; overflow-wrap: anywhere; }
+    #aud-tip * { box-sizing: border-box; margin: 0; padding: 0; float: none; }
+    #aud-tip .aud-tip-title { font-weight: 700; font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3;
+      -webkit-box-orient: vertical; overflow: hidden; }
+    #aud-tip .aud-tip-status { margin-top: 2px; font-weight: 700; color: #007600; }
+    #aud-tip .aud-tip-note { margin-top: 2px; color: #565959; }
+    #aud-tip .aud-tip-fields { display: grid; grid-template-columns: 64px 1fr; gap: 3px 10px; margin-top: 10px; padding-top: 10px;
+      border-top: 1px solid #e7e9e9; }
+    #aud-tip .aud-tip-label { color: #565959; }
+    #aud-tip .aud-tip-value { min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    #aud-tip .aud-tip-footer { margin-top: 10px; color: #8a8f8f; font-size: 11px; }
   `;
 
   function h(tag, props = {}, children = []) {
@@ -430,15 +437,17 @@
       ['Ship to', order.shipTo],
       ['Quantity', item.quantity > 1 ? String(item.quantity) : ''],
       ['ASIN', item.asin],
-      ['Page', String(shipment.pageNumber)],
-      ['Scraped', timeAgo(shipment.scrapedAt)],
     ].filter(([, value]) => value);
     const tip = tooltip();
     tip.replaceChildren(
       h('div', { className: 'aud-tip-title', textContent: item.title }),
       h('div', { className: 'aud-tip-status', textContent: shipment.status }),
       ...shipment.notes.map((note) => h('div', { className: 'aud-tip-note', textContent: note })),
-      h('dl', {}, fields.flatMap(([label, value]) => [h('dt', { textContent: label }), h('dd', { textContent: value })])),
+      h('div', { className: 'aud-tip-fields' }, fields.flatMap(([label, value]) => [
+        h('div', { className: 'aud-tip-label', textContent: label }),
+        h('div', { className: 'aud-tip-value', textContent: value }),
+      ])),
+      h('div', { className: 'aud-tip-footer', textContent: `Page ${shipment.pageNumber} · scraped ${timeAgo(shipment.scrapedAt)}` }),
     );
     tip.style.display = 'block';
     // Sits to the left of the panel so it never covers the list being hovered.
