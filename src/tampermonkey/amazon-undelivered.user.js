@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.1.0
+// @version      1.2.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -16,6 +16,9 @@
   if (window.top !== window.self) return;
 
   const MAX_PAGES = 5;
+  const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+  const CACHE_PREFIX = 'amazon-undelivered:page:';
+  const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
   const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -152,9 +155,17 @@
     return null;
   }
 
-  const isDeliveredToday = (status, today) => {
-    const range = isDelivered(status) && arrivalRange(status, today);
-    return Boolean(range) && dayDiff(range.start, today) === 0;
+  const toIso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const fromIso = (s) => {
+    const [y, m, d] = s.split('-').map(Number);
+    return new Date(y, m - 1, d);
+  };
+  const toIsoRange = (range) => range && { start: toIso(range.start), end: toIso(range.end) };
+  const fromIsoRange = (range) => range && { start: fromIso(range.start), end: fromIso(range.end) };
+
+  const isDeliveredToday = (shipment, today) => {
+    const arrival = isDelivered(shipment.status) && fromIsoRange(shipment.arrival);
+    return Boolean(arrival) && dayDiff(arrival.start, today) === 0;
   };
 
   // Today first, then upcoming days, then late and undated shipments at the bottom.
@@ -168,7 +179,7 @@
   function groupByDay(shipments, today) {
     const groups = new Map();
     for (const shipment of shipments) {
-      const rank = groupRank(arrivalRange(shipment.status, today), today);
+      const rank = groupRank(fromIsoRange(shipment.arrival), today);
       const key = rank.join('|');
       if (!groups.has(key)) groups.set(key, { rank, rows: [] });
       groups.get(key).rows.push(...shipment.items.map((item) => ({ item, shipment })));
@@ -235,23 +246,70 @@
     }
   }
 
-  // Scans pages until one has nothing left to deliver, since anything older than that page is delivered too.
-  // Yields after every page so the panel can show results while later pages load.
-  async function* scanPending(today) {
-    let url = firstPageUrl().href;
-    for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
-      const page = pageNumber === 1 && isOnFirstPage() ? parseOrdersPage(document) : await loadPage(url);
-      if (page.shipments.length === 0) {
-        throw new Error(`Found no orders on page ${pageNumber}. Amazon's page layout may have changed; update parseOrdersPage in src/tampermonkey/amazon-undelivered.user.js.`);
+  function cacheKey(pageNumber) {
+    const url = firstPageUrl();
+    url.searchParams.delete('ref_');
+    url.searchParams.delete('ref');
+    url.searchParams.sort();
+    return `${CACHE_PREFIX}${url.pathname}?${url.searchParams}#${pageNumber}`;
+  }
+
+  // Cache failures (private mode, quota, corrupt JSON) only cost a refetch, so they never break the scan.
+  function readCache(key) {
+    try {
+      const entry = JSON.parse(localStorage.getItem(key) ?? 'null');
+      return entry && Date.now() - entry.savedAt < CACHE_TTL_MS ? entry : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeCache(key, page) {
+    try {
+      for (const stale of Object.keys(localStorage)) {
+        if (stale.startsWith(CACHE_PREFIX) && !readCache(stale)) localStorage.removeItem(stale);
       }
-      const shipments = page.shipments.map((s) => ({ ...s, pageNumber }));
+      localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), page }));
+    } catch (error) {
+      console.warn('[amazon-undelivered] could not cache page', error);
+    }
+  }
+
+  const orderKey = (shipment) => shipment.order.number || shipment.order.detailsUrl || shipment.items.map((i) => i.title).join('|');
+
+  // Arrival days are resolved when a page is scraped, so a cached "Arriving tomorrow" still lands on the right day later.
+  async function scrapePage(pageNumber, url, today) {
+    const page = pageNumber === 1 && isOnFirstPage() ? parseOrdersPage(document) : await loadPage(url);
+    if (page.shipments.length === 0) {
+      throw new Error(`Found no orders on page ${pageNumber}. Amazon's page layout may have changed; update parseOrdersPage in src/tampermonkey/amazon-undelivered.user.js.`);
+    }
+    const scrapedAt = Date.now();
+    const shipments = page.shipments.map((s) => ({ ...s, pageNumber, scrapedAt, arrival: toIsoRange(arrivalRange(s.status, today)) }));
+    return { shipments, nextUrl: page.nextUrl };
+  }
+
+  // Scans pages until one has nothing left to deliver, since anything older than that page is delivered too.
+  // Yields after every page so the panel can show results while later pages load. Page 1 is always live.
+  async function* scanPending(today, useCache) {
+    let url = firstPageUrl().href;
+    const seenOrders = new Set();
+    for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
+      const key = cacheKey(pageNumber);
+      const cached = pageNumber > 1 && useCache ? readCache(key) : null;
+      const page = cached?.page ?? (await scrapePage(pageNumber, url, today));
+      if (pageNumber > 1 && !cached) writeCache(key, page);
+
+      // New orders push older ones onto later pages, so a cached page can repeat orders an earlier page already listed.
+      const shipments = page.shipments.filter((s) => !seenOrders.has(orderKey(s)));
+      for (const s of page.shipments) seenOrders.add(orderKey(s));
+
       const pending = shipments.filter((s) => isPending(s.status));
-      const deliveredToday = shipments.filter((s) => isDeliveredToday(s.status, today));
+      const deliveredToday = shipments.filter((s) => isDeliveredToday(s, today));
       let stopReason = null;
-      if (pending.length === 0) stopReason = `page ${pageNumber} is all delivered`;
+      if (!page.shipments.some((s) => isPending(s.status))) stopReason = `page ${pageNumber} is all delivered`;
       else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
       else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
-      yield { pageNumber, pending, deliveredToday, stopReason };
+      yield { pageNumber, pending, deliveredToday, stopReason, cached: Boolean(cached) };
       if (stopReason) return;
       url = page.nextUrl;
     }
@@ -301,7 +359,7 @@
     document.getElementById('aud-panel')?.remove();
     if (!document.getElementById('aud-style')) document.head.append(h('style', { id: 'aud-style', textContent: CSS }));
     const title = h('span', { textContent: 'Not delivered yet' });
-    const refresh = h('button', { title: 'Rescan', textContent: '↻', onclick: run });
+    const refresh = h('button', { title: 'Rescan all pages, ignoring the cache', textContent: '↻', onclick: () => run({ useCache: false }) });
     const close = h('button', { title: 'Close', textContent: '×', onclick: () => { hideTooltip(); panel.remove(); } });
     const body = h('div', { className: 'aud-body' });
     const panel = h('section', { id: 'aud-panel' }, [h('header', {}, [title, refresh, close]), body]);
@@ -309,10 +367,30 @@
     return { title, body };
   }
 
-  // "Arriving tomorrow" -> "Tomorrow"; statuses without that prefix ("Out for delivery") stay as they are.
-  function etaText(status) {
-    const eta = status.replace(/^((now )?arriving|estimated to arrive)\s+/i, '');
+  function relativeDay(date, today) {
+    const diff = dayDiff(date, today);
+    if (diff === 0) return 'today';
+    if (diff === 1) return 'tomorrow';
+    if (diff === -1) return 'yesterday';
+    if (diff > 1 && diff < 7) return fmtDate(date, { weekday: 'long' });
+    return fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' });
+  }
+  const fmtDate = (date, opts) => date.toLocaleDateString('en-US', opts);
+
+  // "Arriving tomorrow" -> "Tomorrow". Relative days are recomputed from the scraped date, since a cached
+  // "tomorrow" may already be today.
+  function etaText(shipment, today) {
+    let eta = shipment.status.replace(/^((now )?arriving|estimated to arrive)\s+/i, '');
+    const arrival = fromIsoRange(shipment.arrival);
+    if (arrival && dayDiff(arrival.start, arrival.end) === 0) eta = eta.replace(RELATIVE_DAY, relativeDay(arrival.start, today));
     return eta.charAt(0).toUpperCase() + eta.slice(1);
+  }
+
+  function timeAgo(ms) {
+    const minutes = Math.round((Date.now() - ms) / 60_000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes} min ago`;
+    return `${Math.floor(minutes / 60)} h ${minutes % 60} min ago`;
   }
 
   function tooltip() {
@@ -328,6 +406,7 @@
       ['Ship to', order.shipTo],
       ['ASIN', item.asin],
       ['Page', String(shipment.pageNumber)],
+      ['Scraped', timeAgo(shipment.scrapedAt)],
     ].filter(([, value]) => value);
     const tip = tooltip();
     tip.replaceChildren(
@@ -362,7 +441,7 @@
     return itemLink(row, 'aud-row', [
       itemImage(row),
       h('div', { className: 'aud-text' }, [
-        h('div', { className: 'aud-eta', textContent: etaText(row.shipment.status) }),
+        h('div', { className: 'aud-eta', textContent: etaText(row.shipment, startOfToday()) }),
         h('div', { className: 'aud-name', textContent: shortTitle(row.item.title) }),
       ]),
     ]);
@@ -380,7 +459,7 @@
 
   let activeRun = 0;
 
-  async function run() {
+  async function run({ useCache }) {
     const runId = (activeRun += 1);
     hideTooltip();
     const { title, body } = mountPanel();
@@ -391,15 +470,17 @@
     const pending = [];
     const deliveredToday = [];
     const today = startOfToday();
+    let cachedPages = 0;
     try {
-      for await (const page of scanPending(today)) {
+      for await (const page of scanPending(today, useCache)) {
         if (runId !== activeRun) return;
         const { pageNumber, stopReason } = page;
+        if (page.cached) cachedPages += 1;
         pending.push(...page.pending);
         deliveredToday.push(...page.deliveredToday);
         title.textContent = `Not delivered yet (${pending.reduce((sum, s) => sum + s.items.length, 0)})`;
         renderResults(results, deliveredToday, pending, today);
-        const pages = pageNumber === 1 ? '1 page' : `${pageNumber} pages`;
+        const pages = `${pageNumber === 1 ? '1 page' : `${pageNumber} pages`}${cachedPages ? ` (${cachedPages} cached, ↻ to refresh)` : ''}`;
         note.textContent = stopReason ? `Scanned ${pages}; stopped because ${stopReason}.` : `Scanning page ${pageNumber + 1}…`;
       }
     } catch (error) {
@@ -410,5 +491,5 @@
     }
   }
 
-  run();
+  run({ useCache: true });
 })();
