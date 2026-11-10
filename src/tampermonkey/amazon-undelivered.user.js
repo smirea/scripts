@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.5.0
+// @version      1.7.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -169,6 +169,8 @@
       const date = addDays(today, (weekday - today.getDay() + 7) % 7 || 7);
       return { start: date, end: date };
     }
+    // Same-day deliveries read "Delivered 1:05 PM" with no date.
+    if (/^delivered\b/.test(s) && CLOCK.test(s)) return { start: today, end: today };
     return null;
   }
 
@@ -289,16 +291,19 @@
     }
   }
 
-  function writeCache(key, page) {
+  function writeCache(key, page, after) {
     try {
       for (const stale of Object.keys(localStorage)) {
         if (stale.startsWith(CACHE_ROOT) && (!stale.startsWith(CACHE_PREFIX) || !readCache(stale))) localStorage.removeItem(stale);
       }
-      localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), page }));
+      localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), after, page }));
     } catch (error) {
       console.warn('[amazon-undelivered] could not cache page', error);
     }
   }
+
+  const hasDueToday = (page, today) =>
+    page.shipments.some((s) => isPending(s.status) && s.arrival && dayDiff(fromIso(s.arrival.start), today) <= 0);
 
   const orderKey = (shipment) => shipment.order.number || shipment.order.detailsUrl || shipment.items.map((i) => i.title).join('|');
 
@@ -318,13 +323,18 @@
   async function* scanPending(today, useCache) {
     let url = firstPageUrl().href;
     const seenOrders = new Set();
+    let previousLast = null;
     for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
       const key = cacheKey(pageNumber);
-      const cached = pageNumber > 1 && useCache ? readCache(key) : null;
+      const entry = pageNumber > 1 && useCache ? readCache(key) : null;
+      // New orders shift every later page, so a cached page is only the same slice of orders while the order before it
+      // hasn't changed. Pages with something due today are refetched so deliveries show up as they happen.
+      const cached = entry?.after === previousLast && !hasDueToday(entry.page, today) ? entry : null;
       const page = cached?.page ?? (await scrapePage(pageNumber, url, today));
-      if (pageNumber > 1 && !cached) writeCache(key, page);
+      if (pageNumber > 1 && !cached) writeCache(key, page, previousLast);
+      previousLast = orderKey(page.shipments.at(-1));
 
-      // New orders push older ones onto later pages, so a cached page can repeat orders an earlier page already listed.
+      // Orders can also shift between Amazon's page loads, so a page may repeat orders an earlier page already listed.
       const shipments = page.shipments.filter((s) => !seenOrders.has(orderKey(s)));
       for (const s of page.shipments) seenOrders.add(orderKey(s));
 
@@ -341,7 +351,7 @@
   }
 
   const CSS = `
-    #aud-panel { position: fixed; top: 110px; right: 16px; z-index: 9999; width: min(360px, calc(100vw - 32px));
+    #aud-panel { position: fixed; top: 110px; left: 16px; z-index: 9999; width: min(360px, calc(100vw - 32px));
       max-height: calc(100vh - 130px); overflow: auto; background: #fff; color: #0f1111; border: 1px solid #d5d9d9;
       border-radius: 8px; box-shadow: 0 4px 16px rgba(15,17,17,.15); font: 13px/1.4 "Amazon Ember", Arial, sans-serif; }
     #aud-panel header { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; padding: 10px 12px;
@@ -355,10 +365,7 @@
     #aud-panel .aud-grid a { position: relative; display: block; line-height: 0; }
     #aud-panel .aud-qty { position: absolute; right: -3px; bottom: -3px; padding: 0 4px; background: #fff; border: 1px solid #d5d9d9;
       border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 14px; color: #0f1111; }
-    #aud-panel .aud-check { position: absolute; top: -4px; right: -4px; width: 16px; height: 16px; border-radius: 50%; background: #067d62;
-      color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px #fff; }
-    #aud-panel .aud-done img { opacity: .55; }
-    #aud-panel .aud-done:hover img { opacity: 1; }
+    #aud-panel .aud-caption { margin-bottom: -4px; text-align: right; color: #8a8f8f; font-size: 11px; line-height: 1.2; }
     #aud-panel .aud-grid img, #aud-panel .aud-grid .aud-noimg { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
     #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
     #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
@@ -454,10 +461,10 @@
       h('div', { className: 'aud-tip-footer', textContent: `Page ${shipment.pageNumber} · scraped ${timeAgo(shipment.scrapedAt)}` }),
     );
     tip.style.display = 'block';
-    // Sits to the left of the panel so it never covers the list being hovered.
+    // Sits to the right of the panel so it never covers the list being hovered.
     const anchorRect = anchor.getBoundingClientRect();
     const panelRect = document.getElementById('aud-panel').getBoundingClientRect();
-    tip.style.left = `${Math.max(8, panelRect.left - tip.offsetWidth - 8)}px`;
+    tip.style.left = `${Math.min(panelRect.right + 8, innerWidth - tip.offsetWidth - 8)}px`;
     tip.style.top = `${Math.min(Math.max(8, anchorRect.top), innerHeight - tip.offsetHeight - 8)}px`;
   }
 
@@ -485,10 +492,9 @@
     ]);
   }
 
-  function renderGrid(rows, { delivered = false } = {}) {
-    return h('div', { className: 'aud-grid' }, rows.map((row) => itemLink(row, delivered ? 'aud-done' : '', [
+  function renderGrid(rows) {
+    return h('div', { className: 'aud-grid' }, rows.map((row) => itemLink(row, '', [
       itemImage(row),
-      ...(delivered ? [h('span', { className: 'aud-check', textContent: '✓' })] : []),
       ...(row.item.quantity > 1 ? [h('span', { className: 'aud-qty', textContent: String(row.item.quantity) })] : []),
     ])));
   }
@@ -497,7 +503,13 @@
     const sections = [];
     const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
     if (delivered.length > 0) {
-      sections.push(renderGrid(delivered, { delivered: true }));
+      const grids = [delivered.filter((row) => row.item.imageOnly), delivered.filter((row) => !row.item.imageOnly)]
+        .filter((rows) => rows.length > 0)
+        .map(renderGrid);
+      sections.push(h('div', {}, [
+        ...grids.flatMap((grid, i) => (i === 0 ? [grid] : [h('hr'), grid])),
+        h('div', { className: 'aud-caption', textContent: 'delivered today' }),
+      ]));
     }
     // Items with no name on the page (grocery) render as images clustered at the top of their day.
     for (const rows of groupByDay(pending, today)) {
