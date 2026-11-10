@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.3.0
+// @version      1.4.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -19,7 +19,7 @@
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const CACHE_ROOT = 'amazon-undelivered:page:';
   // Bump when parsing changes so pages cached by an older parser are refetched.
-  const CACHE_PREFIX = `${CACHE_ROOT}v2:`;
+  const CACHE_PREFIX = `${CACHE_ROOT}v3:`;
   const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -102,7 +102,7 @@
 
     return {
       shipments: shipments
-        .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].map(({ fallbackTitle, ...p }) => ({ ...p, title: p.title || fallbackTitle })).filter((p) => p.title) }))
+        .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].map(({ fallbackTitle, ...p }) => ({ ...p, title: p.title || fallbackTitle, imageOnly: !p.title })).filter((p) => p.title) }))
         .filter((s) => s.items.length > 0),
       nextUrl: findNextUrl(doc),
     };
@@ -349,7 +349,9 @@
     #aud-panel .aud-body { padding: 4px 12px 10px; }
     #aud-panel hr { margin: 6px -12px; border: 0; border-top: 1px solid #d5d9d9; }
     #aud-panel .aud-grid { display: grid; grid-template-columns: repeat(auto-fill, 44px); gap: 6px; padding: 6px 0; }
-    #aud-panel .aud-grid a { display: block; line-height: 0; }
+    #aud-panel .aud-grid a { position: relative; display: block; line-height: 0; }
+    #aud-panel .aud-qty { position: absolute; right: -3px; bottom: -3px; padding: 0 4px; background: #fff; border: 1px solid #d5d9d9;
+      border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 14px; color: #0f1111; }
     #aud-panel .aud-grid img, #aud-panel .aud-grid .aud-noimg { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
     #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
     #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
@@ -470,13 +472,25 @@
     ]);
   }
 
+  function renderGrid(rows) {
+    return h('div', { className: 'aud-grid' }, rows.map((row) => itemLink(row, '', [
+      itemImage(row),
+      ...(row.item.quantity > 1 ? [h('span', { className: 'aud-qty', textContent: String(row.item.quantity) })] : []),
+    ])));
+  }
+
   function renderResults(container, deliveredToday, pending, today) {
     const sections = [];
     const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
     if (delivered.length > 0) {
-      sections.push(h('div', { className: 'aud-grid' }, delivered.map((row) => itemLink(row, '', [itemImage(row)]))));
+      sections.push(renderGrid(delivered));
     }
-    for (const rows of groupByDay(pending, today)) sections.push(h('div', {}, rows.map(renderRow)));
+    // Items with no name on the page (grocery) render as images clustered at the top of their day.
+    for (const rows of groupByDay(pending, today)) {
+      const images = rows.filter((row) => row.item.imageOnly);
+      const named = rows.filter((row) => !row.item.imageOnly);
+      sections.push(h('div', {}, [...(images.length > 0 ? [renderGrid(images)] : []), ...named.map(renderRow)]));
+    }
     container.replaceChildren(...sections.flatMap((section, i) => (i === 0 ? [section] : [h('hr'), section])));
   }
 
