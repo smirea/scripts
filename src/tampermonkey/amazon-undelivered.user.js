@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.0.0
-// @description  On Your Orders, lists every item not delivered yet, grouped by arrival day starting with today.
+// @version      1.1.0
+// @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
 // @match        https://www.amazon.com/gp/your-account/order-history*
@@ -15,7 +15,7 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const MAX_PAGES = 15;
+  const MAX_PAGES = 5;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
   const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -23,6 +23,8 @@
   const STATUS_WORDS = /arriv|ship|deliver|transit|prepar|expect|late|delay|out for|pick ?up|not yet|package|cancel|refund|return/i;
   const PRODUCT_HREF = /\/(dp|gp\/product)\//;
   const ASIN = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i;
+  // Leaf text under a shipment that isn't a control or hidden popover content, e.g. "Your package was left in the mail room."
+  const NOT_NOTE = 'a, button, [role="button"], .a-button, .a-hidden, [hidden], [aria-hidden="true"], script, style, noscript, template';
 
   const norm = (s) => (s ?? '').replace(/\s+/g, ' ').trim();
   const isHeading = (el) => /^H[1-6]$/.test(el.tagName) || el.getAttribute('role') === 'heading';
@@ -44,12 +46,12 @@
         if (orderHeader?.contains(el) || statusHeading?.contains(el)) continue;
         const text = norm(el.textContent);
         if (/^order placed\b/i.test(text)) {
-          order = { detailsUrl: null };
+          order = parseOrderHeader(text);
           orderHeader = el;
           shipment = null;
           statusHeading = null;
         } else if (order && text.length < 120 && STATUS_WORDS.test(text)) {
-          shipment = { status: text, products: new Map(), order };
+          shipment = { status: text, notes: [], products: new Map(), order };
           statusHeading = el;
           shipments.push(shipment);
         } else {
@@ -59,6 +61,11 @@
         continue;
       }
 
+      if (shipment && el.childElementCount === 0 && !statusHeading.contains(el) && !el.closest(NOT_NOTE)) {
+        const note = norm(el.textContent);
+        if (note && note.length <= 200 && !shipment.notes.includes(note)) shipment.notes.push(note);
+      }
+
       if (el.tagName !== 'A' || !order) continue;
       const text = norm(el.textContent);
       const href = el.getAttribute('href') ?? '';
@@ -66,10 +73,11 @@
         order.detailsUrl = new URL(href, location.origin).href;
         continue;
       }
-      const productId = shipment && href.match(PRODUCT_HREF)?.[0] && (href.match(ASIN)?.[1] ?? href);
-      if (!productId) continue;
+      if (!shipment || !PRODUCT_HREF.test(href)) continue;
+      const asin = href.match(ASIN)?.[1] ?? '';
+      const productId = asin || href;
       // Each product renders as an image link followed by a title link to the same product.
-      const product = shipment.products.get(productId) ?? { title: '', image: '' };
+      const product = shipment.products.get(productId) ?? { title: '', image: '', asin };
       product.title ||= text;
       product.image ||= imageSrc(el.querySelector('img'));
       shipment.products.set(productId, product);
@@ -80,6 +88,19 @@
         .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].filter((p) => p.title) }))
         .filter((s) => s.items.length > 0),
       nextUrl: findNextUrl(doc),
+    };
+  }
+
+  // The header reads "ORDER PLACED November 9, 2026 TOTAL $43.29 SHIP TO Stefan Mirea ORDER # 111-… View order details …";
+  // cancelled orders omit TOTAL and SHIP TO.
+  function parseOrderHeader(text) {
+    const field = (re) => text.match(re)?.[1] ?? '';
+    return {
+      detailsUrl: null,
+      placed: field(/order placed\s+(.+?)(?=\s+(?:total|ship to|order #)|$)/i),
+      total: field(/\btotal\s+(\S+)/i),
+      shipTo: field(/ship to\s+(.+?)(?=\s+order #|$)/i),
+      number: field(/order #\s*([\d-]+)/i),
     };
   }
 
@@ -131,19 +152,10 @@
     return null;
   }
 
-  const fmt = (date, opts) => date.toLocaleDateString('en-US', opts);
-  const short = (date) => fmt(date, { month: 'short', day: 'numeric' });
-
-  function groupLabel(range, today) {
-    if (!range) return 'No date yet';
-    const { start, end } = range;
-    if (dayDiff(start, end) !== 0) return `${short(start)} – ${short(end)}`;
-    const diff = dayDiff(start, today);
-    if (diff === 0) return `Today · ${fmt(start, { weekday: 'short', month: 'short', day: 'numeric' })}`;
-    if (diff === 1) return `Tomorrow · ${fmt(start, { weekday: 'short' })}`;
-    if (diff < 0) return `Late · was due ${short(start)}`;
-    return fmt(start, { weekday: 'short', month: 'short', day: 'numeric' });
-  }
+  const isDeliveredToday = (status, today) => {
+    const range = isDelivered(status) && arrivalRange(status, today);
+    return Boolean(range) && dayDiff(range.start, today) === 0;
+  };
 
   // Today first, then upcoming days, then late and undated shipments at the bottom.
   function groupRank(range, today) {
@@ -152,24 +164,18 @@
     return [startDiff < 0 ? 2 : 1, startDiff, dayDiff(range.end, today)];
   }
 
-  function groupShipments(shipments, today) {
+  // Returns arrays of { item, shipment }, one per arrival day, in display order.
+  function groupByDay(shipments, today) {
     const groups = new Map();
-    const todayKey = '1|0|0';
-    groups.set(todayKey, { label: groupLabel({ start: today, end: today }, today), rank: [1, 0, 0], rows: [] });
-
     for (const shipment of shipments) {
-      const range = arrivalRange(shipment.status, today);
-      const rank = groupRank(range, today);
+      const rank = groupRank(arrivalRange(shipment.status, today), today);
       const key = rank.join('|');
-      if (!groups.has(key)) {
-        groups.set(key, { label: groupLabel(range, today), rank, rows: [] });
-      }
-      for (const { title, image } of shipment.items) {
-        groups.get(key).rows.push({ title, image, status: shipment.status, url: shipment.order.detailsUrl });
-      }
+      if (!groups.has(key)) groups.set(key, { rank, rows: [] });
+      groups.get(key).rows.push(...shipment.items.map((item) => ({ item, shipment })));
     }
-
-    return [...groups.values()].toSorted((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2]);
+    return [...groups.values()]
+      .toSorted((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.rank[2] - b.rank[2])
+      .map((group) => group.rows);
   }
 
   function shortTitle(title) {
@@ -231,19 +237,21 @@
 
   // Scans pages until one has nothing left to deliver, since anything older than that page is delivered too.
   // Yields after every page so the panel can show results while later pages load.
-  async function* scanPending() {
+  async function* scanPending(today) {
     let url = firstPageUrl().href;
     for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
       const page = pageNumber === 1 && isOnFirstPage() ? parseOrdersPage(document) : await loadPage(url);
       if (page.shipments.length === 0) {
         throw new Error(`Found no orders on page ${pageNumber}. Amazon's page layout may have changed; update parseOrdersPage in src/tampermonkey/amazon-undelivered.user.js.`);
       }
-      const pending = page.shipments.filter((s) => isPending(s.status));
+      const shipments = page.shipments.map((s) => ({ ...s, pageNumber }));
+      const pending = shipments.filter((s) => isPending(s.status));
+      const deliveredToday = shipments.filter((s) => isDeliveredToday(s.status, today));
       let stopReason = null;
       if (pending.length === 0) stopReason = `page ${pageNumber} is all delivered`;
       else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
       else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
-      yield { pageNumber, pending, stopReason };
+      yield { pageNumber, pending, deliveredToday, stopReason };
       if (stopReason) return;
       url = page.nextUrl;
     }
@@ -259,8 +267,10 @@
     #aud-panel header button { border: 0; background: none; cursor: pointer; font-size: 15px; color: #565959; padding: 0 2px; }
     #aud-panel header button:hover { color: #0f1111; }
     #aud-panel .aud-body { padding: 4px 12px 10px; }
-    #aud-panel h4 { margin: 10px 0 4px; font-size: 13px; font-weight: 700; color: #007600; }
-    #aud-panel h4.aud-muted { color: #565959; }
+    #aud-panel hr { margin: 6px -12px; border: 0; border-top: 1px solid #d5d9d9; }
+    #aud-panel .aud-grid { display: grid; grid-template-columns: repeat(auto-fill, 44px); gap: 6px; padding: 6px 0; }
+    #aud-panel .aud-grid a { display: block; line-height: 0; }
+    #aud-panel .aud-grid img, #aud-panel .aud-grid .aud-noimg { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
     #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
     #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
     #aud-panel .aud-row img, #aud-panel .aud-noimg { flex: none; width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
@@ -270,6 +280,15 @@
     #aud-panel .aud-status { color: #565959; font-size: 12px; }
     #aud-panel .aud-note { color: #565959; font-size: 12px; margin-top: 10px; }
     #aud-panel .aud-error { color: #b12704; }
+    #aud-tip { position: fixed; z-index: 10000; display: none; width: 300px; padding: 10px 12px; background: #fff; color: #0f1111;
+      border: 1px solid #d5d9d9; border-radius: 8px; box-shadow: 0 4px 16px rgba(15,17,17,.2);
+      font: 12px/1.4 "Amazon Ember", Arial, sans-serif; pointer-events: none; }
+    #aud-tip .aud-tip-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+    #aud-tip .aud-tip-status { font-weight: 700; color: #007600; }
+    #aud-tip .aud-tip-note { color: #565959; }
+    #aud-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 6px 0 0; }
+    #aud-tip dt { color: #565959; }
+    #aud-tip dd { margin: 0; overflow-wrap: anywhere; }
   `;
 
   function h(tag, props = {}, children = []) {
@@ -283,7 +302,7 @@
     if (!document.getElementById('aud-style')) document.head.append(h('style', { id: 'aud-style', textContent: CSS }));
     const title = h('span', { textContent: 'Not delivered yet' });
     const refresh = h('button', { title: 'Rescan', textContent: '↻', onclick: run });
-    const close = h('button', { title: 'Close', textContent: '×', onclick: () => panel.remove() });
+    const close = h('button', { title: 'Close', textContent: '×', onclick: () => { hideTooltip(); panel.remove(); } });
     const body = h('div', { className: 'aud-body' });
     const panel = h('section', { id: 'aud-panel' }, [h('header', {}, [title, refresh, close]), body]);
     document.body.append(panel);
@@ -296,46 +315,90 @@
     return eta.charAt(0).toUpperCase() + eta.slice(1);
   }
 
-  function renderRow(row) {
-    const image = row.image ? h('img', { src: row.image, alt: '', loading: 'lazy' }) : h('div', { className: 'aud-noimg' });
-    const text = h('div', { className: 'aud-text' }, [
-      h('div', { className: 'aud-eta', textContent: etaText(row.status) }),
-      h('div', { className: 'aud-name', textContent: shortTitle(row.title) }),
-    ]);
-    const link = h('a', { className: 'aud-row', title: `${row.title}\n${row.status}` }, [image, text]);
-    if (row.url) link.href = row.url;
+  function tooltip() {
+    return document.getElementById('aud-tip') ?? document.body.appendChild(h('div', { id: 'aud-tip' }));
+  }
+
+  function showTooltip(anchor, { item, shipment }) {
+    const { order } = shipment;
+    const fields = [
+      ['Order #', order.number],
+      ['Placed', order.placed],
+      ['Total', order.total],
+      ['Ship to', order.shipTo],
+      ['ASIN', item.asin],
+      ['Page', String(shipment.pageNumber)],
+    ].filter(([, value]) => value);
+    const tip = tooltip();
+    tip.replaceChildren(
+      h('div', { className: 'aud-tip-title', textContent: item.title }),
+      h('div', { className: 'aud-tip-status', textContent: shipment.status }),
+      ...shipment.notes.map((note) => h('div', { className: 'aud-tip-note', textContent: note })),
+      h('dl', {}, fields.flatMap(([label, value]) => [h('dt', { textContent: label }), h('dd', { textContent: value })])),
+    );
+    tip.style.display = 'block';
+    // Sits to the left of the panel so it never covers the list being hovered.
+    const anchorRect = anchor.getBoundingClientRect();
+    const panelRect = document.getElementById('aud-panel').getBoundingClientRect();
+    tip.style.left = `${Math.max(8, panelRect.left - tip.offsetWidth - 8)}px`;
+    tip.style.top = `${Math.min(Math.max(8, anchorRect.top), innerHeight - tip.offsetHeight - 8)}px`;
+  }
+
+  function hideTooltip() {
+    tooltip().style.display = 'none';
+  }
+
+  function itemLink(row, className, children) {
+    const link = h('a', { className }, children);
+    if (row.shipment.order.detailsUrl) link.href = row.shipment.order.detailsUrl;
+    link.addEventListener('mouseenter', () => showTooltip(link, row));
+    link.addEventListener('mouseleave', hideTooltip);
     return link;
   }
 
-  function renderGroups(container, groups) {
-    container.replaceChildren();
-    for (const group of groups) {
-      container.append(h('h4', { textContent: group.label, className: group.rank[0] === 1 ? '' : 'aud-muted' }));
-      if (group.rows.length === 0) {
-        container.append(h('div', { className: 'aud-status', textContent: 'Nothing arriving today' }));
-        continue;
-      }
-      container.append(...group.rows.map(renderRow));
+  const itemImage = ({ item }) => (item.image ? h('img', { src: item.image, alt: item.title, loading: 'lazy' }) : h('div', { className: 'aud-noimg' }));
+
+  function renderRow(row) {
+    return itemLink(row, 'aud-row', [
+      itemImage(row),
+      h('div', { className: 'aud-text' }, [
+        h('div', { className: 'aud-eta', textContent: etaText(row.shipment.status) }),
+        h('div', { className: 'aud-name', textContent: shortTitle(row.item.title) }),
+      ]),
+    ]);
+  }
+
+  function renderResults(container, deliveredToday, pending, today) {
+    const sections = [];
+    const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
+    if (delivered.length > 0) {
+      sections.push(h('div', { className: 'aud-grid' }, delivered.map((row) => itemLink(row, '', [itemImage(row)]))));
     }
+    for (const rows of groupByDay(pending, today)) sections.push(h('div', {}, rows.map(renderRow)));
+    container.replaceChildren(...sections.flatMap((section, i) => (i === 0 ? [section] : [h('hr'), section])));
   }
 
   let activeRun = 0;
 
   async function run() {
     const runId = (activeRun += 1);
+    hideTooltip();
     const { title, body } = mountPanel();
     const results = h('div');
     const note = h('div', { className: 'aud-note', textContent: 'Scanning page 1…' });
     body.append(results, note);
 
     const pending = [];
+    const deliveredToday = [];
     const today = startOfToday();
     try {
-      for await (const { pageNumber, pending: pagePending, stopReason } of scanPending()) {
+      for await (const page of scanPending(today)) {
         if (runId !== activeRun) return;
-        pending.push(...pagePending);
+        const { pageNumber, stopReason } = page;
+        pending.push(...page.pending);
+        deliveredToday.push(...page.deliveredToday);
         title.textContent = `Not delivered yet (${pending.reduce((sum, s) => sum + s.items.length, 0)})`;
-        renderGroups(results, groupShipments(pending, today));
+        renderResults(results, deliveredToday, pending, today);
         const pages = pageNumber === 1 ? '1 page' : `${pageNumber} pages`;
         note.textContent = stopReason ? `Scanned ${pages}; stopped because ${stopReason}.` : `Scanning page ${pageNumber + 1}…`;
       }
