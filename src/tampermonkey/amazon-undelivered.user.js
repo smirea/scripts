@@ -22,6 +22,7 @@
   // Headings inside an order that aren't shipment statuses (e.g. a "Buy it again" carousel) must not swallow product links.
   const STATUS_WORDS = /arriv|ship|deliver|transit|prepar|expect|late|delay|out for|pick ?up|not yet|package|cancel|refund|return/i;
   const PRODUCT_HREF = /\/(dp|gp\/product)\//;
+  const ASIN = /\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i;
 
   const norm = (s) => (s ?? '').replace(/\s+/g, ' ').trim();
   const isHeading = (el) => /^H[1-6]$/.test(el.tagName) || el.getAttribute('role') === 'heading';
@@ -48,7 +49,7 @@
           shipment = null;
           statusHeading = null;
         } else if (order && text.length < 120 && STATUS_WORDS.test(text)) {
-          shipment = { status: text, items: [], order };
+          shipment = { status: text, products: new Map(), order };
           statusHeading = el;
           shipments.push(shipment);
         } else {
@@ -63,12 +64,29 @@
       const href = el.getAttribute('href') ?? '';
       if (/^view order details$/i.test(text)) {
         order.detailsUrl = new URL(href, location.origin).href;
-      } else if (shipment && text && PRODUCT_HREF.test(href) && !shipment.items.includes(text)) {
-        shipment.items.push(text);
+        continue;
       }
+      const productId = shipment && href.match(PRODUCT_HREF)?.[0] && (href.match(ASIN)?.[1] ?? href);
+      if (!productId) continue;
+      // Each product renders as an image link followed by a title link to the same product.
+      const product = shipment.products.get(productId) ?? { title: '', image: '' };
+      product.title ||= text;
+      product.image ||= imageSrc(el.querySelector('img'));
+      shipment.products.set(productId, product);
     }
 
-    return { shipments: shipments.filter((s) => s.items.length > 0), nextUrl: findNextUrl(doc) };
+    return {
+      shipments: shipments
+        .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].filter((p) => p.title) }))
+        .filter((s) => s.items.length > 0),
+      nextUrl: findNextUrl(doc),
+    };
+  }
+
+  function imageSrc(img) {
+    if (!img) return '';
+    const src = img.getAttribute('src') ?? '';
+    return src.startsWith('data:') ? (img.getAttribute('data-src') ?? '') : src;
   }
 
   function findNextUrl(doc) {
@@ -137,17 +155,17 @@
   function groupShipments(shipments, today) {
     const groups = new Map();
     const todayKey = '1|0|0';
-    groups.set(todayKey, { label: groupLabel({ start: today, end: today }, today), rank: [1, 0, 0], showStatus: false, rows: [] });
+    groups.set(todayKey, { label: groupLabel({ start: today, end: today }, today), rank: [1, 0, 0], rows: [] });
 
     for (const shipment of shipments) {
       const range = arrivalRange(shipment.status, today);
       const rank = groupRank(range, today);
       const key = rank.join('|');
       if (!groups.has(key)) {
-        groups.set(key, { label: groupLabel(range, today), rank, showStatus: !range || rank[0] === 2, rows: [] });
+        groups.set(key, { label: groupLabel(range, today), rank, rows: [] });
       }
-      for (const title of shipment.items) {
-        groups.get(key).rows.push({ title, status: shipment.status, url: shipment.order.detailsUrl });
+      for (const { title, image } of shipment.items) {
+        groups.get(key).rows.push({ title, image, status: shipment.status, url: shipment.order.detailsUrl });
       }
     }
 
@@ -212,37 +230,27 @@
   }
 
   // Scans pages until one has nothing left to deliver, since anything older than that page is delivered too.
-  async function collectPending(onProgress) {
-    const pending = [];
+  // Yields after every page so the panel can show results while later pages load.
+  async function* scanPending() {
     let url = firstPageUrl().href;
-    let stopReason = `hit the ${MAX_PAGES}-page limit`;
-    let pageCount = 0;
-
-    while (pageCount < MAX_PAGES) {
-      pageCount += 1;
-      onProgress(pageCount);
-      const page = pageCount === 1 && isOnFirstPage() ? parseOrdersPage(document) : await loadPage(url);
+    for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
+      const page = pageNumber === 1 && isOnFirstPage() ? parseOrdersPage(document) : await loadPage(url);
       if (page.shipments.length === 0) {
-        throw new Error(`Found no orders on page ${pageCount}. Amazon's page layout may have changed; update parseOrdersPage in src/tampermonkey/amazon-undelivered.user.js.`);
+        throw new Error(`Found no orders on page ${pageNumber}. Amazon's page layout may have changed; update parseOrdersPage in src/tampermonkey/amazon-undelivered.user.js.`);
       }
-      const pagePending = page.shipments.filter((s) => isPending(s.status));
-      pending.push(...pagePending);
-      if (pagePending.length === 0) {
-        stopReason = `page ${pageCount} is all delivered`;
-        break;
-      }
-      if (!page.nextUrl) {
-        stopReason = `page ${pageCount} is the last page`;
-        break;
-      }
+      const pending = page.shipments.filter((s) => isPending(s.status));
+      let stopReason = null;
+      if (pending.length === 0) stopReason = `page ${pageNumber} is all delivered`;
+      else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
+      else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
+      yield { pageNumber, pending, stopReason };
+      if (stopReason) return;
       url = page.nextUrl;
     }
-
-    return { pending, pageCount, stopReason };
   }
 
   const CSS = `
-    #aud-panel { position: fixed; top: 110px; right: 16px; z-index: 9999; width: min(320px, calc(100vw - 32px));
+    #aud-panel { position: fixed; top: 110px; right: 16px; z-index: 9999; width: min(360px, calc(100vw - 32px));
       max-height: calc(100vh - 130px); overflow: auto; background: #fff; color: #0f1111; border: 1px solid #d5d9d9;
       border-radius: 8px; box-shadow: 0 4px 16px rgba(15,17,17,.15); font: 13px/1.4 "Amazon Ember", Arial, sans-serif; }
     #aud-panel header { position: sticky; top: 0; display: flex; align-items: center; gap: 8px; padding: 10px 12px;
@@ -253,11 +261,12 @@
     #aud-panel .aud-body { padding: 4px 12px 10px; }
     #aud-panel h4 { margin: 10px 0 4px; font-size: 13px; font-weight: 700; color: #007600; }
     #aud-panel h4.aud-muted { color: #565959; }
-    #aud-panel ul { margin: 0; padding: 0; list-style: none; }
-    #aud-panel li { padding: 2px 0 2px 10px; text-indent: -10px; }
-    #aud-panel li::before { content: "• "; color: #565959; }
-    #aud-panel li a { color: #0f1111; text-decoration: none; }
-    #aud-panel li a:hover { color: #c7511f; text-decoration: underline; }
+    #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
+    #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
+    #aud-panel .aud-row img, #aud-panel .aud-noimg { flex: none; width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
+    #aud-panel .aud-text { min-width: 0; }
+    #aud-panel .aud-eta { font-weight: 700; font-size: 12px; color: #007600; }
+    #aud-panel .aud-name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     #aud-panel .aud-status { color: #565959; font-size: 12px; }
     #aud-panel .aud-note { color: #565959; font-size: 12px; margin-top: 10px; }
     #aud-panel .aud-error { color: #b12704; }
@@ -281,40 +290,59 @@
     return { title, body };
   }
 
-  function renderGroups(body, groups) {
+  // "Arriving tomorrow" -> "Tomorrow"; statuses without that prefix ("Out for delivery") stay as they are.
+  function etaText(status) {
+    const eta = status.replace(/^((now )?arriving|estimated to arrive)\s+/i, '');
+    return eta.charAt(0).toUpperCase() + eta.slice(1);
+  }
+
+  function renderRow(row) {
+    const image = row.image ? h('img', { src: row.image, alt: '', loading: 'lazy' }) : h('div', { className: 'aud-noimg' });
+    const text = h('div', { className: 'aud-text' }, [
+      h('div', { className: 'aud-eta', textContent: etaText(row.status) }),
+      h('div', { className: 'aud-name', textContent: shortTitle(row.title) }),
+    ]);
+    const link = h('a', { className: 'aud-row', title: `${row.title}\n${row.status}` }, [image, text]);
+    if (row.url) link.href = row.url;
+    return link;
+  }
+
+  function renderGroups(container, groups) {
+    container.replaceChildren();
     for (const group of groups) {
-      body.append(h('h4', { textContent: group.label, className: group.rank[0] === 1 ? '' : 'aud-muted' }));
+      container.append(h('h4', { textContent: group.label, className: group.rank[0] === 1 ? '' : 'aud-muted' }));
       if (group.rows.length === 0) {
-        body.append(h('div', { className: 'aud-status', textContent: 'Nothing arriving today' }));
+        container.append(h('div', { className: 'aud-status', textContent: 'Nothing arriving today' }));
         continue;
       }
-      const list = h('ul');
-      for (const row of group.rows) {
-        const link = h('a', { textContent: shortTitle(row.title), title: `${row.title}\n${row.status}` });
-        if (row.url) link.href = row.url;
-        const children = [link];
-        if (group.showStatus) children.push(h('span', { className: 'aud-status', textContent: ` — ${row.status}` }));
-        list.append(h('li', {}, children));
-      }
-      body.append(list);
+      container.append(...group.rows.map(renderRow));
     }
   }
 
+  let activeRun = 0;
+
   async function run() {
+    const runId = (activeRun += 1);
     const { title, body } = mountPanel();
-    body.append(h('div', { className: 'aud-note', textContent: 'Scanning…' }));
+    const results = h('div');
+    const note = h('div', { className: 'aud-note', textContent: 'Scanning page 1…' });
+    body.append(results, note);
+
+    const pending = [];
+    const today = startOfToday();
     try {
-      const { pending, pageCount, stopReason } = await collectPending((n) => {
-        body.firstChild.textContent = `Scanning page ${n}…`;
-      });
-      const itemCount = pending.reduce((sum, s) => sum + s.items.length, 0);
-      title.textContent = `Not delivered yet (${itemCount})`;
-      body.replaceChildren();
-      renderGroups(body, groupShipments(pending, startOfToday()));
-      const pages = pageCount === 1 ? '1 page' : `${pageCount} pages`;
-      body.append(h('div', { className: 'aud-note', textContent: `Scanned ${pages}; stopped because ${stopReason}.` }));
+      for await (const { pageNumber, pending: pagePending, stopReason } of scanPending()) {
+        if (runId !== activeRun) return;
+        pending.push(...pagePending);
+        title.textContent = `Not delivered yet (${pending.reduce((sum, s) => sum + s.items.length, 0)})`;
+        renderGroups(results, groupShipments(pending, today));
+        const pages = pageNumber === 1 ? '1 page' : `${pageNumber} pages`;
+        note.textContent = stopReason ? `Scanned ${pages}; stopped because ${stopReason}.` : `Scanning page ${pageNumber + 1}…`;
+      }
     } catch (error) {
-      body.replaceChildren(h('div', { className: 'aud-error', textContent: error.message }));
+      if (runId !== activeRun) return;
+      note.className = 'aud-note aud-error';
+      note.textContent = error.message;
       console.error('[amazon-undelivered]', error);
     }
   }
