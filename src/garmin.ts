@@ -4,35 +4,28 @@ import { createScript } from './utils/createScript';
 import { addDays, format, isValid, parseISO } from 'date-fns';
 
 import env from './env';
+import { CONNECT_TOKEN_FILE, ConnectApi, PERSONAL_KEY_PAGE, PersonalApi, SWAGGER_PAGE, connectLoginEmail, loginToConnect, type Params } from './garminApi';
 import { formatDurationMilliseconds } from './utils/date';
-import { OUTPUT_FORMATS, parseOutputFormat, renderCsvRecords, renderTableRecords, type CsvValue } from './utils/output';
+import { OUTPUT_FORMATS, formatDisplayNumber, parseOutputFormat, renderCsvRecords, renderTableRecords, type CsvValue } from './utils/output';
 
-const BASE_URL = 'https://personal.connectapi.garmin.com';
-const TOKEN_PATH = '/personalapitoken-service/personal-api/personal-api-key/token';
-const KEY_PAGE = 'https://connect.garmin.com/app/settings/personalApiToken';
-const SWAGGER_PAGE = 'https://developer.garmin.com/gc-developer-program/personal/swagger-docs/';
-// The tightest range cap in the spec (steps and stress); sleep and Body Battery allow 31, daily summaries a year.
+// The tightest range cap in the Personal API spec (steps and stress); sleep and Body Battery allow 31, daily summaries a year.
 const MAX_RANGE_DAYS = 28;
 const ACTIVITY_PAGE_SIZE = 100;
+const PER_DAY_CONCURRENCY = 4;
 
 const TABLE_COLUMNS = [
   'date',
   'sleep_score',
   'sleep_start',
   'sleep_duration',
-  'sleep_deep',
-  'sleep_light',
-  'sleep_rem',
-  'sleep_awake',
+  'restorative',
+  'efficiency',
+  'sleep_debt',
   'HRV',
-  'HRV_7d',
-  'hrv_status',
   'RHR',
-  'bb_high',
-  'bb_low',
+  'readiness',
+  'bb_wake',
   'stress',
-  'respiration',
-  'spo2',
   'steps',
   'activities',
 ] as const;
@@ -40,16 +33,34 @@ const TABLE_COLUMNS = [
 const FULL_COLUMNS = [
   ...TABLE_COLUMNS,
   'sleep_end',
+  'sleep_deep',
+  'sleep_light',
+  'sleep_rem',
+  'sleep_awake',
+  'restorative_pct',
   'sleep_need',
+  'next_sleep_need',
+  'next_bedtime',
+  'awake_count',
+  'nap_duration',
   'sleep_hr',
   'sleep_respiration',
   'sleep_spo2',
   'sleep_stress',
-  'awake_count',
-  'nap_duration',
+  'HRV_7d',
+  'hrv_status',
+  'readiness_level',
+  'acute_load',
+  'health_status',
+  'skin_temp',
+  'vo2max',
+  'bb_high',
+  'bb_low',
   'bb_charged',
   'bb_drained',
   'stress_max',
+  'respiration',
+  'spo2',
   'active_kcal',
   'total_kcal',
   'intensity_moderate',
@@ -60,8 +71,10 @@ const FULL_COLUMNS = [
 type Column = (typeof FULL_COLUMNS)[number];
 type DailyRow = Record<Column, CsvValue>;
 
-interface SleepScoreItem {
-  value?: number | null;
+interface SleepNeed {
+  actual?: number | null;
+  recommendedBedtimeStartMins?: number | null;
+  recommendedBedtimeEndMins?: number | null;
 }
 
 interface DailySleep {
@@ -79,8 +92,9 @@ interface DailySleep {
   averageRespirationValue?: number | null;
   averageSpO2Value?: number | null;
   avgSleepStress?: number | null;
-  sleepScores?: Record<string, SleepScoreItem | undefined> | null;
-  sleepNeed?: { actual?: number | null } | null;
+  sleepScores?: Record<string, { value?: number | null } | undefined> | null;
+  sleepNeed?: SleepNeed | null;
+  nextSleepNeed?: SleepNeed | null;
 }
 
 interface HrvSummary {
@@ -97,14 +111,14 @@ interface DailySummary {
   heartRate?: { restingValue?: number | null } | null;
   intensityMinutes?: { moderate?: number | null; vigorous?: number | null } | null;
   stress?: { avgLevel?: number | null; maxLevel?: number | null } | null;
-  bodyBattery?: {
-    minValue?: number | null;
-    maxValue?: number | null;
-    chargedValue?: number | null;
-    drainedValue?: number | null;
-  } | null;
+  bodyBattery?: { minValue?: number | null; maxValue?: number | null; chargedValue?: number | null; drainedValue?: number | null } | null;
   respiration?: { avgValue?: number | null } | null;
   pulseOx?: { avgValue?: number | null } | null;
+}
+
+interface UserSummary {
+  calendarDate?: string | null;
+  bodyBatteryAtWakeTime?: number | null;
 }
 
 interface Activity {
@@ -114,51 +128,31 @@ interface Activity {
   activityType?: { typeKey?: string | null } | null;
 }
 
-class GarminClient {
-  private constructor(private readonly token: string) {}
-
-  static async connect(apiKey: string): Promise<GarminClient> {
-    const res = await fetch(BASE_URL + TOKEN_PATH, {
-      method: 'POST',
-      headers: { Accept: '*/*', Authorization: `ApiKey ${apiKey}` },
-    });
-    const body = await res.text();
-    if (res.status === 401 || res.status === 403) {
-      throw new Error(
-        `Garmin rejected GARMIN_PERSONAL_API_KEY (${res.status}); it may be expired or deleted. Create a new key at ${KEY_PAGE}, put it in .env.local, and run \`env-manager up\`.`,
-      );
-    }
-    if (!res.ok) throw new Error(`POST ${TOKEN_PATH} failed with ${res.status}: ${body.slice(0, 300)}`);
-    return new GarminClient(body.trim());
-  }
-
-  async get<T>(pathname: string, params: Record<string, string | number> = {}): Promise<T> {
-    const url = new URL(pathname, BASE_URL);
-    for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-    const res = await fetch(url, { headers: { Accept: 'application/json', Authorization: `Bearer ${this.token}` } });
-    const body = await res.text();
-    if (!res.ok) {
-      const hint =
-        res.status === 404
-          ? ` The Personal API only serves the paths listed in ${SWAGGER_PAGE}.`
-          : res.status === 400
-            ? ' Check the dates (YYYY-MM-DD) and the per-endpoint range cap in the Swagger docs.'
-            : '';
-      throw new Error(`GET ${url.pathname}${url.search} failed with ${res.status}: ${body.slice(0, 300)}${hint}`);
-    }
-    return (body ? JSON.parse(body) : null) as T;
-  }
+interface TrainingReadiness {
+  calendarDate: string;
+  timestamp?: string | null;
+  score?: number | null;
+  level?: string | null;
+  acuteLoad?: number | null;
+  inputContext?: string | null;
 }
 
-function requireApiKey(): string {
-  const key = env.GARMIN_PERSONAL_API_KEY;
-  if (!key) {
-    throw new Error(
-      `GARMIN_PERSONAL_API_KEY is not set. Create a key at ${KEY_PAGE}, add GARMIN_PERSONAL_API_KEY='<key>' to .env.local, and run \`env-manager up\`.`,
-    );
-  }
-  return key;
+interface SleepStats {
+  individualStats?: { calendarDate: string; values?: { skinTempC?: number | null } | null }[] | null;
 }
+
+interface MaxMetrics {
+  generic?: { calendarDate?: string | null; vo2MaxPreciseValue?: number | null; vo2MaxValue?: number | null } | null;
+}
+
+interface HealthStatus {
+  calendarDate: string;
+  outliersCount?: number | null;
+  metrics?: { type: string; status?: string | null; value?: number | null }[] | null;
+}
+
+type Range = { start: Date; end: Date };
+const day = (date: Date) => format(date, 'yyyy-MM-dd');
 
 function parseDay(value: string, flag: string): Date {
   const date = parseISO(value);
@@ -166,64 +160,118 @@ function parseDay(value: string, flag: string): Date {
   return date;
 }
 
-function resolveRange(args: { start?: string; end?: string; days: number }): { start: Date; end: Date } {
+function resolveRange(args: { start?: string; end?: string; days: number }): Range {
   if (!Number.isInteger(args.days) || args.days < 1) throw new Error(`--days must be a positive integer, got ${args.days}.`);
   const end = args.end ? parseDay(args.end, 'end') : new Date();
   const start = args.start ? parseDay(args.start, 'start') : addDays(end, 1 - args.days);
-  if (start > end) throw new Error(`--start ${format(start, 'yyyy-MM-dd')} is after --end ${format(end, 'yyyy-MM-dd')}.`);
+  if (start > end) throw new Error(`--start ${day(start)} is after --end ${day(end)}.`);
   return { start, end };
 }
 
-function chunkRange(start: Date, end: Date): [string, string][] {
+function eachDay({ start, end }: Range): string[] {
+  const days: string[] = [];
+  for (let date = start; date <= end; date = addDays(date, 1)) days.push(day(date));
+  return days;
+}
+
+function chunkRange({ start, end }: Range): [string, string][] {
   const chunks: [string, string][] = [];
   for (let from = start; from <= end; from = addDays(from, MAX_RANGE_DAYS)) {
     const to = addDays(from, MAX_RANGE_DAYS - 1);
-    chunks.push([format(from, 'yyyy-MM-dd'), format(to > end ? end : to, 'yyyy-MM-dd')]);
+    chunks.push([day(from), day(to > end ? end : to)]);
   }
   return chunks;
 }
 
-async function fetchActivities(client: GarminClient, startDate: string, endDate: string): Promise<Activity[]> {
+async function mapLimited<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  for (let index = 0; index < items.length; index += limit) {
+    results.push(...(await Promise.all(items.slice(index, index + limit).map(fn))));
+  }
+  return results;
+}
+
+async function fetchActivities(api: PersonalApi, startDate: string, endDate: string): Promise<Activity[]> {
   const activities: Activity[] = [];
   for (let start = 0; ; start += ACTIVITY_PAGE_SIZE) {
-    const page = await client.get<Activity[]>('/activitylist-service/activities/search/activities', {
-      start,
-      limit: ACTIVITY_PAGE_SIZE,
-      startDate,
-      endDate,
-    });
+    const page = await api.get<Activity[]>('/activitylist-service/activities/search/activities', { start, limit: ACTIVITY_PAGE_SIZE, startDate, endDate });
     activities.push(...page);
     if (page.length < ACTIVITY_PAGE_SIZE) return activities;
   }
 }
 
-async function fetchDaily(client: GarminClient, start: Date, end: Date) {
+async function fetchPersonalDaily(api: PersonalApi, range: Range) {
   const chunks = await Promise.all(
-    chunkRange(start, end).map(async ([from, to]) => {
+    chunkRange(range).map(async ([from, to]) => {
       const [summaries, sleeps, hrv, activities] = await Promise.all([
-        client.get<{ data?: DailySummary[] | null }>('/usersummary-service/v2/dailysummaries', { startDate: from, endDate: to }),
-        client.get<DailySleep[] | null>('/sleep-service/sleep/dailySleepSummariesByDate', { startDate: from, endDate: to }),
-        client.get<{ hrvSummaries?: HrvSummary[] | null }>(`/hrv-service/hrv/daily/${from}/${to}`),
-        fetchActivities(client, from, to),
+        api.get<{ data?: DailySummary[] | null }>('/usersummary-service/v2/dailysummaries', { startDate: from, endDate: to }),
+        api.get<DailySleep[] | null>('/sleep-service/sleep/dailySleepSummariesByDate', { startDate: from, endDate: to }),
+        api.get<{ hrvSummaries?: HrvSummary[] | null } | null>(`/hrv-service/hrv/daily/${from}/${to}`),
+        fetchActivities(api, from, to),
       ]);
-      return {
-        summaries: summaries?.data ?? [],
-        sleeps: sleeps ?? [],
-        hrv: hrv?.hrvSummaries ?? [],
-        activities,
-      };
+      return { summaries: summaries?.data ?? [], sleeps: sleeps ?? [], hrv: hrv?.hrvSummaries ?? [], activities };
     }),
+  );
+  // Body Battery at wake (the closest thing to WHOOP's Recovery before Training Readiness calibrates) is only in the per-day summary.
+  const userSummaries = await mapLimited(eachDay(range), PER_DAY_CONCURRENCY, calendarDate =>
+    api.get<UserSummary | null>('/usersummary-service/usersummary/daily', { calendarDate }).then(summary => ({ ...summary, calendarDate })),
   );
   return {
     summaries: chunks.flatMap(chunk => chunk.summaries),
     sleeps: chunks.flatMap(chunk => chunk.sleeps),
     hrv: chunks.flatMap(chunk => chunk.hrv),
     activities: chunks.flatMap(chunk => chunk.activities),
+    userSummaries,
   };
 }
 
-// The spec types "Local" sleep timestamps as date-time but describes them as ms: either local wall time without an offset,
-// or epoch ms shifted by the user's UTC offset so the UTC fields read as local wall time.
+const HEALTH_STATUS_FIELDS = '{ calendarDate outliersCount metrics { type status value } }';
+
+async function fetchConnectDaily(api: ConnectApi, range: Range) {
+  const chunks = await Promise.all(
+    chunkRange(range).map(async ([from, to]) => {
+      const days = eachDay({ start: parseISO(from), end: parseISO(to) });
+      const healthQuery = `query { ${days.map((date, index) => `d${index}: healthStatusSummary(calendarDate:"${date}") ${HEALTH_STATUS_FIELDS}`).join(' ')} }`;
+      const [readiness, sleepStats, maxMetrics, health] = await Promise.all([
+        api.get<TrainingReadiness[] | null>(`/metrics-service/metrics/trainingreadiness/${from}/${to}`),
+        api.get<SleepStats | null>(`/sleep-service/stats/sleep/daily/${from}/${to}`),
+        api.get<MaxMetrics[] | null>(`/metrics-service/metrics/maxmet/daily/${from}/${to}`),
+        api.graphql<Record<string, HealthStatus | null>>(healthQuery),
+      ]);
+      return {
+        readiness: readiness ?? [],
+        sleepStats: sleepStats?.individualStats ?? [],
+        maxMetrics: maxMetrics ?? [],
+        health: Object.values(health ?? {}).filter((status): status is HealthStatus => status != null),
+      };
+    }),
+  );
+  return {
+    readiness: chunks.flatMap(chunk => chunk.readiness),
+    sleepStats: chunks.flatMap(chunk => chunk.sleepStats),
+    maxMetrics: chunks.flatMap(chunk => chunk.maxMetrics),
+    health: chunks.flatMap(chunk => chunk.health),
+  };
+}
+
+type PersonalDaily = Awaited<ReturnType<typeof fetchPersonalDaily>>;
+type ConnectDaily = Awaited<ReturnType<typeof fetchConnectDaily>>;
+
+/** Connect data is optional: without credentials, or when Garmin breaks the unofficial login, the official columns still print. */
+async function connectOrWarn(): Promise<ConnectApi | null> {
+  if (!env.GARMIN_CREDENTIALS) {
+    console.error("Skipping Garmin Connect columns (readiness, health status, skin temp, VO2 max): GARMIN_CREDENTIALS is not set. Add GARMIN_CREDENTIALS='<email>:<password>' to .env.local.");
+    return null;
+  }
+  try {
+    return await ConnectApi.connect();
+  } catch (error) {
+    console.error(`Skipping Garmin Connect columns: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+// Garmin's "Local" sleep timestamps are epoch ms shifted by the user's UTC offset, so the UTC fields read as local wall time.
 function formatLocalClock(value: string | number | null | undefined): CsvValue {
   if (value == null || value === '') return null;
   const wallClock = typeof value === 'string' ? /T(\d{2}:\d{2})/.exec(value) : null;
@@ -234,55 +282,70 @@ function formatLocalClock(value: string | number | null | undefined): CsvValue {
 }
 
 const seconds = (value: number | null | undefined): CsvValue => formatDurationMilliseconds(value == null ? null : value * 1000) || null;
+const minutes = (value: number | null | undefined): CsvValue => (value == null ? null : formatDurationMilliseconds(value * 60_000) || null);
+const clockFromMinutes = (value: number | null | undefined): string | null =>
+  value == null ? null : `${String(Math.floor(value / 60) % 24).padStart(2, '0')}:${String(value % 60).padStart(2, '0')}`;
+
+function bedtimeWindow(need: SleepNeed | null | undefined): CsvValue {
+  const start = clockFromMinutes(need?.recommendedBedtimeStartMins);
+  const end = clockFromMinutes(need?.recommendedBedtimeEndMins);
+  return start && end ? `${start}-${end}` : start;
+}
+
+function healthStatusLabel(status: HealthStatus): CsvValue {
+  // Garmin reports skin temp twice (C and F); count each metric once.
+  const metrics = (status.metrics ?? []).filter(metric => metric.type !== 'SKIN_TEMP_F' && metric.value != null);
+  if (metrics.length === 0) return null;
+  if (metrics.some(metric => metric.status === 'ONBOARDING')) return 'onboarding';
+  return `${metrics.length - (status.outliersCount ?? 0)}/${metrics.length} in range`;
+}
 
 function emptyRow(date: string): DailyRow {
   return Object.fromEntries(FULL_COLUMNS.map(column => [column, column === 'date' ? date : null])) as DailyRow;
 }
 
-function buildRows(data: Awaited<ReturnType<typeof fetchDaily>>, start: Date, end: Date): DailyRow[] {
-  const rows = new Map<string, DailyRow>();
-  for (let day = start; day <= end; day = addDays(day, 1)) {
-    const date = format(day, 'yyyy-MM-dd');
-    rows.set(date, emptyRow(date));
-  }
-  const rowFor = (date: string) => rows.get(date);
+function buildRows(personal: PersonalDaily, connect: ConnectDaily | null, range: Range): DailyRow[] {
+  const rows = new Map(eachDay(range).map(date => [date, emptyRow(date)]));
+  const merge = (date: string | null | undefined, values: Partial<DailyRow>) => {
+    const row = date ? rows.get(date) : undefined;
+    if (row) Object.assign(row, values);
+  };
 
-  for (const sleep of data.sleeps) {
-    const row = rowFor(sleep.calendarDate);
-    if (!row) continue;
-    Object.assign(row, {
+  for (const sleep of personal.sleeps) {
+    const sleepSeconds = sleep.sleepTimeSeconds ?? null;
+    const restorativeSeconds = sleep.deepSleepSeconds == null && sleep.remSleepSeconds == null ? null : (sleep.deepSleepSeconds ?? 0) + (sleep.remSleepSeconds ?? 0);
+    const needMinutes = sleep.sleepNeed?.actual ?? null;
+    merge(sleep.calendarDate, {
       sleep_score: sleep.sleepScores?.overall?.value ?? null,
       sleep_start: formatLocalClock(sleep.sleepStartTimestampLocal),
       sleep_end: formatLocalClock(sleep.sleepEndTimestampLocal),
-      sleep_duration: seconds(sleep.sleepTimeSeconds),
+      sleep_duration: seconds(sleepSeconds),
       sleep_deep: seconds(sleep.deepSleepSeconds),
       sleep_light: seconds(sleep.lightSleepSeconds),
       sleep_rem: seconds(sleep.remSleepSeconds),
       sleep_awake: seconds(sleep.awakeSleepSeconds),
-      sleep_need: sleep.sleepNeed?.actual == null ? null : formatDurationMilliseconds(sleep.sleepNeed.actual * 60_000),
+      restorative: seconds(restorativeSeconds),
+      restorative_pct: sleepSeconds && restorativeSeconds != null ? formatDisplayNumber((restorativeSeconds / sleepSeconds) * 100) : null,
+      efficiency: sleepSeconds ? formatDisplayNumber((sleepSeconds / (sleepSeconds + (sleep.awakeSleepSeconds ?? 0))) * 100) : null,
+      sleep_need: minutes(needMinutes),
+      sleep_debt: needMinutes != null && sleepSeconds != null ? (minutes(Math.max(0, needMinutes - Math.round(sleepSeconds / 60))) ?? '0m') : null,
+      next_sleep_need: minutes(sleep.nextSleepNeed?.actual),
+      next_bedtime: bedtimeWindow(sleep.nextSleepNeed),
       sleep_hr: sleep.avgHeartRate ?? null,
       sleep_respiration: sleep.averageRespirationValue ?? null,
       sleep_spo2: sleep.averageSpO2Value ?? null,
       sleep_stress: sleep.avgSleepStress ?? null,
       awake_count: sleep.awakeCount ?? null,
       nap_duration: seconds(sleep.napTimeSeconds),
-    } satisfies Partial<DailyRow>);
+    });
   }
 
-  for (const hrv of data.hrv) {
-    const row = rowFor(hrv.calendarDate);
-    if (!row) continue;
-    Object.assign(row, {
-      HRV: hrv.lastNightAvg ?? null,
-      HRV_7d: hrv.weeklyAvg ?? null,
-      hrv_status: hrv.status?.toLowerCase() ?? null,
-    } satisfies Partial<DailyRow>);
+  for (const hrv of personal.hrv) {
+    merge(hrv.calendarDate, { HRV: hrv.lastNightAvg ?? null, HRV_7d: hrv.weeklyAvg ?? null, hrv_status: hrv.status?.toLowerCase() ?? null });
   }
 
-  for (const summary of data.summaries) {
-    const row = rowFor(summary.calendarDate);
-    if (!row) continue;
-    Object.assign(row, {
+  for (const summary of personal.summaries) {
+    merge(summary.calendarDate, {
       RHR: summary.heartRate?.restingValue ?? null,
       bb_high: summary.bodyBattery?.maxValue ?? null,
       bb_low: summary.bodyBattery?.minValue ?? null,
@@ -298,11 +361,13 @@ function buildRows(data: Awaited<ReturnType<typeof fetchDaily>>, start: Date, en
       total_kcal: summary.calories?.burnedTotal ?? null,
       intensity_moderate: summary.intensityMinutes?.moderate ?? null,
       intensity_vigorous: summary.intensityMinutes?.vigorous ?? null,
-    } satisfies Partial<DailyRow>);
+    });
   }
 
+  for (const summary of personal.userSummaries) merge(summary.calendarDate, { bb_wake: summary.bodyBatteryAtWakeTime ?? null });
+
   const activitiesByDate = new Map<string, string[]>();
-  const sortedActivities = data.activities.toSorted((a, b) => (a.startTimeLocal ?? '').localeCompare(b.startTimeLocal ?? ''));
+  const sortedActivities = personal.activities.toSorted((a, b) => (a.startTimeLocal ?? '').localeCompare(b.startTimeLocal ?? ''));
   for (const activity of sortedActivities) {
     const date = activity.startTimeLocal?.slice(0, 10);
     if (!date || !rows.has(date)) continue;
@@ -310,23 +375,143 @@ function buildRows(data: Awaited<ReturnType<typeof fetchDaily>>, start: Date, en
     const duration = seconds(activity.duration);
     activitiesByDate.set(date, [...(activitiesByDate.get(date) ?? []), duration ? `${name} (${duration})` : name]);
   }
-  for (const [date, entries] of activitiesByDate) rows.get(date)!.activities = entries.join('; ');
+  for (const [date, entries] of activitiesByDate) merge(date, { activities: entries.join('; ') });
+
+  if (connect) {
+    // Garmin recalculates readiness through the day; the after-wake-up entry is the morning score, like WHOOP's Recovery.
+    const readinessByDate = new Map<string, TrainingReadiness>();
+    for (const entry of connect.readiness.toSorted((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''))) {
+      const current = readinessByDate.get(entry.calendarDate);
+      if (!current || current.inputContext !== 'AFTER_WAKEUP_RESET') readinessByDate.set(entry.calendarDate, entry);
+    }
+    for (const [date, entry] of readinessByDate) {
+      merge(date, { readiness: entry.score ?? null, readiness_level: entry.level && entry.level !== 'NONE' ? entry.level.toLowerCase() : null, acute_load: entry.acuteLoad ?? null });
+    }
+    for (const stat of connect.sleepStats) merge(stat.calendarDate, { skin_temp: stat.values?.skinTempC ?? null });
+    for (const metric of connect.maxMetrics) {
+      merge(metric.generic?.calendarDate, { vo2max: metric.generic?.vo2MaxPreciseValue ?? metric.generic?.vo2MaxValue ?? null });
+    }
+    for (const status of connect.health) merge(status.calendarDate, { health_status: healthStatusLabel(status) });
+  }
 
   return [...rows.values()].toReversed();
 }
+
+interface Sample {
+  time: string;
+  value: number;
+}
+
+interface SleepStage {
+  start: string;
+  end: string;
+  stage: string;
+}
+
+const SLEEP_STAGES: Record<number, string> = { 0: 'deep', 1: 'light', 2: 'rem', 3: 'awake' };
+const localTime = (epochMs: number) => format(new Date(epochMs), "yyyy-MM-dd'T'HH:mm");
+// Connect's GMT strings carry no zone marker.
+const gmtToLocal = (value: string) => localTime(Date.parse(`${value.replace(/\.\d+$/, '')}Z`));
+
+// Garmin pads unmeasured epochs with negative values (-1 off-wrist or too little data, -2 too much motion).
+function samples(rows: unknown[][] | null | undefined, valueIndex = 1): Sample[] {
+  return (rows ?? []).flatMap(row => {
+    const [timestamp] = row;
+    const value = row[valueIndex];
+    return typeof timestamp === 'number' && typeof value === 'number' && value >= 0 ? [{ time: localTime(timestamp), value }] : [];
+  });
+}
+
+async function fetchIntraday(personal: PersonalApi, connect: ConnectApi, date: string) {
+  const [heartRate, hrv, spo2, stress, respiration, sleep] = await Promise.all([
+    personal.get<{ heartRateValues?: number[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', { date }),
+    personal.get<{ hrvReadings?: { hrvValue: number; readingTimeLocal: string }[] | null } | null>(`/hrv-service/hrv/${date}`),
+    personal.get<{ spO2SingleValues?: number[][] | null } | null>(`/wellness-service/wellness/daily/spo2acclimation/${date}`),
+    connect.get<{ stressValuesArray?: number[][] | null; bodyBatteryValuesArray?: unknown[][] | null } | null>(`/wellness-service/wellness/dailyStress/${date}`),
+    connect.get<{ respirationValuesArray?: number[][] | null } | null>(`/wellness-service/wellness/daily/respiration/${date}`),
+    connect.get<{ sleepLevels?: { startGMT: string; endGMT: string; activityLevel: number }[] | null } | null>('/sleep-service/sleep/dailySleepData', {
+      date,
+      nonSleepBufferMinutes: 60,
+    }),
+  ]);
+  return {
+    date,
+    series: {
+      heart_rate: samples(heartRate?.heartRateValues),
+      stress: samples(stress?.stressValuesArray),
+      body_battery: samples(stress?.bodyBatteryValuesArray, 2),
+      respiration: samples(respiration?.respirationValuesArray),
+      hrv: (hrv?.hrvReadings ?? []).map(reading => ({ time: reading.readingTimeLocal.slice(0, 16), value: reading.hrvValue })),
+      spo2: samples(spo2?.spO2SingleValues),
+    } satisfies Record<string, Sample[]>,
+    sleep_stages: (sleep?.sleepLevels ?? []).map(level => ({
+      start: gmtToLocal(level.startGMT),
+      end: gmtToLocal(level.endGMT),
+      stage: SLEEP_STAGES[level.activityLevel] ?? `level_${level.activityLevel}`,
+    })) satisfies SleepStage[],
+  };
+}
+
+type Intraday = Awaited<ReturnType<typeof fetchIntraday>>;
+
+function renderIntraday(data: Intraday, outputFormat: ReturnType<typeof parseOutputFormat>): void {
+  if (outputFormat === 'json') {
+    process.stdout.write(`${JSON.stringify(data, null, 2)}\n`);
+    return;
+  }
+  if (outputFormat === 'csv' || outputFormat === 'csv:full') {
+    const rows: Record<string, CsvValue>[] = [
+      ...Object.entries(data.series).flatMap(([metric, series]) => series.map(sample => ({ time: sample.time, end: null, metric, value: sample.value }))),
+      ...data.sleep_stages.map(stage => ({ time: stage.start, end: stage.end, metric: 'sleep_stage', value: stage.stage })),
+    ];
+    process.stdout.write(renderCsvRecords(rows, ['time', 'end', 'metric', 'value']));
+    return;
+  }
+  renderTableRecords(
+    Object.entries(data.series).map(([metric, series]) => {
+      const values = series.map(sample => sample.value);
+      return {
+        metric,
+        samples: values.length,
+        min: values.length ? Math.min(...values) : '',
+        avg: values.length ? formatDisplayNumber(values.reduce((sum, value) => sum + value, 0) / values.length) : '',
+        max: values.length ? Math.max(...values) : '',
+        from: series[0]?.time.slice(11) ?? '',
+        to: series.at(-1)?.time.slice(11) ?? '',
+      };
+    }),
+  );
+  if (data.sleep_stages.length) {
+    renderTableRecords(data.sleep_stages.map(stage => ({ start: stage.start.slice(11), end: stage.end.slice(11), stage: stage.stage })));
+  }
+}
+
+function parseParams(pairs: string[]): Params {
+  return Object.fromEntries(
+    pairs.map(pair => {
+      const separator = pair.indexOf('=');
+      if (separator <= 0) throw new Error(`--param must look like key=value, got '${pair}'.`);
+      return [pair.slice(0, separator), pair.slice(separator + 1)];
+    }),
+  );
+}
+
+const writeJson = (value: unknown) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 
 const cli = createScript('garmin')
   .usage(
     [
       '$0 <command>',
       '',
-      `Pulls your Garmin Connect data (any Garmin device, including the CIRQA band) through Garmin's official Personal API.`,
-      `Auth: GARMIN_PERSONAL_API_KEY, created at ${KEY_PAGE} (expires after 30 days to 1 year).`,
+      'Pulls your Garmin Connect data (any Garmin device, including the CIRQA band) from two sources:',
+      `  personal: Garmin's official Personal API. Needs GARMIN_PERSONAL_API_KEY, created at ${PERSONAL_KEY_PAGE} (expires after 30 days to 1 year).`,
+      '  connect:  the Connect app\'s own API, for what the Personal API lacks (intraday stress, Training Readiness, Health Status, skin temp, VO2 max).',
+      `            Unofficial. Needs GARMIN_CREDENTIALS (email:password); tokens live in ${CONNECT_TOKEN_FILE} and refresh themselves.`,
     ].join('\n'),
   )
   .command(
     ['daily', '$0'],
-    'One row per day: sleep, HRV, resting HR, Body Battery, stress, respiration, SpO2, steps, and activities',
+    'One row per day: sleep, restorative sleep, HRV, resting HR, readiness, Body Battery, stress, steps, and activities',
     cli =>
       cli
         .option('days', { alias: 'd', type: 'number', default: 7, describe: 'Days to include, ending at --end, when --start is not given' })
@@ -337,58 +522,101 @@ const cli = createScript('garmin')
           type: 'string',
           choices: OUTPUT_FORMATS,
           default: 'table',
-          describe: 'table and csv show the main columns; json and csv:full add sleep detail, calories, intensity minutes, and floors',
+          describe: 'table and csv show the main columns; json and csv:full add sleep stages, bedtime, health status, skin temp, VO2 max, calories, and more',
         }),
     async argv => {
-      const apiKey = requireApiKey();
       const outputFormat = parseOutputFormat(argv.format);
-      const { start, end } = resolveRange(argv);
-      const client = await GarminClient.connect(apiKey);
-      const rows = buildRows(await fetchDaily(client, start, end), start, end);
+      const range = resolveRange(argv);
+      const [personal, connect] = await Promise.all([PersonalApi.connect(), connectOrWarn()]);
+      const [personalData, connectData] = await Promise.all([
+        fetchPersonalDaily(personal, range),
+        connect
+          ? fetchConnectDaily(connect, range).catch((error: unknown) => {
+              console.error(`Skipping Garmin Connect columns: ${error instanceof Error ? error.message : String(error)}`);
+              return null;
+            })
+          : null,
+      ]);
+      const rows = buildRows(personalData, connectData, range);
       if (outputFormat === 'table') {
         renderTableRecords(rows.map(row => Object.fromEntries(TABLE_COLUMNS.map(column => [column, row[column] ?? '']))));
       } else if (outputFormat === 'json') {
-        process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+        writeJson(rows);
       } else {
         process.stdout.write(renderCsvRecords(rows, outputFormat === 'csv:full' ? FULL_COLUMNS : TABLE_COLUMNS));
       }
     },
   )
   .command(
-    'raw <path>',
-    `GET any Personal API endpoint and print its JSON. Paths and range caps: ${SWAGGER_PAGE}`,
+    'intraday [date]',
+    'Time series for one day, like the WHOOP charts: heart rate (2 min), stress and Body Battery (3 min), respiration, HRV (5 min, during sleep), SpO2, and sleep stages',
     cli =>
       cli
-        .positional('path', {
+        .positional('date', { type: 'string', describe: 'Day (YYYY-MM-DD), default today' })
+        .option('format', {
+          alias: 'f',
           type: 'string',
-          demandOption: true,
-          describe: 'Endpoint path, e.g. /sleep-service/sleep/dailySleep or /hrv-service/hrv/2026-11-08',
-        })
-        .option('param', {
-          alias: 'p',
-          type: 'string',
-          array: true,
-          default: [],
-          describe: 'Query parameter as key=value, repeatable (e.g. -p date=2026-11-08)',
-        })
-        .example('$0 raw /sleep-service/sleep/dailySleep -p date=2026-11-08', 'Full sleep record, including stage timeline and sleep score components')
-        .example('$0 raw /wellness-service/wellness/dailyHeartRate -p date=2026-11-08', 'Heart rate samples for one day')
-        .example('$0 raw /wellness-service/wellness/bodyBattery/reports/daily -p startDate=2026-11-01 -p endDate=2026-11-08', 'Body Battery samples and events')
-        .example('$0 raw /usersummary-service/v2/dailysummaries -p startDate=2026-11-01 -p endDate=2026-11-08', 'Daily summaries, up to a year per call')
-        .example('$0 raw /fitnessage-service/fitnessage/v2/2026-11-08', 'Fitness age')
-        .example('$0 raw /userprofile-service/userprofile/settings', 'Profile, including VO2 max and lactate threshold'),
-    async argv => {
-      const apiKey = requireApiKey();
-      const params = Object.fromEntries(
-        argv.param.map(pair => {
-          const separator = pair.indexOf('=');
-          if (separator <= 0) throw new Error(`--param must look like key=value, got '${pair}'.`);
-          return [pair.slice(0, separator), pair.slice(separator + 1)];
+          choices: OUTPUT_FORMATS,
+          default: 'table',
+          describe: 'table summarizes each series; json groups samples by metric; csv lists every sample as time,end,metric,value',
         }),
-      );
-      const path = argv.path.startsWith('/') ? argv.path : `/${argv.path}`;
-      const client = await GarminClient.connect(apiKey);
-      process.stdout.write(`${JSON.stringify(await client.get(path, params), null, 2)}\n`);
+    async argv => {
+      const outputFormat = parseOutputFormat(argv.format);
+      const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
+      const [personal, connect] = await Promise.all([PersonalApi.connect(), ConnectApi.connect()]);
+      renderIntraday(await fetchIntraday(personal, connect, date), outputFormat);
+    },
+  )
+  .command(
+    'raw <path>',
+    'GET any endpoint and print its JSON',
+    cli =>
+      cli
+        .positional('path', { type: 'string', demandOption: true, describe: 'Endpoint path, e.g. /sleep-service/sleep/dailySleep' })
+        .option('source', {
+          type: 'string',
+          choices: ['personal', 'connect'] as const,
+          default: 'personal',
+          describe: `personal: official paths only (${SWAGGER_PAGE}); connect: any path the Connect app uses`,
+        })
+        .option('param', { alias: 'p', type: 'string', array: true, default: [], describe: 'Query parameter as key=value, repeatable (e.g. -p date=2026-11-08)' })
+        .example('$0 raw /sleep-service/sleep/dailySleep -p date=2026-11-08', 'Sleep record with score components and sleep need')
+        .example('$0 raw /usersummary-service/v2/dailysummaries -p startDate=2026-11-01 -p endDate=2026-11-08', 'Daily summaries, up to a year per call')
+        .example('$0 raw /userprofile-service/userprofile/settings', 'Profile settings')
+        .example('$0 raw --source connect /sleep-service/sleep/dailySleepData -p date=2026-11-08', 'Full night: stages, HR, HRV, stress, Body Battery, respiration, restless moments')
+        .example('$0 raw --source connect /metrics-service/metrics/trainingreadiness/2026-11-08', 'Training Readiness and its factors')
+        .example('$0 raw --source connect /wellness-service/wellness/dailyStress/2026-11-08', '3-minute stress and Body Battery')
+        .example('$0 raw --source connect /metrics-service/metrics/trainingstatus/aggregated/2026-11-08', 'Training status and load'),
+    async argv => {
+      const params = parseParams(argv.param);
+      const api = argv.source === 'connect' ? await ConnectApi.connect() : await PersonalApi.connect();
+      writeJson(await api.get(argv.path, params));
+    },
+  )
+  .command(
+    'graphql <query>',
+    "Run a query against the Connect web app's GraphQL gateway (the only route to Health Status) and print its data",
+    cli =>
+      cli
+        .positional('query', { type: 'string', demandOption: true, describe: 'Anonymous query with inlined arguments' })
+        .example('$0 graphql \'query { healthStatusSummary(calendarDate:"2026-11-08") { outliersCount metrics { type status value baselineLowerLimit baselineUpperLimit } } }\'', 'Health Status')
+        .example('$0 graphql \'query { vo2MaxScalar(startDate:"2026-10-01", endDate:"2026-11-08") }\'', 'VO2 max history')
+        .example('$0 graphql \'query { epochChartScalar(date:"2026-11-08", include:["steps","stress","bodyBattery"]) }\'', 'Intraday charts as one payload'),
+    async argv => {
+      writeJson(await (await ConnectApi.connect()).graphql(argv.query));
+    },
+  )
+  .command(
+    'login',
+    `Log in to Garmin Connect with GARMIN_CREDENTIALS and save tokens to ${CONNECT_TOKEN_FILE}. Other commands do this on their own; run it in a terminal when Garmin asks for an MFA code`,
+    cli => cli.option('dry-run', { type: 'boolean', default: false, describe: 'Print what would happen without logging in' }),
+    argv => {
+      const email = connectLoginEmail();
+      if (argv['dry-run']) {
+        console.log(`Would log in to Garmin Connect as ${email} and write tokens to ${CONNECT_TOKEN_FILE}.`);
+        return;
+      }
+      loginToConnect();
     },
   );
 
