@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.4.1
+// @version      1.5.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -355,6 +355,10 @@
     #aud-panel .aud-grid a { position: relative; display: block; line-height: 0; }
     #aud-panel .aud-qty { position: absolute; right: -3px; bottom: -3px; padding: 0 4px; background: #fff; border: 1px solid #d5d9d9;
       border-radius: 8px; font-size: 10px; font-weight: 700; line-height: 14px; color: #0f1111; }
+    #aud-panel .aud-check { position: absolute; top: -4px; right: -4px; width: 16px; height: 16px; border-radius: 50%; background: #067d62;
+      color: #fff; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; box-shadow: 0 0 0 2px #fff; }
+    #aud-panel .aud-done img { opacity: .55; }
+    #aud-panel .aud-done:hover img { opacity: 1; }
     #aud-panel .aud-grid img, #aud-panel .aud-grid .aud-noimg { width: 44px; height: 44px; object-fit: contain; border-radius: 4px; background: #f7f7f7; }
     #aud-panel .aud-row { display: flex; gap: 10px; align-items: center; padding: 4px 0; color: #0f1111; text-decoration: none; }
     #aud-panel .aud-row:hover .aud-name { color: #c7511f; text-decoration: underline; }
@@ -481,9 +485,10 @@
     ]);
   }
 
-  function renderGrid(rows) {
-    return h('div', { className: 'aud-grid' }, rows.map((row) => itemLink(row, '', [
+  function renderGrid(rows, { delivered = false } = {}) {
+    return h('div', { className: 'aud-grid' }, rows.map((row) => itemLink(row, delivered ? 'aud-done' : '', [
       itemImage(row),
+      ...(delivered ? [h('span', { className: 'aud-check', textContent: '✓' })] : []),
       ...(row.item.quantity > 1 ? [h('span', { className: 'aud-qty', textContent: String(row.item.quantity) })] : []),
     ])));
   }
@@ -492,7 +497,7 @@
     const sections = [];
     const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
     if (delivered.length > 0) {
-      sections.push(renderGrid(delivered));
+      sections.push(renderGrid(delivered, { delivered: true }));
     }
     // Items with no name on the page (grocery) render as images clustered at the top of their day.
     for (const rows of groupByDay(pending, today)) {
