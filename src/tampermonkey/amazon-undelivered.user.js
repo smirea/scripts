@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.8.0
-// @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered today.
+// @version      1.9.0
+// @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered (today expanded, earlier days collapsed).
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
 // @match        https://www.amazon.com/gp/your-account/order-history*
@@ -19,7 +19,7 @@
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const CACHE_ROOT = 'amazon-undelivered:page:';
   // Bump when parsing changes so pages cached by an older parser are refetched.
-  const CACHE_PREFIX = `${CACHE_ROOT}v4:`;
+  const CACHE_PREFIX = `${CACHE_ROOT}v5:`;
   const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -160,17 +160,21 @@
   // Returns { start, end } or null when the status names no day ("Shipped", "Preparing for shipment").
   function arrivalRange(status, today) {
     const s = status.toLowerCase();
+    const delivered = /^delivered\b/.test(s);
     if (/\btoday\b|out for delivery/.test(s)) return { start: today, end: today };
+    if (/\byesterday\b/.test(s)) return { start: addDays(today, -1), end: addDays(today, -1) };
     if (/\btomorrow\b/.test(s)) return { start: addDays(today, 1), end: addDays(today, 1) };
     const dates = [...s.matchAll(MONTH_DAY)].map((m) => dateFromMonthDay(m[1], m[2], today));
     if (dates.length > 0) return { start: dates[0], end: dates.at(-1) };
     const weekday = WEEKDAYS.findIndex((d) => s.includes(d));
     if (weekday >= 0) {
-      const date = addDays(today, (weekday - today.getDay() + 7) % 7 || 7);
+      const ahead = (weekday - today.getDay() + 7) % 7 || 7;
+      // "Delivered Monday" is the past Monday; "Arriving Monday" the next one.
+      const date = addDays(today, delivered ? ahead - 7 : ahead);
       return { start: date, end: date };
     }
     // Same-day deliveries read "Delivered 1:05 PM" with no date.
-    if (/^delivered\b/.test(s) && CLOCK.test(s)) return { start: today, end: today };
+    if (delivered && CLOCK.test(s)) return { start: today, end: today };
     return null;
   }
 
@@ -182,10 +186,18 @@
   const toIsoRange = (range) => range && { start: toIso(range.start), end: toIso(range.end) };
   const fromIsoRange = (range) => range && { start: fromIso(range.start), end: fromIso(range.end) };
 
-  const isDeliveredToday = (shipment, today) => {
-    const arrival = isDelivered(shipment.status) && fromIsoRange(shipment.arrival);
-    return Boolean(arrival) && dayDiff(arrival.start, today) === 0;
-  };
+  // Returns [{ date, rows }] oldest first; deliveries with no readable date come before all dated ones.
+  function groupDelivered(shipments) {
+    const days = new Map();
+    for (const shipment of shipments) {
+      const key = shipment.arrival?.start ?? '';
+      if (!days.has(key)) days.set(key, []);
+      days.get(key).push(...shipment.items.map((item) => ({ item, shipment })));
+    }
+    return [...days.entries()]
+      .toSorted(([a], [b]) => a.localeCompare(b))
+      .map(([key, rows]) => ({ date: key ? fromIso(key) : null, rows }));
+  }
 
   // Today first, then upcoming days, then late and undated shipments at the bottom.
   function groupRank(range, today) {
@@ -339,12 +351,12 @@
       for (const s of page.shipments) seenOrders.add(orderKey(s));
 
       const pending = shipments.filter((s) => isPending(s.status));
-      const deliveredToday = shipments.filter((s) => isDeliveredToday(s, today));
+      const delivered = shipments.filter((s) => isDelivered(s.status));
       let stopReason = null;
       if (!page.shipments.some((s) => isPending(s.status))) stopReason = `page ${pageNumber} is all delivered`;
       else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
       else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
-      yield { pageNumber, pending, deliveredToday, stopReason, cached: Boolean(cached) };
+      yield { pageNumber, pending, delivered, stopReason, cached: Boolean(cached) };
       if (stopReason) return;
       url = page.nextUrl;
     }
@@ -360,7 +372,11 @@
     #aud-panel header button:hover { color: #0f1111; }
     #aud-panel .aud-body { padding: 0 12px 10px; }
     #aud-panel .aud-section { margin: 0 -12px; padding: 0 12px 4px; }
+    #aud-panel [hidden] { display: none !important; }
     #aud-panel .aud-delivered { background: #f5f6f6; }
+    #aud-panel .aud-earlier-toggle { display: block; width: calc(100% + 24px); margin: 0 -12px; padding: 6px 12px; border: 0;
+      background: #f5f6f6; color: #565959; font: inherit; font-size: 11px; text-align: right; cursor: pointer; }
+    #aud-panel .aud-earlier-toggle:hover { color: #0f1111; text-decoration: underline; }
     #aud-panel .aud-sep { display: flex; align-items: center; gap: 8px; margin: 0 -12px; padding: 6px 12px 0 0; color: #8a8f8f;
       font-size: 11px; line-height: 1; }
     #aud-panel .aud-sep::before { content: ''; flex: 1; border-top: 1px solid #d5d9d9; }
@@ -518,15 +534,43 @@
   const section = (name, className, children) =>
     h('div', { className: `aud-section ${className}` }, [h('div', { className: 'aud-sep', textContent: name }), ...children]);
 
-  function renderResults(container, deliveredToday, pending, today) {
+  function deliveredName(date, today) {
+    if (!date) return 'Delivered';
+    const diff = dayDiff(date, today);
+    if (diff === 0) return 'Delivered today';
+    if (diff === -1) return 'Delivered yesterday';
+    if (diff > -7) return `Delivered ${fmtDate(date, { weekday: 'long' })}`;
+    return `Delivered ${fmtDate(date, { month: 'short', day: 'numeric' })}`;
+  }
+
+  // Food (image-only items) and other items get separate grids within a delivered day.
+  function deliveredSection(name, rows) {
+    const grids = [rows.filter((row) => row.item.imageOnly), rows.filter((row) => !row.item.imageOnly)]
+      .filter((group) => group.length > 0)
+      .map(renderGrid);
+    return section(name, 'aud-delivered', grids.flatMap((grid, i) => (i === 0 ? [grid] : [h('hr'), grid])));
+  }
+
+  // Survives the re-render after every scanned page and the ↻ rescan.
+  let showEarlier = false;
+
+  function renderResults(container, delivered, pending, today) {
     const sections = [];
-    const delivered = deliveredToday.flatMap((shipment) => shipment.items.map((item) => ({ item, shipment })));
-    if (delivered.length > 0) {
-      const grids = [delivered.filter((row) => row.item.imageOnly), delivered.filter((row) => !row.item.imageOnly)]
-        .filter((rows) => rows.length > 0)
-        .map(renderGrid);
-      sections.push(section('Delivered today', 'aud-delivered', grids.flatMap((grid, i) => (i === 0 ? [grid] : [h('hr'), grid]))));
+    const days = groupDelivered(delivered);
+    const todayDays = days.filter(({ date }) => date && dayDiff(date, today) === 0);
+    const earlier = days.filter((day) => !todayDays.includes(day));
+    if (earlier.length > 0) {
+      const list = h('div', { hidden: !showEarlier }, earlier.map(({ date, rows }) => deliveredSection(deliveredName(date, today), rows)));
+      const label = () => `${earlier.length} before ${showEarlier ? '▴' : '▾'}`;
+      const toggle = h('button', { className: 'aud-earlier-toggle', textContent: label() });
+      toggle.onclick = () => {
+        showEarlier = !showEarlier;
+        list.hidden = !showEarlier;
+        toggle.textContent = label();
+      };
+      sections.push(toggle, list);
     }
+    for (const { date, rows } of todayDays) sections.push(deliveredSection(deliveredName(date, today), rows));
     // Items with no name on the page (grocery) render as images clustered at the top of their day.
     for (const { range, rows } of groupByDay(pending, today)) {
       const images = rows.filter((row) => row.item.imageOnly);
@@ -547,7 +591,7 @@
     body.append(results, note);
 
     const pending = [];
-    const deliveredToday = [];
+    const delivered = [];
     const today = startOfToday();
     let cachedPages = 0;
     try {
@@ -556,8 +600,8 @@
         const { pageNumber, stopReason } = page;
         if (page.cached) cachedPages += 1;
         pending.push(...page.pending);
-        deliveredToday.push(...page.deliveredToday);
-        renderResults(results, deliveredToday, pending, today);
+        delivered.push(...page.delivered);
+        renderResults(results, delivered, pending, today);
         const pages = `${pageNumber === 1 ? '1 page' : `${pageNumber} pages`}${cachedPages ? ` (${cachedPages} cached, ↻ to refresh)` : ''}`;
         note.textContent = stopReason ? `Scanned ${pages}; stopped because ${stopReason}.` : `Scanning page ${pageNumber + 1}…`;
       }
