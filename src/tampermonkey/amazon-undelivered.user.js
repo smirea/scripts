@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.10.1
+// @version      1.11.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered (today expanded, earlier days collapsed).
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -454,15 +454,23 @@
     return body;
   }
 
-  function relativeDay(date, today) {
-    const diff = dayDiff(date, today);
-    if (diff === 0) return 'today';
-    if (diff === 1) return 'tomorrow';
-    if (diff === -1) return 'yesterday';
-    if (diff > 1 && diff < 7) return fmtDate(date, { weekday: 'long' });
-    return fmtDate(date, { weekday: 'short', month: 'short', day: 'numeric' });
-  }
   const fmtDate = (date, opts) => date.toLocaleDateString('en-US', opts);
+  const monthDay = (date) => fmtDate(date, { month: 'short', day: 'numeric' });
+
+  function dayWord(date, today) {
+    const diff = dayDiff(date, today);
+    if (diff === 0) return 'Today';
+    if (diff === 1) return 'Tomorrow';
+    if (diff === -1) return 'Yesterday';
+    return fmtDate(date, { weekday: 'long' });
+  }
+
+  // "Tomorrow 11 AM – 2 PM, Nov 13", "Thursday, Nov 19", "Friday – Tuesday, Nov 13 – 17".
+  function dayLabel(range, today, time) {
+    if (dayDiff(range.end, range.start) === 0) return `${dayWord(range.start, today)}${time ? ` ${time}` : ''}, ${monthDay(range.start)}`;
+    const end = range.end.getMonth() === range.start.getMonth() ? String(range.end.getDate()) : monthDay(range.end);
+    return `${dayWord(range.start, today)} – ${dayWord(range.end, today)}, ${monthDay(range.start)} – ${end}`;
+  }
 
   // "Arriving tomorrow" -> "Tomorrow". Relative days are recomputed from the scraped date, since a cached
   // "tomorrow" may already be today.
@@ -529,11 +537,11 @@
 
   const itemImage = ({ item }) => (item.image ? h('img', { src: item.image, alt: item.title, loading: 'lazy' }) : h('div', { className: 'aud-noimg' }));
 
-  function renderRow(row) {
+  function renderRow(row, eta) {
     return itemLink(row, 'aud-row', [
       itemImage(row),
       h('div', { className: 'aud-text' }, [
-        ...[etaText(row.shipment, startOfToday())].filter(Boolean).map((eta) => h('div', { className: 'aud-eta', textContent: eta })),
+        ...[eta].filter(Boolean).map((eta) => h('div', { className: 'aud-eta', textContent: eta })),
         h('div', { className: 'aud-name', textContent: `${row.item.quantity > 1 ? `${row.item.quantity} × ` : ''}${shortTitle(row.item.title)}` }),
       ]),
     ]);
@@ -548,13 +556,10 @@
 
   const capitalize = (text) => text.charAt(0).toUpperCase() + text.slice(1);
 
-  function sectionName(range, today) {
+  function sectionName(range, today, time) {
     if (!range) return 'No date yet';
     if (dayDiff(range.start, today) < 0) return 'Late';
-    const start = relativeDay(range.start, today);
-    if (dayDiff(range.end, range.start) === 0) return capitalize(start);
-    const short = (date) => fmtDate(date, { month: 'short', day: 'numeric' });
-    return `${short(range.start)} – ${short(range.end)}`;
+    return dayLabel(range, today, time);
   }
 
   const section = (name, className, children) =>
@@ -564,9 +569,7 @@
     if (!date) return 'Delivered';
     const diff = dayDiff(date, today);
     if (diff === 0) return 'Delivered today';
-    if (diff === -1) return 'Delivered yesterday';
-    if (diff > -7) return `Delivered ${fmtDate(date, { weekday: 'long' })}`;
-    return `Delivered ${fmtDate(date, { month: 'short', day: 'numeric' })}`;
+    return `Delivered ${diff === -1 ? 'yesterday' : dayWord(date, today)}, ${monthDay(date)}`;
   }
 
   // Food (image-only items) and other items get separate grids within a delivered day.
@@ -598,10 +601,17 @@
     }
     for (const { date, rows } of todayDays) sections.push(deliveredSection(deliveredName(date, today), rows));
     // Items with no name on the page (grocery) render as images clustered at the top of their day.
+    // A time every row of a dated day shares moves into the label instead of repeating on each row.
     for (const { range, rows } of groupByDay(pending, today)) {
+      const etas = rows.map((row) => etaText(row.shipment, today));
+      const oneDay = range && dayDiff(range.start, today) >= 0 && dayDiff(range.end, range.start) === 0;
+      const sharedTime = oneDay && new Set(etas).size === 1 ? etas[0] : '';
       const images = rows.filter((row) => row.item.imageOnly);
       const named = rows.filter((row) => !row.item.imageOnly);
-      sections.push(section(sectionName(range, today), '', [...(images.length > 0 ? [renderGrid(images)] : []), ...named.map(renderRow)]));
+      sections.push(section(sectionName(range, today, sharedTime), '', [
+        ...(images.length > 0 ? [renderGrid(images)] : []),
+        ...named.map((row) => renderRow(row, sharedTime ? '' : etaText(row.shipment, today))),
+      ]));
     }
     container.replaceChildren(...sections);
   }
