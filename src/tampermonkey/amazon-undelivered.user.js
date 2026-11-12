@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.10.0
+// @version      1.10.1
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered (today expanded, earlier days collapsed).
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -17,10 +17,11 @@
 
   const MAX_PAGES = 10;
   const HISTORY_DAYS = 14;
+  const ORDERS_PER_PAGE = 10;
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const CACHE_ROOT = 'amazon-undelivered:page:';
   // Bump when parsing changes so pages cached by an older parser are refetched.
-  const CACHE_PREFIX = `${CACHE_ROOT}v5:`;
+  const CACHE_PREFIX = `${CACHE_ROOT}v6:`;
   const RELATIVE_DAY = /\b(today|tomorrow|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
   const MONTH_DAY = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})\b/g;
   const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
@@ -109,6 +110,7 @@
         .map(({ products, ...rest }) => ({ ...rest, items: [...products.values()].map(({ fallbackTitle, ...p }) => ({ ...p, title: p.title || fallbackTitle, imageOnly: !p.title })).filter((p) => p.title) }))
         .filter((s) => s.items.length > 0),
       nextUrl: findNextUrl(doc),
+      totalOrders: totalOrders(doc),
     };
   }
 
@@ -131,11 +133,20 @@
     return src.startsWith('data:') ? (img.getAttribute('data-src') ?? '') : src;
   }
 
+  // Carousels on the page have their own "Next page" links with href="#", so the pagination bar's link wins.
   function findNextUrl(doc) {
-    const next = [...doc.querySelectorAll('a')].find((a) => /^next\b/i.test(norm(a.textContent)));
-    const href = next?.getAttribute('href');
-    if (!href || href === '#' || next.closest('.a-disabled')) return null;
-    return new URL(href, location.origin).href;
+    const scope = doc.querySelector('.a-pagination') ? '.a-pagination a' : 'a';
+    const next = [...doc.querySelectorAll(scope)].find((a) => {
+      const href = a.getAttribute('href') ?? '';
+      return /^next\b/i.test(norm(a.textContent)) && href && !href.startsWith('#') && !a.closest('.a-disabled');
+    });
+    return next ? new URL(next.getAttribute('href'), location.origin).href : null;
+  }
+
+  // "105 orders placed in past 3 months"; null when the count isn't shown.
+  function totalOrders(doc) {
+    const count = doc.body.textContent.match(/\b(\d+)\s+orders?\s+placed\s+in\b/i)?.[1];
+    return count ? Number(count) : null;
   }
 
   const isDelivered = (status) => /^delivered\b/i.test(status);
@@ -333,7 +344,7 @@
     }
     const scrapedAt = Date.now();
     const shipments = page.shipments.map((s) => ({ ...s, pageNumber, scrapedAt, arrival: toIsoRange(arrivalRange(s.status, today)) }));
-    return { shipments, nextUrl: page.nextUrl };
+    return { shipments, nextUrl: page.nextUrl, totalOrders: page.totalOrders };
   }
 
   // Scans pages until one has nothing left to deliver and reaches orders placed over HISTORY_DAYS ago: anything older is
@@ -343,6 +354,7 @@
     let url = firstPageUrl().href;
     const seenOrders = new Set();
     let previousLast = null;
+    let total = null;
     for (let pageNumber = 1; pageNumber <= MAX_PAGES; pageNumber += 1) {
       const key = cacheKey(pageNumber);
       const entry = pageNumber > 1 && useCache ? readCache(key) : null;
@@ -352,6 +364,7 @@
       const page = cached?.page ?? (await scrapePage(pageNumber, url, today));
       if (pageNumber > 1 && !cached) writeCache(key, page, previousLast);
       previousLast = orderKey(page.shipments.at(-1));
+      if (pageNumber === 1) total = page.totalOrders;
 
       // Orders can also shift between Amazon's page loads, so a page may repeat orders an earlier page already listed.
       const shipments = page.shipments.filter((s) => !seenOrders.has(orderKey(s)));
@@ -362,7 +375,12 @@
       const settled = !page.shipments.some((s) => isPending(s.status)) && placedBefore(page.shipments.at(-1), addDays(today, -HISTORY_DAYS));
       let stopReason = null;
       if (settled) stopReason = `page ${pageNumber} is all delivered and goes back over ${HISTORY_DAYS / 7} weeks`;
-      else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
+      else if (!page.nextUrl) {
+        if (total && pageNumber < Math.ceil(total / ORDERS_PER_PAGE)) {
+          throw new Error(`Found no Next link on page ${pageNumber}, but Amazon lists ${total} orders (${Math.ceil(total / ORDERS_PER_PAGE)} pages), so older orders are missing. Amazon's pagination may have changed; update findNextUrl in src/tampermonkey/amazon-undelivered.user.js.`);
+        }
+        stopReason = `page ${pageNumber} is the last page`;
+      }
       else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
       yield { pageNumber, pending, delivered, stopReason, cached: Boolean(cached) };
       if (stopReason) return;
