@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon: undelivered items by day
 // @namespace    stefan.scripts
-// @version      1.9.0
+// @version      1.10.0
 // @description  On Your Orders, lists every item not delivered yet by arrival day, plus what was delivered (today expanded, earlier days collapsed).
 // @match        https://www.amazon.com/your-orders/orders*
 // @match        https://www.amazon.com/gp/css/order-history*
@@ -15,7 +15,8 @@
   'use strict';
   if (window.top !== window.self) return;
 
-  const MAX_PAGES = 5;
+  const MAX_PAGES = 10;
+  const HISTORY_DAYS = 14;
   const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
   const CACHE_ROOT = 'amazon-undelivered:page:';
   // Bump when parsing changes so pages cached by an older parser are refetched.
@@ -317,6 +318,11 @@
   const hasDueToday = (page, today) =>
     page.shipments.some((s) => isPending(s.status) && s.arrival && dayDiff(fromIso(s.arrival.start), today) <= 0);
 
+  // Pages list orders newest first. An unreadable date never counts as old, so the scan runs on rather than cut history short.
+  const placedBefore = (shipment, cutoff) => {
+    const placed = new Date(shipment.order.placed);
+    return !Number.isNaN(placed.getTime()) && placed < cutoff;
+  };
   const orderKey = (shipment) => shipment.order.number || shipment.order.detailsUrl || shipment.items.map((i) => i.title).join('|');
 
   // Arrival days are resolved when a page is scraped, so a cached "Arriving tomorrow" still lands on the right day later.
@@ -330,7 +336,8 @@
     return { shipments, nextUrl: page.nextUrl };
   }
 
-  // Scans pages until one has nothing left to deliver, since anything older than that page is delivered too.
+  // Scans pages until one has nothing left to deliver and reaches orders placed over HISTORY_DAYS ago: anything older is
+  // delivered too, and the delivered history covers at least that long.
   // Yields after every page so the panel can show results while later pages load. Page 1 is always live.
   async function* scanPending(today, useCache) {
     let url = firstPageUrl().href;
@@ -352,8 +359,9 @@
 
       const pending = shipments.filter((s) => isPending(s.status));
       const delivered = shipments.filter((s) => isDelivered(s.status));
+      const settled = !page.shipments.some((s) => isPending(s.status)) && placedBefore(page.shipments.at(-1), addDays(today, -HISTORY_DAYS));
       let stopReason = null;
-      if (!page.shipments.some((s) => isPending(s.status))) stopReason = `page ${pageNumber} is all delivered`;
+      if (settled) stopReason = `page ${pageNumber} is all delivered and goes back over ${HISTORY_DAYS / 7} weeks`;
       else if (!page.nextUrl) stopReason = `page ${pageNumber} is the last page`;
       else if (pageNumber === MAX_PAGES) stopReason = `hit the ${MAX_PAGES}-page limit`;
       yield { pageNumber, pending, delivered, stopReason, cached: Boolean(cached) };
