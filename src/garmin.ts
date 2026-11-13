@@ -402,7 +402,8 @@ function buildRows(personal: PersonalDaily, connect: ConnectDaily | null, range:
     const readinessByDate = new Map<string, TrainingReadiness>();
     for (const entry of connect.readiness.toSorted((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''))) {
       const current = readinessByDate.get(entry.calendarDate);
-      if (!current || current.inputContext !== 'AFTER_WAKEUP_RESET') readinessByDate.set(entry.calendarDate, entry);
+      // A wake reset can also fire at night (e.g. after an accidental activity), so the latest one wins.
+      if (!current || entry.inputContext === 'AFTER_WAKEUP_RESET' || current.inputContext !== 'AFTER_WAKEUP_RESET') readinessByDate.set(entry.calendarDate, entry);
     }
     for (const [date, entry] of readinessByDate) {
       merge(date, { readiness: entry.score ?? null, readiness_level: entry.level && entry.level !== 'NONE' ? entry.level.toLowerCase() : null, acute_load: entry.acuteLoad ?? null });
