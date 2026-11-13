@@ -122,10 +122,18 @@ interface UserSummary {
 }
 
 interface Activity {
+  activityId?: number | null;
   activityName?: string | null;
+  averageHR?: number | null;
+  maxHR?: number | null;
   startTimeLocal?: string | null;
   duration?: number | null;
   activityType?: { typeKey?: string | null } | null;
+}
+
+interface ConnectActivitySummary {
+  activityName?: string | null;
+  summaryDTO?: { startTimeLocal?: string | null; duration?: number | null } | null;
 }
 
 interface TrainingReadiness {
@@ -198,6 +206,18 @@ async function fetchActivities(api: PersonalApi, startDate: string, endDate: str
     activities.push(...page);
     if (page.length < ACTIVITY_PAGE_SIZE) return activities;
   }
+}
+
+function activityRecord(activity: Activity): Record<string, CsvValue> {
+  return {
+    id: activity.activityId ?? null,
+    start: activity.startTimeLocal ?? null,
+    name: activity.activityName ?? null,
+    type: activity.activityType?.typeKey ?? null,
+    duration: activity.duration == null ? null : formatDurationMilliseconds(activity.duration * 1000),
+    avg_hr: activity.averageHR ?? null,
+    max_hr: activity.maxHR ?? null,
+  };
 }
 
 async function fetchPersonalDaily(api: PersonalApi, range: Range) {
@@ -604,6 +624,47 @@ const cli = createScript('garmin')
         .example('$0 graphql \'query { epochChartScalar(date:"2026-11-08", include:["steps","stress","bodyBattery"]) }\'', 'Intraday charts as one payload'),
     async argv => {
       writeJson(await (await ConnectApi.connect()).graphql(argv.query));
+    },
+  )
+  .command(
+    'activities',
+    'List recorded activities with their ids (for delete-activity)',
+    cli =>
+      cli
+        .option('days', { alias: 'd', type: 'number', default: 7, describe: 'Days to include, ending at --end, when --start is not given' })
+        .option('start', { alias: ['since', 's'], type: 'string', describe: 'First day (YYYY-MM-DD)' })
+        .option('end', { alias: ['until', 'e'], type: 'string', describe: 'Last day (YYYY-MM-DD), default today' })
+        .option('format', { alias: 'f', type: 'string', choices: OUTPUT_FORMATS, default: 'table', describe: 'Output format' }),
+    async argv => {
+      const range = resolveRange(argv);
+      const activities = await fetchActivities(await PersonalApi.connect(), day(range.start), day(range.end));
+      const outputFormat = parseOutputFormat(argv.format);
+      if (outputFormat === 'json') return void writeJson(activities);
+      const records = activities.map(activityRecord);
+      if (outputFormat === 'table' && records.length === 0) return void console.log('No activities in this range.');
+      if (outputFormat === 'table') renderTableRecords(records);
+      else process.stdout.write(renderCsvRecords(records, Object.keys(activityRecord({}))));
+    },
+  )
+  .command(
+    'delete-activity <ids..>',
+    'Permanently delete activities from Garmin Connect (e.g. ones started by an accidental tap). Find ids with `garmin activities`',
+    cli =>
+      cli
+        .positional('ids', { type: 'number', array: true, demandOption: true, describe: 'Activity ids from `garmin activities`' })
+        .option('dry-run', { type: 'boolean', default: false, describe: 'Look up and print the activities without deleting them' }),
+    async argv => {
+      const api = await ConnectApi.connect();
+      for (const id of argv.ids) {
+        const activity = await api.get<ConnectActivitySummary>(`/activity-service/activity/${id}`);
+        const label = `${id} ${activity.activityName ?? ''} (${activity.summaryDTO?.startTimeLocal ?? '?'}, ${formatDurationMilliseconds((activity.summaryDTO?.duration ?? 0) * 1000)})`;
+        if (argv['dry-run']) {
+          console.log(`Would delete ${label}`);
+          continue;
+        }
+        await api.delete(`/activity-service/activity/${id}`);
+        console.log(`Deleted ${label}`);
+      }
     },
   )
   .command(

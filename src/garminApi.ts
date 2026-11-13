@@ -103,6 +103,12 @@ export class ConnectApi {
     return readJson<T>(res, `GET ${url.pathname}${url.search} (Garmin Connect)`, connectHint);
   }
 
+  async delete(pathname: string): Promise<void> {
+    const url = buildUrl(CONNECT_BASE_URL, pathname, {});
+    const res = await fetch(url, { method: 'DELETE', headers: { Accept: 'application/json', Authorization: `Bearer ${this.token}` } });
+    await readJson(res, `DELETE ${url.pathname} (Garmin Connect)`, connectHint);
+  }
+
   /** The web app's GraphQL gateway; the only route to Health Status. Queries are anonymous with inlined literals. */
   async graphql<T>(query: string): Promise<T> {
     const res = await fetch(`${CONNECT_BASE_URL}/graphql-gateway/graphql`, {
