@@ -289,8 +289,11 @@ async function notifyIfChanged(issues: Issue[]): Promise<void> {
 
 async function install(peer: string | undefined, dryRun: boolean): Promise<void> {
   requireT3();
-  const pathEnv = [path.dirname(process.execPath), path.join(home!, 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
-  const args = [process.execPath, '--no-env-file', import.meta.path, 'run', ...(peer ? ['--peer', peer] : [])];
+  // process.execPath can be bun's internal bun.exe, which leaves `bun` off PATH for wrappers like ~/bin/procrastimate.
+  const bun = Bun.which('bun');
+  if (!bun) throw new Error('`bun` is not on PATH; install it (curl -fsSL https://bun.sh/install | bash) and rerun install.');
+  const pathEnv = [path.dirname(bun), path.join(home!, 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
+  const args = [bun, '--no-env-file', import.meta.path, 'run', ...(peer ? ['--peer', peer] : [])];
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
