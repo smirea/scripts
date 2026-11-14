@@ -67,14 +67,20 @@ function drivenRecently(udid: string): boolean {
 
 export const simulatorName = (worktree: string, n?: number) => `${basename(worktree).replaceAll(/[^\w.-]/g, '-')}${n ? `-${n}` : ''}`;
 
+function pairedWatches(phone: Device): string[] {
+  const { pairs } = JSON.parse(simctl('list', 'pairs', '--json')) as { pairs: Record<string, { watch: { udid: string }; phone: { udid: string } }> };
+  return Object.values(pairs).filter(pair => pair.phone.udid === phone.udid).map(pair => pair.watch.udid);
+}
+
+/** Shuts down the simulator and the watches paired with it: ownership and idle tracking only cover phones, so a watch left booted is never collected. */
 export function shutdown(device: Device) {
-  if (device.state !== 'Shutdown') spawnSync('xcrun', ['simctl', 'shutdown', device.udid]);
+  const watches = isPhone(device) ? pairedWatches(device) : [];
+  for (const udid of [device.udid, ...watches]) spawnSync('xcrun', ['simctl', 'shutdown', udid]);
 }
 
 /** Deletes the simulator and every watch paired with it, which `simctl delete` of the phone leaves behind. */
 export function remove(device: Device) {
-  const { pairs } = JSON.parse(simctl('list', 'pairs', '--json')) as { pairs: Record<string, { watch: { udid: string }; phone: { udid: string } }> };
-  const watches = Object.values(pairs).filter(pair => pair.phone.udid === device.udid).map(pair => pair.watch.udid);
+  const watches = pairedWatches(device);
   shutdown(device);
   for (const udid of [device.udid, ...watches]) run(['xcrun', 'simctl', 'delete', udid], { allowFail: true });
 }
