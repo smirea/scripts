@@ -144,12 +144,10 @@ async function runSync(options: { peer?: string; exclude: string[]; notify: bool
 }
 
 async function inventory(): Promise<Inventory> {
-  const t3 = readT3Projects();
-  const inCode = readdirSync(ROOT, { withFileTypes: true })
+  // Only ~/code: launchd jobs can't read TCC-protected folders like ~/Documents, and git calls there hang on the privacy prompt.
+  const roots = readdirSync(ROOT, { withFileTypes: true })
     .filter(entry => entry.isDirectory() && existsSync(path.join(ROOT, entry.name, '.git')))
     .map(entry => path.join(ROOT, entry.name));
-  const outsideCode = [...t3.active].filter(root => existsSync(path.join(root, '.git')));
-  const roots = [...new Set([...inCode, ...outsideCode])].sort();
 
   const repos: Repo[] = [];
   const remoteless: Inventory['remoteless'] = [];
