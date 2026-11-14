@@ -42,7 +42,7 @@ export function parseRemote(url: string): { key: RepoKey; cloneUrl: string } | u
 
 if (import.meta.main) {
   void createScript('repo-sync')
-    .usage('$0 <command>\n\nKeeps every git repo in ~/code cloned, registered as a T3 Code project, and fast-forwarded on this machine and its peer.')
+    .usage('$0 <command>\n\nKeeps every git repo in ~/code that has a remote cloned, registered as a T3 Code project, and fast-forwarded on this machine and its peer.')
     .parserConfiguration({ 'strip-aliased': true, 'strip-dashed': true })
     .command(
       'run',
@@ -127,7 +127,7 @@ async function runSync(options: { peer?: string; exclude: string[]; notify: bool
     }
   }
 
-  const registered = await registerAll([...local.repos, ...local.remoteless], options.dryRun);
+  const registered = await registerAll(local.repos, options.dryRun);
   for (const name of registered.registered) log(`${prefix}registered in T3: ${name}`);
   issues.push(...registered.issues);
 
@@ -138,7 +138,7 @@ async function runSync(options: { peer?: string; exclude: string[]; notify: bool
   }
 
   for (const issue of issues) log(`ISSUE ${issue.repo}: ${issue.kind}${issue.detail ? `\n${indent(issue.detail)}` : ''}`);
-  log(`done: ${local.repos.length} repos, ${local.remoteless.length} without a remote (${local.remoteless.map(repo => repo.name).join(', ') || 'none'}), ${issues.length} issues`);
+  log(`done: ${local.repos.length} repos, ${local.remoteless.length} skipped for having no remote (${local.remoteless.map(repo => repo.name).join(', ') || 'none'}), ${issues.length} issues`);
   if (options.notify && !options.dryRun) await notifyIfChanged(issues);
   if (issues.length) process.exitCode = 1;
 }
