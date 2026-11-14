@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
@@ -11,14 +11,10 @@ if (!home) throw new Error('HOME is not set.');
 const ROOT = path.join(home, 'code');
 const T3_BIN = path.join(home, '.t3', 'bin', 't3');
 const T3_DB = path.join(home, '.t3', 'userdata', 'statev2.sqlite');
-const PROCRASTIMATE_BIN = path.join(home, 'bin', 'procrastimate');
-const STATE_FILE = path.join(home, 'Library', 'Application Support', 'repo-sync', 'issues.json');
 const LOG_FILE = path.join(home, 'Library', 'Logs', 'repo-sync.log');
 const LAUNCHD_LABEL = 'com.stefan.repo-sync';
 const PLIST = path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
 const INTERVAL_SECONDS = 300;
-const NOTIFY_PROJECT = 'todo';
-const NOTIFY_TITLE = 'Repo sync needs attention';
 const PARALLELISM = 8;
 const MACHINE = Bun.spawnSync(['scutil', '--get', 'ComputerName']).stdout.toString().trim() || hostname();
 
@@ -50,9 +46,8 @@ if (import.meta.main) {
       command => command
         .option('peer', { type: 'string', describe: 'SSH host of the other machine (for example mini-ts). Omit to sync this machine only.' })
         .option('exclude', { type: 'array', string: true, default: [] as string[], describe: 'Repo folder names or keys (github.com/owner/name) never cloned to either machine.' })
-        .option('notify', { type: 'boolean', default: true, describe: 'File new issues on the ProcrastiMate task "Repo sync needs attention".' })
         .option('dry-run', { type: 'boolean', default: false, describe: 'Read both machines and print the clones, registrations, and pulls without making them.' }),
-      argv => runSync({ peer: argv.peer, exclude: argv.exclude as string[], notify: argv.notify, dryRun: argv.dryRun }),
+      argv => runSync({ peer: argv.peer, exclude: argv.exclude as string[], dryRun: argv.dryRun }),
     )
     .command(
       'inventory',
@@ -85,11 +80,8 @@ if (import.meta.main) {
     .parseAsync();
 }
 
-async function runSync(options: { peer?: string; exclude: string[]; notify: boolean; dryRun: boolean }): Promise<void> {
+async function runSync(options: { peer?: string; exclude: string[]; dryRun: boolean }): Promise<void> {
   requireT3();
-  if (options.notify && !options.dryRun && !existsSync(PROCRASTIMATE_BIN)) {
-    throw new Error(`${PROCRASTIMATE_BIN} is missing; run \`bun ~/code/scripts/src/setup.ts\` or pass --no-notify.`);
-  }
   const prefix = options.dryRun ? '[dry-run] ' : '';
   const issues: Issue[] = [];
   const excluded = (repo: Repo) => options.exclude.includes(repo.name) || options.exclude.includes(repo.key);
@@ -139,7 +131,6 @@ async function runSync(options: { peer?: string; exclude: string[]; notify: bool
 
   for (const issue of issues) log(`ISSUE ${issue.repo}: ${issue.kind}${issue.detail ? `\n${indent(issue.detail)}` : ''}`);
   log(`done: ${local.repos.length} repos, ${local.remoteless.length} skipped for having no remote (${local.remoteless.map(repo => repo.name).join(', ') || 'none'}), ${issues.length} issues`);
-  if (options.notify && !options.dryRun) await notifyIfChanged(issues);
   if (issues.length) process.exitCode = 1;
 }
 
@@ -267,29 +258,9 @@ async function callPeer(peer: string, args: string[], input?: string): Promise<P
   return { code: result.code, output: result.code === 0 ? result.stdout : result.output };
 }
 
-async function notifyIfChanged(issues: Issue[]): Promise<void> {
-  const fingerprint = issues.map(issue => `${issue.repo}: ${issue.kind}`).sort();
-  const previous = existsSync(STATE_FILE) ? (JSON.parse(readFileSync(STATE_FILE, 'utf8')) as string[]) : [];
-  mkdirSync(path.dirname(STATE_FILE), { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify(fingerprint));
-  if (!issues.length || JSON.stringify(previous) === JSON.stringify(fingerprint)) return;
-
-  const body = [
-    `repo-sync on ${MACHINE} found ${issues.length} issue${issues.length === 1 ? '' : 's'}. Log: ${LOG_FILE}`,
-    '',
-    ...issues.map(issue => `== ${issue.repo}: ${issue.kind} ==${issue.detail ? `\n${issue.detail}` : ''}`),
-  ].join('\n').slice(0, 3900);
-  const filed = await exec([PROCRASTIMATE_BIN, 'file', NOTIFY_PROJECT, NOTIFY_TITLE]);
-  const taskId = filed.stdout.split(/\s+/)[0];
-  if (filed.code !== 0 || !taskId) throw new Error(`ProcrastiMate task could not be filed:\n${filed.output}`);
-  const commented = await exec([PROCRASTIMATE_BIN, 'POST', '/comments', JSON.stringify({ taskId, body })]);
-  if (commented.code !== 0) throw new Error(`ProcrastiMate comment on ${taskId} failed:\n${commented.output}`);
-  log(`reported ${issues.length} issue(s) on ProcrastiMate task ${taskId}`);
-}
-
 async function install(peer: string | undefined, dryRun: boolean): Promise<void> {
   requireT3();
-  // process.execPath can be bun's internal bun.exe, which leaves `bun` off PATH for wrappers like ~/bin/procrastimate.
+  // process.execPath can be bun's internal bun.exe, which leaves `bun` off PATH for the ~/bin wrappers the job runs.
   const bun = Bun.which('bun');
   if (!bun) throw new Error('`bun` is not on PATH; install it (curl -fsSL https://bun.sh/install | bash) and rerun install.');
   const pathEnv = [path.dirname(bun), path.join(home!, 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':');
