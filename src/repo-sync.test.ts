@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 
-import { parseRemote } from './repo-sync';
+import { parseRemote, pruneLogText } from './repo-sync';
 
 test('ssh, https, and ssh-alias remotes of one GitHub repo share a key and clone over ssh', () => {
   const remotes = [
@@ -22,4 +22,17 @@ test('non-GitHub remotes keep their URL and local-path remotes are not syncable'
   expect(gitlab?.key as string | undefined).toBe('gitlab.com/group/sub/repo');
   expect(gitlab?.cloneUrl).toBe('https://gitlab.com/group/sub/repo.git');
   expect(parseRemote('/Users/stefan/code/a-better-me')).toBeUndefined();
+});
+
+test('log pruning drops entries older than the cutoff along with their detail lines', () => {
+  const log = [
+    '2026-10-01T00:00:00.000Z ISSUE old: fetch failed',
+    '    fatal: old detail',
+    '2026-10-20T00:00:00.000Z ISSUE recent: fetch failed',
+    '    fatal: recent detail',
+    '2026-11-14T00:00:00.000Z done: 49 repos',
+    '',
+  ].join('\n');
+  expect(pruneLogText(log, new Date('2026-10-15T00:00:00Z'))).toBe(log.split('\n').slice(2).join('\n'));
+  expect(pruneLogText(log, new Date('2026-12-01T00:00:00Z'))).toBe('');
 });

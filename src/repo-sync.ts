@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import { Database } from 'bun:sqlite';
-import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { hostname } from 'node:os';
 import path from 'node:path';
 
@@ -16,6 +16,7 @@ const LAUNCHD_LABEL = 'com.stefan.repo-sync';
 const PLIST = path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
 const INTERVAL_SECONDS = 300;
 const PARALLELISM = 8;
+const LOG_RETENTION_DAYS = 30;
 const MACHINE = Bun.spawnSync(['scutil', '--get', 'ComputerName']).stdout.toString().trim() || hostname();
 
 export type RepoKey = string & { readonly __brand: 'RepoKey' };
@@ -336,8 +337,32 @@ function uniqueByKey(repos: Repo[]): Repo[] {
   return [...new Map(repos.map(repo => [repo.key, repo])).values()];
 }
 
+let logPruned = false;
+
 function log(message: string): void {
+  if (!logPruned) {
+    logPruned = true;
+    pruneLog();
+  }
   process.stderr.write(`${new Date().toISOString()} ${message}\n`);
+}
+
+// Rewrites in place: launchd appends through an O_APPEND descriptor the job inherits, which a rename would orphan.
+function pruneLog(): void {
+  if (!existsSync(LOG_FILE)) return;
+  const text = readFileSync(LOG_FILE, 'utf8');
+  const pruned = pruneLogText(text, new Date(Date.now() - LOG_RETENTION_DAYS * 86_400_000));
+  if (pruned.length !== text.length) writeFileSync(LOG_FILE, pruned);
+}
+
+/** Drops everything before the first entry newer than `cutoff`; untimestamped lines (issue details, stack traces) belong to the entry above them. */
+export function pruneLogText(text: string, cutoff: Date): string {
+  const lines = text.split('\n');
+  const first = lines.findIndex(line => {
+    const time = Date.parse(line.slice(0, 24));
+    return !Number.isNaN(time) && time >= cutoff.getTime();
+  });
+  return first === -1 ? '' : lines.slice(first).join('\n');
 }
 
 function indent(text: string): string {
