@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 
-import { parseLocaliasList, planAliasChanges, planRoutes } from './localias-peer';
+import { parseLocaliasList, parsePeerState, planAliasChanges, planRoutes } from './localias-peer';
 
 const options = { name: 'mini', portOffset: 5_000 };
 
@@ -17,7 +17,7 @@ describe('planRoutes', () => {
   test('names peer ports after this machine\'s projects and forwards them at port + offset', () => {
     const { routes } = planRoutes(
       [{ host: 'new-you-times.localhost', port: 6060 }],
-      [{ host: 'mini-new-you-times.local', port: 6060 }, { host: 'only-on-mini.test', port: 7000 }],
+      { aliases: [{ host: 'mini-new-you-times.local', port: 6060 }, { host: 'only-on-mini.test', port: 7000 }], listening: [] },
       options,
     );
     expect(routes).toEqual([
@@ -27,14 +27,36 @@ describe('planRoutes', () => {
   });
 
   test('ignores its own aliases so routes do not feed back into themselves', () => {
-    const { routes } = planRoutes([{ host: 'vitals.mini.localhost', port: 11000 }], [], options);
+    const { routes } = planRoutes([{ host: 'vitals.mini.localhost', port: 11000 }], { aliases: [], listening: [] }, options);
     expect(routes).toEqual([]);
   });
 
   test('skips peer ports that would overflow the port range', () => {
-    const { routes, skipped } = planRoutes([{ host: 'high.localhost', port: 61_000 }], [], options);
+    const { routes, skipped } = planRoutes([{ host: 'high.localhost', port: 61_000 }], { aliases: [], listening: [] }, options);
     expect(routes).toEqual([]);
     expect(skipped).toHaveLength(1);
+  });
+});
+
+describe('port routes', () => {
+  test('peer dev servers get a <port> route, system services and ephemeral ports do not', () => {
+    const output = [
+      'mini-new-you-times.local -> 6060',
+      '--- listeners',
+      'p100', 'n127.0.0.1:6230', 'n[::1]:6231',
+      'p200', 'n*:7000',
+      'p300', 'n127.0.0.1:60785',
+      '--- processes',
+      '  100 bun', '  200 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter', '  300 node',
+    ].join('\n');
+    expect(parsePeerState(output)).toEqual({ aliases: [{ host: 'mini-new-you-times.local', port: 6060 }], listening: [6230, 6231] });
+  });
+
+  test('a running project gets both its name and its port; a port route stays after its server stops', () => {
+    const running = planRoutes([{ host: 'pandemic.localhost', port: 6190 }], { aliases: [], listening: [6190, 6230] }, options).routes.map(route => route.host);
+    expect(running).toEqual(['6190.mini.localhost', 'pandemic.mini.localhost', '6230.mini.localhost']);
+    const stopped = planRoutes([{ host: '6230.mini.localhost', port: 11230 }], { aliases: [], listening: [] }, options).routes;
+    expect(stopped).toEqual([{ host: '6230.mini.localhost', peerPort: 6230, localPort: 11230 }]);
   });
 });
 

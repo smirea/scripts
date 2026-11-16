@@ -10,12 +10,23 @@ if (!home) throw new Error('HOME is not set.');
 const LOG_FILE = path.join(home, 'Library', 'Logs', 'localias-peer.log');
 const LAUNCHD_LABEL = 'com.stefan.localias-peer';
 const PLIST = path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
-const RESYNC_MS = 60_000;
+const RESYNC_MS = 15_000;
 const MAX_BACKOFF_MS = 60_000;
 const SSH_OPTIONS = ['-o', 'RemoteCommand=none', '-o', 'RequestTTY=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'];
+// With the default +5000 offset these land in 7000-15999, clear of project ports and agent-t3-worktree blocks; higher ports are mostly ephemeral.
+const DEV_PORTS = { min: 2_000, max: 10_999 };
+const PEER_STATE_COMMAND = [
+  'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH',
+  'localias list 2>/dev/null',
+  'echo "--- listeners"',
+  '/usr/sbin/lsof -nP -iTCP -sTCP:LISTEN -Fpn 2>/dev/null',
+  'echo "--- processes"',
+  'ps -axo pid=,comm=',
+].join('; ');
 
 export interface Alias { host: string; port: number }
 export interface Route { host: string; peerPort: number; localPort: number }
+export interface PeerState { aliases: Alias[]; listening: number[] }
 interface Options { peer: string; name: string; portOffset: number }
 
 export function parseLocaliasList(output: string): Alias[] {
@@ -25,16 +36,42 @@ export function parseLocaliasList(output: string): Alias[] {
   });
 }
 
-/** One route per peer port. Local names win over the peer's because they follow this machine's `<project>.localhost` convention. */
-export function planRoutes(local: Alias[], peer: Alias[], options: Pick<Options, 'name' | 'portOffset'>): { routes: Route[]; skipped: string[] } {
+/** Peer dev servers listening on a port, from `lsof -Fpn` and `ps -axo pid=,comm=` output; macOS system services are left out. */
+export function parsePeerState(output: string): PeerState {
+  const [aliasText = '', rest = ''] = output.split('--- listeners\n');
+  const [lsofText = '', psText = ''] = rest.split('--- processes\n');
+  const commands = new Map(psText.split('\n').flatMap(line => {
+    const match = line.trim().match(/^(\d+)\s+(.+)$/);
+    return match ? [[match[1]!, match[2]!] as const] : [];
+  }));
+  const listening = new Set<number>();
+  let pid = '';
+  for (const line of lsofText.split('\n')) {
+    if (line.startsWith('p')) pid = line.slice(1);
+    const port = line.startsWith('n') ? Number(line.slice(line.lastIndexOf(':') + 1)) : NaN;
+    const command = commands.get(pid) ?? '';
+    if (port >= DEV_PORTS.min && port <= DEV_PORTS.max && !/^\/(System|usr)\//.test(command)) listening.add(port);
+  }
+  return { aliases: parseLocaliasList(aliasText), listening: [...listening].sort((a, b) => a - b) };
+}
+
+/**
+ * A `<project>` route per localias port (local names win: they follow this machine's `<project>.localhost` convention) and a
+ * `<port>` route per peer dev server. Port routes outlive their server because each new alias costs a `localias reload`,
+ * which restarts the daemon and drops every open connection through it, local projects' HMR sockets included.
+ */
+export function planRoutes(local: Alias[], peer: PeerState, options: Pick<Options, 'name' | 'portOffset'>): { routes: Route[]; skipped: string[] } {
   const suffix = `.${options.name}.localhost`;
   const names = new Map<number, string>();
-  for (const alias of [...peer, ...local.filter(alias => !alias.host.endsWith(suffix))]) {
+  for (const alias of [...peer.aliases, ...local.filter(alias => !alias.host.endsWith(suffix))]) {
     names.set(alias.port, alias.host.includes('.') ? alias.host.slice(0, alias.host.lastIndexOf('.')) : alias.host);
   }
+  const seenPorts = local.filter(alias => alias.host.endsWith(suffix)).map(alias => alias.host.slice(0, -suffix.length)).filter(label => /^\d+$/.test(label)).map(Number);
+  const named = [...names].map(([port, name]) => ({ name, port }));
+  const numbered = [...new Set([...peer.listening, ...seenPorts])].map(port => ({ name: String(port), port }));
   const routes: Route[] = [];
   const skipped: string[] = [];
-  for (const [peerPort, name] of [...names].sort(([a], [b]) => a - b)) {
+  for (const { name, port: peerPort } of [...named, ...numbered].sort((a, b) => a.port - b.port || a.name.localeCompare(b.name))) {
     const localPort = peerPort + options.portOffset;
     if (localPort > 65_535) skipped.push(`${name}${suffix}: port ${peerPort} + offset ${options.portOffset} exceeds 65535`);
     else routes.push({ host: `${name}${suffix}`, peerPort, localPort });
@@ -64,11 +101,11 @@ if (import.meta.main) {
     });
 
   void createScript('localias-peer')
-    .usage('$0 <command>\n\nServes another machine\'s dev servers on this one as https://<project>.<name>.localhost, through this machine\'s localias and one SSH tunnel. Routes come from both machines\' `localias list`, so a project at <project>.localhost -> 6060 here is also https://<project>.mini.localhost, served by port 6060 on the peer.')
+    .usage(`$0 <command>\n\nServes another machine's dev servers on this one as https://<project>.<name>.localhost, through this machine's localias and one SSH tunnel. Routes come from both machines' \`localias list\`, so a project at <project>.localhost -> 6060 here is also https://<project>.mini.localhost, served by port 6060 on the peer. Every dev server listening on the peer (ports ${DEV_PORTS.min}-${DEV_PORTS.max}) is also https://<port>.<name>.localhost.`)
     .parserConfiguration({ 'strip-aliased': true, 'strip-dashed': true })
     .command(
       'run',
-      'Keep the aliases and the tunnel in sync until stopped. Resyncs every minute and reconnects when the tunnel drops.',
+      'Keep the aliases and the tunnel in sync until stopped. Resyncs every 15 seconds and reconnects when the tunnel drops.',
       command => peerOptions(command).option('dry-run', { type: 'boolean', default: false, describe: 'Print the routes and the localias changes once, without making them.' }),
       argv => run({ peer: argv.peer, name: argv.name, portOffset: argv.portOffset }, argv.dryRun),
     )
@@ -94,7 +131,7 @@ if (import.meta.main) {
 
 async function run(options: Options, dryRun: boolean): Promise<void> {
   requireLocalias();
-  let peerAliases: Alias[] = [];
+  let peerState: PeerState = { aliases: [], listening: [] };
   let peerReachable: boolean | undefined;
   let tunnel: Subprocess | undefined;
   let tunnelKey = '';
@@ -109,15 +146,15 @@ async function run(options: Options, dryRun: boolean): Promise<void> {
   process.on('SIGINT', stop);
 
   for (;;) {
-    const peer = await readPeerAliases(options.peer);
-    if (peer) peerAliases = peer;
+    const peer = await readPeerState(options.peer);
+    if (peer) peerState = peer;
     if ((peer !== undefined) !== peerReachable) {
       peerReachable = peer !== undefined;
-      log(peerReachable ? `${options.peer}: read ${peer!.length} localias routes` : `${options.peer}: unreachable; keeping the last known peer routes`);
+      log(peerReachable ? `${options.peer}: ${peer!.aliases.length} localias routes, dev servers on ${peer!.listening.join(', ') || 'no ports'}` : `${options.peer}: unreachable; keeping the last known peer routes`);
     }
 
     const local = parseLocaliasList((await exec(['localias', 'list'])).stdout);
-    const { routes, skipped } = planRoutes(local, peerAliases, options);
+    const { routes, skipped } = planRoutes(local, peerState, options);
     const changes = planAliasChanges(local, routes, options.name);
 
     if (dryRun) {
@@ -135,14 +172,15 @@ async function run(options: Options, dryRun: boolean): Promise<void> {
       log(`localias: removed ${changes.remove.length}, set ${changes.set.length}; ${routes.length} routes, ${skipped.length} skipped${skipped.length ? `\n${skipped.join('\n')}` : ''}`);
     }
 
-    const key = routes.map(route => `${route.localPort}:${route.peerPort}`).join(',');
+    const forwards = [...new Map(routes.map(route => [route.localPort, route.peerPort]))];
+    const key = forwards.join(',');
     if (tunnel && tunnel.exitCode === null && key !== tunnelKey) {
       tunnel.kill();
       await tunnel.exited;
       tunnel = undefined;
     }
     if (!tunnel || tunnel.exitCode !== null) {
-      tunnel = Bun.spawn(['ssh', '-N', ...SSH_OPTIONS, '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', ...routes.flatMap(route => ['-L', `${route.localPort}:localhost:${route.peerPort}`]), options.peer], {
+      tunnel = Bun.spawn(['ssh', '-N', ...SSH_OPTIONS, '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3', ...forwards.flatMap(([localPort, peerPort]) => ['-L', `${localPort}:localhost:${peerPort}`]), options.peer], {
         stdin: 'ignore',
         stdout: 'inherit',
         stderr: 'inherit',
@@ -161,14 +199,10 @@ async function run(options: Options, dryRun: boolean): Promise<void> {
   }
 }
 
-async function readPeerAliases(peer: string): Promise<Alias[] | undefined> {
-  const result = await exec(['ssh', ...SSH_OPTIONS, peer, 'PATH=/opt/homebrew/bin:/usr/local/bin:$PATH localias list'], 30_000);
-  if (result.code === 255) return undefined;
-  if (result.code !== 0) {
-    log(`${peer}: \`localias list\` failed (${result.output}); install localias there or ignore if it has no routes`);
-    return [];
-  }
-  return parseLocaliasList(result.stdout);
+async function readPeerState(peer: string): Promise<PeerState | undefined> {
+  const result = await exec(['ssh', ...SSH_OPTIONS, peer, PEER_STATE_COMMAND], 30_000);
+  if (result.code !== 0) return undefined;
+  return parsePeerState(result.stdout);
 }
 
 async function install(options: Options, dryRun: boolean): Promise<void> {
