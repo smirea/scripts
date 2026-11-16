@@ -32,6 +32,7 @@ export const SCRIPT_COMMANDS = [
   { name: 'iphone-deploy', source: 'src/iphone-deploy.ts' },
   { name: 'x', source: 'src/x.ts' },
   { name: 'repo-sync', source: 'src/repo-sync.ts' },
+  { name: 'localias-peer', source: 'src/localias-peer.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
