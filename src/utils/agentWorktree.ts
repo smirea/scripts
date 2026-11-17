@@ -174,8 +174,7 @@ export async function setup(cwd: string, { resetData = false, branchTimeoutMs = 
   const env = join(root, '.env');
   if (existsSync(env) && /^#\s*env-manager:/m.test(readFileSync(env, 'utf8'))) {
     // Offline from the schema defaults: a worktree never pulls cloud values, so it needs no AWS access.
-    const pinned = join(root, 'node_modules/.bin/env-manager');
-    const gen = () => step([existsSync(pinned) ? pinned : 'env-manager', 'gen', '--local'], root);
+    const gen = () => step(['env-manager', 'gen', '--local'], root);
     // Target outputs read .env.override during gen; a single-project .env.local exists only after it, and gen reruns
     // so readers see the worktree's ports.
     if (portFile(root) === OVERRIDE) {
