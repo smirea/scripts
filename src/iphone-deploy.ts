@@ -20,7 +20,7 @@ const LABEL_WIDTH = 9;
 const PROBE_ATTEMPTS = 3;
 const PROBE_RETRY_MS = 3_000;
 
-export interface Device {
+interface Device {
   identifier: string;
   name: string;
   udid?: string;
@@ -430,7 +430,7 @@ function pushApp(plan: AppPlan, device: Device) {
 // devicectl installs only the iPhone app. A development-signed watch app then installs from the
 // iPhone's Watch app, and only on a watch its provisioning profile lists, which automatic signing
 // adds once Xcode has paired with that watch. Without one the watch app silently never appears.
-export function watchAppNote(appPath: string, devices: Device[]): string | null {
+function watchAppNote(appPath: string, devices: Device[]): string | null {
   const watchDir = path.join(appPath, 'Watch');
   const watchApp = existsSync(watchDir) && statSync(watchDir).isDirectory() ? readdirSync(watchDir).find((entry) => entry.endsWith('.app')) : undefined;
   if (!watchApp) return null;

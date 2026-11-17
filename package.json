@@ -3,7 +3,8 @@
     "private": true,
     "scripts": {
         "lint": "oxlint --fix",
-        "test": "bun test"
+        "test": "bun test",
+        "worktree:setup": "bun install --cwd cloudflare-workers/email-save --frozen-lockfile"
     },
     "dependencies": {
         "@clack/core": "^1.4.3",
@@ -16,11 +17,10 @@
         "date-fns": "^4.4.0",
         "html-to-text": "^10.0.1",
         "kill-port-process": "^4.0.2",
-        "lefthook": "^2.1.10",
+        "lefthook": "^2.2.2",
         "lodash": "^4.18.1",
-        "oxlint": "^1.74.0",
+        "oxlint": "^1.94.0",
         "protobufjs": "^8.7.1",
-        "typescript": "^7.0.2",
         "xlsx": "^0.18.5",
         "yargs": "^18.0.0",
         "zod": "^4.4.3"

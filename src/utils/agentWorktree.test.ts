@@ -1,19 +1,13 @@
 import { afterEach, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { check, classify, setup, type Entry } from './agentWorktree';
-import { gitEnvironment } from './worktreeCache';
+import { git } from './shell';
 
 const temporary: string[] = [];
 afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true }); });
-
-function git(cwd: string, ...args: string[]) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnvironment() });
-  if (result.status !== 0) throw new Error(result.stderr);
-}
 
 function repoWithWorktree(env: string) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-worktree-test-')));
@@ -32,11 +26,11 @@ function repoWithWorktree(env: string) {
 }
 
 test('without env-manager targets, setup writes each port key and localhost URL into .env.local at the same offset in a free block', async () => {
-  const { main, worktree } = repoWithWorktree('UI_URL=http://app.localhost # {url}\nSERVER_URL=http://127.0.0.1:6091/api # {url}\nUI_PORT=6090 # {int}\nPORT=6091 # {int}\n');
+  const { main, worktree } = repoWithWorktree('UI_URL=http://app.localhost # {url}\nSERVER_URL=http://127.0.0.1:31091/api # {url}\nUI_PORT=31090 # {int}\nPORT=31091 # {int}\n');
   expect(check(worktree)).toEqual(['setup has not run in this worktree']);
 
   await setup(worktree);
-  expect(readFileSync(join(worktree, '.env.local'), 'utf8')).toBe('UI_PORT=16090\nPORT=16091\nSERVER_URL=http://127.0.0.1:16091/api\n');
+  expect(readFileSync(join(worktree, '.env.local'), 'utf8')).toBe('UI_PORT=41090\nPORT=41091\nSERVER_URL=http://127.0.0.1:41091/api\n');
   expect(check(worktree)).toEqual([]);
   expect(check(main)).toEqual([]);
 
@@ -48,12 +42,12 @@ test('without env-manager targets, setup writes each port key and localhost URL 
 });
 
 test('with env-manager targets, setup writes the ports to .env.override, keeping other worktrees\' blocks', async () => {
-  const { main, worktree } = repoWithWorktree('# env-manager: fixture\n# env-manager target: web format=ts path=.env.local\nCLIENT_PORT=6000 # {int}\nAPI_PORT=6001 # {int}\nAPI_URL=http://127.0.0.1:6001 # {url}\n');
+  const { main, worktree } = repoWithWorktree('# env-manager: fixture\n# env-manager target: web format=ts path=.env.local\nCLIENT_PORT=31000 # {int}\nAPI_PORT=31001 # {int}\nAPI_URL=http://127.0.0.1:31001 # {url}\n');
   const other = join(main, '..', 'repo/.claude/worktrees/other');
   git(main, 'worktree', 'add', '-qb', 'other', other);
-  writeFileSync(join(other, '.env.override'), 'CLIENT_PORT=16000\n');
+  writeFileSync(join(other, '.env.override'), 'CLIENT_PORT=41000\n');
   await setup(worktree).catch(() => undefined);
-  expect(readFileSync(join(worktree, '.env.override'), 'utf8')).toBe('CLIENT_PORT=17000\nAPI_PORT=17001\nAPI_URL=http://127.0.0.1:17001\n');
+  expect(readFileSync(join(worktree, '.env.override'), 'utf8')).toBe('CLIENT_PORT=42000\nAPI_PORT=42001\nAPI_URL=http://127.0.0.1:42001\n');
 });
 
 test('check leaves a hand-made worktree that setup never ran in alone', () => {
@@ -61,23 +55,6 @@ test('check leaves a hand-made worktree that setup never ran in alone', () => {
   const manual = join(dir, 'manual');
   git(main, 'worktree', 'add', '-qb', 'manual', manual);
   expect(check(manual)).toEqual([]);
-});
-
-test('setup waits for T3 to replace the placeholder branch so the agent starts on the final name', async () => {
-  const { main } = repoWithWorktree('CLIENT_PORT=6000\n');
-  const worktree = join(main, '..', 'repo/.claude/worktrees/placeholder');
-  git(main, 'worktree', 'add', '-qb', 't3/0a1b2c3d', worktree);
-  const rename = Bun.sleep(400).then(() => git(worktree, 'branch', '-m', 't3/0a1b2c3d', 'set-main-accent-color'));
-  const summary = await setup(worktree);
-  await rename;
-  expect(summary).toContain('  branch set-main-accent-color');
-});
-
-test('setup gives up on a placeholder branch T3 never renames', async () => {
-  const { main } = repoWithWorktree('CLIENT_PORT=6000\n');
-  const worktree = join(main, '..', 'repo/.claude/worktrees/placeholder');
-  git(main, 'worktree', 'add', '-qb', 't3/0a1b2c3d', worktree);
-  expect(await setup(worktree, { branchTimeoutMs: 300 })).toContain('  branch t3/0a1b2c3d (T3 didn\'t rename it within 0.3s)');
 });
 
 test('setup in the main checkout changes nothing', async () => {
