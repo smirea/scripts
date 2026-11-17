@@ -116,6 +116,19 @@ test('a Codex review that failed on its usage limit exits 1 instead of waiting',
   expect(verdict.message).toContain('out of review quota');
 });
 
+test('a retry asked after a failed Codex review waits for it', async () => {
+  const failed = 'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->';
+  const github = fakeGitHub({ codexSummary: failed });
+  const view = github.io.run;
+  github.io.run = (cmd, options) => {
+    const out = view(cmd, options);
+    if (!cmd.join(' ').startsWith('gh pr view')) return out;
+    const pr = JSON.parse(out) as Pr;
+    return JSON.stringify({ ...pr, comments: [...pr.comments, { body: '@codex review' }] });
+  };
+  expect(await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).toEqual({ code: 3, message: 'Still waiting on Codex review. Rerun.' });
+});
+
 test('a conflict names the PR base branch and exits 2', async () => {
   const github = fakeGitHub({ mergeable: 'CONFLICTING' });
   expect(await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).toEqual({

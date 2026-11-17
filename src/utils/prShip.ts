@@ -67,7 +67,12 @@ function codexReview(pr: Pr): 'running' | 'completed' | 'failed' {
   const state = summary?.body.match(/codex-review-state:v1 (\{.*?\}) -->/)?.[1];
   if (!state) return 'running';
   const status = (JSON.parse(state).code_review as { status: string | null }).status;
-  return status === 'completed' || status === 'failed' ? status : 'running';
+  if (status === 'completed') return status;
+  if (status !== 'failed') return 'running';
+  // A failed summary stays until Codex runs again, so a `@codex review` asked after its last reply means a retry is pending.
+  const retry = pr.comments.findLastIndex(comment => /@codex review/i.test(comment.body));
+  const reply = pr.comments.findLastIndex(comment => comment.body.includes('Codex') && !/@codex review/i.test(comment.body));
+  return retry > reply ? 'running' : 'failed';
 }
 
 /**
