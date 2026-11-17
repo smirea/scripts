@@ -17,7 +17,8 @@ const PLIST = path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist
 const INTERVAL_SECONDS = 300;
 const PARALLELISM = 8;
 const LOG_RETENTION_DAYS = 30;
-const MACHINE = Bun.spawnSync(['scutil', '--get', 'ComputerName']).stdout.toString().trim() || hostname();
+const MACHINE =
+	(Bun.which('scutil') && Bun.spawnSync(['scutil', '--get', 'ComputerName']).stdout.toString().trim()) || hostname();
 
 export type RepoKey = string & { readonly __brand: 'RepoKey' };
 export interface Repo {
