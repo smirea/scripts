@@ -3,7 +3,8 @@ export interface Coordinates {
 	longitude: number;
 }
 
-const LOCATION_SETTINGS_URL = 'x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocationServices';
+const LOCATION_SETTINGS_URL =
+	'x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_LocationServices';
 let permissionInstructionsShown = false;
 
 export async function getCoreLocation(): Promise<Coordinates | undefined> {
@@ -28,10 +29,16 @@ export async function getCoreLocation(): Promise<Coordinates | undefined> {
 			child.exited,
 		]);
 		if (exitCode !== 0) {
-			if (/location services are disabled|location access denied|not authorized|permission denied/i.test(`${output}\n${errors}`)) {
+			if (
+				/location services are disabled|location access denied|not authorized|permission denied/i.test(
+					`${output}\n${errors}`,
+				)
+			) {
 				await showPermissionInstructions();
 			} else {
-				console.error('[CoreLocation] Could not get device location. Make sure Wi-Fi and Location Services are enabled.');
+				console.error(
+					'[CoreLocation] Could not get device location. Make sure Wi-Fi and Location Services are enabled.',
+				);
 			}
 			return undefined;
 		}
@@ -41,7 +48,9 @@ export async function getCoreLocation(): Promise<Coordinates | undefined> {
 		}
 		return coordinates;
 	} catch {
-		console.error('[CoreLocation] Could not run the helper or read its location. Run CoreLocationCLI directly to check its setup.');
+		console.error(
+			'[CoreLocation] Could not run the helper or read its location. Run CoreLocationCLI directly to check its setup.',
+		);
 		return undefined;
 	}
 }
@@ -51,7 +60,9 @@ async function showPermissionInstructions(): Promise<void> {
 		return;
 	}
 	permissionInstructionsShown = true;
-	console.error('[CoreLocation] Device location needs permission. In System Settings → Privacy & Security → Location Services, enable Location Services and allow CoreLocationCLI. Then rerun your command.');
+	console.error(
+		'[CoreLocation] Device location needs permission. In System Settings → Privacy & Security → Location Services, enable Location Services and allow CoreLocationCLI. Then rerun your command.',
+	);
 	try {
 		const child = Bun.spawn(['open', LOCATION_SETTINGS_URL], {
 			stdout: 'ignore',
@@ -59,7 +70,7 @@ async function showPermissionInstructions(): Promise<void> {
 			timeout: 5_000,
 			killSignal: 'SIGKILL',
 		});
-		if (await child.exited === 0) {
+		if ((await child.exited) === 0) {
 			return;
 		}
 	} catch {}
@@ -71,11 +82,15 @@ export function parseCoordinates(value: unknown): Coordinates | undefined {
 		return undefined;
 	}
 	const { latitude, longitude } = value as { latitude?: unknown; longitude?: unknown };
-	if (typeof latitude !== 'number' || typeof longitude !== 'number'
-		|| !Number.isFinite(latitude) || !Number.isFinite(longitude)
-		|| Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+	if (
+		typeof latitude !== 'number' ||
+		typeof longitude !== 'number' ||
+		!Number.isFinite(latitude) ||
+		!Number.isFinite(longitude) ||
+		Math.abs(latitude) > 90 ||
+		Math.abs(longitude) > 180
+	) {
 		return undefined;
 	}
 	return { latitude, longitude };
 }
-

@@ -1,13 +1,6 @@
 {
 	"$schema": "./node_modules/oxlint/configuration_schema.json",
-	"plugins": [
-		"typescript",
-		"unicorn",
-		"oxc",
-		"import",
-		"promise",
-		"node"
-	],
+	"plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node"],
 	"categories": {
 		"correctness": "error",
 		"suspicious": "warn",
@@ -109,20 +102,13 @@
 			}
 		},
 		{
-			"files": [
-				"airbnb.ts",
-				"src/anylist.ts",
-				"src/utils/222Rich.ts",
-				"src/utils/prShip.ts"
-			],
+			"files": ["airbnb.ts", "src/anylist.ts", "src/utils/222Rich.ts", "src/utils/prShip.ts"],
 			"rules": {
 				"no-underscore-dangle": "off"
 			}
 		},
 		{
-			"files": [
-				"src/bgstats.ts"
-			],
+			"files": ["src/bgstats.ts"],
 			"rules": {
 				"no-unmodified-loop-condition": "off"
 			}
@@ -157,9 +143,7 @@
 			}
 		},
 		{
-			"files": [
-				"src/utils/validateDefaults.ts"
-			],
+			"files": ["src/utils/validateDefaults.ts"],
 			"rules": {
 				"promise/always-return": "off"
 			}
@@ -180,9 +164,7 @@
 			}
 		},
 		{
-			"files": [
-				"src/workouts.test.ts"
-			],
+			"files": ["src/workouts.test.ts"],
 			"rules": {
 				"unicorn/no-array-fill-with-reference-type": "off"
 			}
@@ -214,30 +196,17 @@
 			}
 		},
 		{
-			"files": [
-				"src/tampermonkey/amazon-undelivered.user.js"
-			],
+			"files": ["src/tampermonkey/amazon-undelivered.user.js"],
 			"rules": {
 				"unicorn/prefer-add-event-listener": "off"
 			}
 		},
 		{
-			"files": [
-				"cloudflare-workers/email-save/src/index.ts",
-				"src/voice-memo-parse.ts"
-			],
+			"files": ["cloudflare-workers/email-save/src/index.ts", "src/voice-memo-parse.ts"],
 			"rules": {
 				"unicorn/prefer-set-has": "off"
 			}
 		}
 	],
-	"ignorePatterns": [
-		"node_modules",
-		"dist",
-		"build",
-		"generated",
-		"**/generated",
-		"**/*.generated.ts",
-		"**/*.gen.ts"
-	]
+	"ignorePatterns": ["node_modules", "dist", "build", "generated", "**/generated", "**/*.generated.ts", "**/*.gen.ts"]
 }

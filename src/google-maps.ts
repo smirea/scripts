@@ -263,7 +263,8 @@ function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'nea
 		.option('near', {
 			alias: 'n',
 			type: 'string',
-			describe: 'Bias search or text-query resolution around this location (defaults to device location, then an IP-based estimate).',
+			describe:
+				'Bias search or text-query resolution around this location (defaults to device location, then an IP-based estimate).',
 		})
 		.option('distance', {
 			alias: 'd',
@@ -274,12 +275,11 @@ function addLocationOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'nea
 }
 
 function addLocaleOptions<T>(argv: Argv<T>): Argv<T & Pick<SearchOptions, 'language'>> {
-	return argv
-		.option('language', {
-			alias: 'L',
-			type: 'string',
-			describe: 'Preferred BCP-47 language code, for example en or pt-BR.',
-		});
+	return argv.option('language', {
+		alias: 'L',
+		type: 'string',
+		describe: 'Preferred BCP-47 language code, for example en or pt-BR.',
+	});
 }
 
 function joinPositionals(value: unknown): string {
@@ -483,12 +483,20 @@ async function readGoogleMapsApiKey(): Promise<string> {
 }
 
 function renderPlaces(value: Place | Place[], format: string, showOpen = true): void {
-	const openStatus = (place: Place) => place.currentOpeningHours?.openNow === undefined
-		? 'unknown' : place.currentOpeningHours.openNow ? 'yes' : 'no';
+	const openStatus = (place: Place) =>
+		place.currentOpeningHours?.openNow === undefined ? 'unknown' : place.currentOpeningHours.openNow ? 'yes' : 'no';
 	if (format === 'json') {
-		console.log(JSON.stringify(showOpen
-			? Array.isArray(value) ? value.map(place => ({ ...place, open: openStatus(place) })) : { ...value, open: openStatus(value) }
-			: value, null, 2));
+		console.log(
+			JSON.stringify(
+				showOpen
+					? Array.isArray(value)
+						? value.map(place => ({ ...place, open: openStatus(place) }))
+						: { ...value, open: openStatus(value) }
+					: value,
+				null,
+				2,
+			),
+		);
 		return;
 	}
 
@@ -498,7 +506,7 @@ function renderPlaces(value: Place | Place[], format: string, showOpen = true): 
 		rating: place.rating === undefined ? '' : `${place.rating.toFixed(1)} (${place.userRatingCount ?? 0})`,
 		type: place.primaryType ?? place.types?.[0] ?? '',
 		...(showOpen ? { open: openStatus(place) } : {}),
-		url: format === 'table' ? tableMapsUrl(place.googleMapsUri) : place.googleMapsUri ?? '',
+		url: format === 'table' ? tableMapsUrl(place.googleMapsUri) : (place.googleMapsUri ?? ''),
 	}));
 
 	if (format === 'table') {
@@ -507,14 +515,16 @@ function renderPlaces(value: Place | Place[], format: string, showOpen = true): 
 	}
 
 	const columns = ['id', 'name', 'rating', 'type', ...(showOpen ? ['open'] : []), 'url'];
-	const escapeCell = (cell: string) => cell.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
-		.replaceAll('>', '&gt;').replaceAll('\\', '\\\\').replaceAll('|', '\\|').replaceAll(/\r\n|\r|\n/g, '<br>');
+	const escapeCell = (cell: string) =>
+		cell
+			.replaceAll('&', '&amp;')
+			.replaceAll('<', '&lt;')
+			.replaceAll('>', '&gt;')
+			.replaceAll('\\', '\\\\')
+			.replaceAll('|', '\\|')
+			.replaceAll(/\r\n|\r|\n/g, '<br>');
 	const line = (cells: string[]) => `| ${cells.map(escapeCell).join(' | ')} |`;
-	console.log([
-		line(columns),
-		line(columns.map(() => '---')),
-		...rows.map(row => line(Object.values(row))),
-	].join('\n'));
+	console.log([line(columns), line(columns.map(() => '---')), ...rows.map(row => line(Object.values(row)))].join('\n'));
 }
 
 function tableMapsUrl(value: string | undefined): string {
@@ -547,7 +557,13 @@ function getDetailFieldMask(options: DetailsOptions): string {
 }
 
 function getPriceLevels(value: number[] | number | undefined): string[] {
-	const levels = ['PRICE_LEVEL_FREE', 'PRICE_LEVEL_INEXPENSIVE', 'PRICE_LEVEL_MODERATE', 'PRICE_LEVEL_EXPENSIVE', 'PRICE_LEVEL_VERY_EXPENSIVE'];
+	const levels = [
+		'PRICE_LEVEL_FREE',
+		'PRICE_LEVEL_INEXPENSIVE',
+		'PRICE_LEVEL_MODERATE',
+		'PRICE_LEVEL_EXPENSIVE',
+		'PRICE_LEVEL_VERY_EXPENSIVE',
+	];
 	return (Array.isArray(value) ? value : value === undefined ? [] : [value]).map(level => {
 		if (!Number.isInteger(level) || level < 0 || level > 4) {
 			throw new Error('--price-level must be an integer from 0 to 4.');
