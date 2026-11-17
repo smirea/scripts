@@ -1,41 +1,41 @@
 export interface ScriptCommand {
-  name: string;
-  source: string;
+	name: string;
+	source: string;
 }
 
 export const SCRIPT_COMMANDS = [
-  { name: 'gai', source: 'src/git-commit-ai.ts' },
-  { name: 'git-ai-cim', source: 'src/git-commit-ai.ts' },
-  { name: 'git-worktree', source: 'src/git-worktree.ts' },
-  { name: 'agent-t3-worktree', source: 'src/agent-t3-worktree.ts' },
-  { name: 'agent-simulator', source: 'src/agent-simulator.ts' },
-  { name: 'pr-ship', source: 'src/pr-ship.ts' },
-  { name: 'procrastimate', source: 'src/procrastimate.ts' },
-  { name: 'git-invite-ai-to-repos', source: 'src/git-invite-ai-to-repos.ts' },
-  { name: 'wt', source: 'src/git-worktree.ts' },
-  { name: 'whoop-pull', source: 'src/whoop.ts' },
-  { name: 'garmin', source: 'src/garmin.ts' },
-  { name: 'macrofactor', source: 'src/macrofactor.ts' },
-  { name: 'workouts', source: 'src/workouts.ts' },
-  { name: 'voice-memo-parse', source: 'src/voice-memo-parse.ts' },
-  { name: 'anylist', source: 'src/anylist.ts' },
-  { name: 'convex-manage', source: 'src/convex-manage.ts' },
-  { name: 'google-maps', source: 'src/google-maps.ts' },
-  { name: 'cookunity', source: 'src/cookunity.ts' },
-  { name: '222', source: 'src/222.ts' },
-  { name: 'airbnb', source: 'airbnb.ts' },
-  { name: 'bgstats', source: 'src/bgstats.ts' },
-  { name: 'clocktracker', source: 'src/clocktracker.ts' },
-  { name: 'cron-bgstats-sync', source: 'src/cron-bgstats-sync.ts' },
-  { name: 'email-inbox', source: 'src/email-inbox.ts' },
-  { name: 'sms-inbox', source: 'src/sms-inbox.ts' },
-  { name: 'iphone-deploy', source: 'src/iphone-deploy.ts' },
-  { name: 'x', source: 'src/x.ts' },
-  { name: 'repo-sync', source: 'src/repo-sync.ts' },
-  { name: 'localias-peer', source: 'src/localias-peer.ts' },
-  { name: 'fork-sync', source: 'src/fork-sync.ts' },
+	{ name: 'gai', source: 'src/git-commit-ai.ts' },
+	{ name: 'git-ai-cim', source: 'src/git-commit-ai.ts' },
+	{ name: 'git-worktree', source: 'src/git-worktree.ts' },
+	{ name: 'agent-t3-worktree', source: 'src/agent-t3-worktree.ts' },
+	{ name: 'agent-simulator', source: 'src/agent-simulator.ts' },
+	{ name: 'pr-ship', source: 'src/pr-ship.ts' },
+	{ name: 'procrastimate', source: 'src/procrastimate.ts' },
+	{ name: 'git-invite-ai-to-repos', source: 'src/git-invite-ai-to-repos.ts' },
+	{ name: 'wt', source: 'src/git-worktree.ts' },
+	{ name: 'whoop-pull', source: 'src/whoop.ts' },
+	{ name: 'garmin', source: 'src/garmin.ts' },
+	{ name: 'macrofactor', source: 'src/macrofactor.ts' },
+	{ name: 'workouts', source: 'src/workouts.ts' },
+	{ name: 'voice-memo-parse', source: 'src/voice-memo-parse.ts' },
+	{ name: 'anylist', source: 'src/anylist.ts' },
+	{ name: 'convex-manage', source: 'src/convex-manage.ts' },
+	{ name: 'google-maps', source: 'src/google-maps.ts' },
+	{ name: 'cookunity', source: 'src/cookunity.ts' },
+	{ name: '222', source: 'src/222.ts' },
+	{ name: 'airbnb', source: 'airbnb.ts' },
+	{ name: 'bgstats', source: 'src/bgstats.ts' },
+	{ name: 'clocktracker', source: 'src/clocktracker.ts' },
+	{ name: 'cron-bgstats-sync', source: 'src/cron-bgstats-sync.ts' },
+	{ name: 'email-inbox', source: 'src/email-inbox.ts' },
+	{ name: 'sms-inbox', source: 'src/sms-inbox.ts' },
+	{ name: 'iphone-deploy', source: 'src/iphone-deploy.ts' },
+	{ name: 'x', source: 'src/x.ts' },
+	{ name: 'repo-sync', source: 'src/repo-sync.ts' },
+	{ name: 'localias-peer', source: 'src/localias-peer.ts' },
+	{ name: 'fork-sync', source: 'src/fork-sync.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
-  return SCRIPT_COMMANDS.find((command) => command.name === name);
+	return SCRIPT_COMMANDS.find(command => command.name === name);
 }

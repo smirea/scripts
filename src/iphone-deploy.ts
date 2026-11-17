@@ -3,7 +3,17 @@ import { createScript } from './utils/createScript';
 import chalk from 'chalk';
 import type { Argv } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -21,680 +31,920 @@ const PROBE_ATTEMPTS = 3;
 const PROBE_RETRY_MS = 3_000;
 
 interface Device {
-  identifier: string;
-  name: string;
-  udid?: string;
-  model?: string;
-  os?: string;
-  simulated: boolean;
-  physicalIOS: boolean;
-  physicalWatch: boolean;
-  iPhone: boolean;
-  paired: boolean;
-  booted: boolean;
-  transport?: string;
-  developerModeDisabled: boolean;
+	identifier: string;
+	name: string;
+	udid?: string;
+	model?: string;
+	os?: string;
+	simulated: boolean;
+	physicalIOS: boolean;
+	physicalWatch: boolean;
+	iPhone: boolean;
+	paired: boolean;
+	booted: boolean;
+	transport?: string;
+	developerModeDisabled: boolean;
 }
 
 interface EnvManagerInfo {
-  root: string;
-  local: boolean;
-  mode: 'targets' | 'single';
-  environment: { current: string; valuesLoadedFrom: string | null };
-  environments: string[] | null;
-  environmentsError: string | null;
-  storedSchema: 'in-sync' | 'differs' | 'missing' | null;
-  values: { path: string };
-  outputs: { target: string | null; kind: 'values' | 'reader'; path: string }[];
+	root: string;
+	local: boolean;
+	mode: 'targets' | 'single';
+	environment: { current: string; valuesLoadedFrom: string | null };
+	environments: string[] | null;
+	environmentsError: string | null;
+	storedSchema: 'in-sync' | 'differs' | 'missing' | null;
+	values: { path: string };
+	outputs: { target: string | null; kind: 'values' | 'reader'; path: string }[];
 }
 
 interface EnvSelection {
-  name: string;
-  root: string;
-  args: string[];
-  restore: string[];
+	name: string;
+	root: string;
+	args: string[];
+	restore: string[];
 }
 
 interface AppPlan {
-  team?: string;
-  prepareDir?: string;
-  dir: string;
-  name: string;
-  project: XcodeProject;
-  env: EnvSelection | null;
+	team?: string;
+	prepareDir?: string;
+	dir: string;
+	name: string;
+	project: XcodeProject;
+	env: EnvSelection | null;
 }
 
 interface XcodeProject {
-  flag: '-project' | '-workspace';
-  path: string;
-  scheme: string;
+	flag: '-project' | '-workspace';
+	path: string;
+	scheme: string;
 }
 
 if (import.meta.main) {
-  const appOptions = <T>(y: Argv<T>) => y
-    .positional('apps', {
-      type: 'string',
-      array: true,
-      demandOption: true,
-      describe: `App directories; a bare name resolves to ${CODE_ROOT}/<name>`,
-    })
-    .option('env', { type: 'string', describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment' })
-    .option('scheme', { type: 'string', describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme' })
-    .option('team', { type: 'string', describe: 'Apple development team ID for projects that set none; defaults to the team of your Apple Development certificate' })
-    .option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' });
-  const plan = (argv: { apps: string[]; scheme?: string; pull: boolean; env?: string; team?: string }) =>
-    argv.apps.map(resolveAppDir).map((dir) => planApp(dir, argv));
+	const appOptions = <T>(y: Argv<T>) =>
+		y
+			.positional('apps', {
+				type: 'string',
+				array: true,
+				demandOption: true,
+				describe: `App directories; a bare name resolves to ${CODE_ROOT}/<name>`,
+			})
+			.option('env', {
+				type: 'string',
+				describe: 'env-manager environment to build with; defaults to prod/production, or the only stored environment',
+			})
+			.option('scheme', {
+				type: 'string',
+				describe: 'Xcode scheme; defaults to the scheme named like the project, or the only scheme',
+			})
+			.option('team', {
+				type: 'string',
+				describe:
+					'Apple development team ID for projects that set none; defaults to the team of your Apple Development certificate',
+			})
+			.option('pull', { type: 'boolean', default: true, describe: 'Fast-forward the git checkout before building' });
+	const plan = (argv: { apps: string[]; scheme?: string; pull: boolean; env?: string; team?: string }) =>
+		argv.apps.map(resolveAppDir).map(dir => planApp(dir, argv));
 
-  void createScript('iphone-deploy')
-    .command('push <apps..>', 'Build each app in Release, install it on a paired iPhone (keeping app data), and launch it', (y) => appOptions(y)
-      .option('device', { type: 'string', describe: 'Device index, name, or UDID, as listed by the devices command; defaults to the only paired physical iPhone' }),
-    async (argv) => {
-      preflight({ devicectl: true });
-      const plans = plan(argv);
-      header('Device');
-      const device = task('device', argv.device ?? 'paired iPhone', () => selectDevice(argv.device), (d) => d.name);
-      task('reach', 'lock state, Developer Mode', () => {
-        checkPhone(device);
-        checkDeveloperMode(device);
-      }, () => 'ready');
-      for (const app of plans) pushApp(app, device);
-    })
-    .command('link <apps..>', `Build a development-signed .ipa of each app and upload it behind an install link (devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`, appOptions,
-    async (argv) => {
-      preflight({ devicectl: false });
-      const linkBase = linkBucketUrl();
-      for (const app of plan(argv)) publishApp(app, linkBase);
-    })
-    .command('devices', 'List devices Xcode knows about, real ones before simulators', {}, async () => {
-      preflight({ devicectl: true });
-      printDevices(listDevices());
-    })
-    .demandCommand(1)
-    .parseAsync();
+	void createScript('iphone-deploy')
+		.command(
+			'push <apps..>',
+			'Build each app in Release, install it on a paired iPhone (keeping app data), and launch it',
+			y =>
+				appOptions(y).option('device', {
+					type: 'string',
+					describe:
+						'Device index, name, or UDID, as listed by the devices command; defaults to the only paired physical iPhone',
+				}),
+			async argv => {
+				preflight({ devicectl: true });
+				const plans = plan(argv);
+				header('Device');
+				const device = task(
+					'device',
+					argv.device ?? 'paired iPhone',
+					() => selectDevice(argv.device),
+					d => d.name,
+				);
+				task(
+					'reach',
+					'lock state, Developer Mode',
+					() => {
+						checkPhone(device);
+						checkDeveloperMode(device);
+					},
+					() => 'ready',
+				);
+				for (const app of plans) pushApp(app, device);
+			},
+		)
+		.command(
+			'link <apps..>',
+			`Build a development-signed .ipa of each app and upload it behind an install link (devices registered to your team; expires after ${LINK_EXPIRY_DAYS} days)`,
+			appOptions,
+			async argv => {
+				preflight({ devicectl: false });
+				const linkBase = linkBucketUrl();
+				for (const app of plan(argv)) publishApp(app, linkBase);
+			},
+		)
+		.command('devices', 'List devices Xcode knows about, real ones before simulators', {}, async () => {
+			preflight({ devicectl: true });
+			printDevices(listDevices());
+		})
+		.demandCommand(1)
+		.parseAsync();
 }
 
 function preflight(options: { devicectl: boolean }) {
-  if (process.platform !== 'darwin') throw new Error('Needs macOS with Xcode.');
-  if (run('xcodebuild', ['-version']).status !== 0) {
-    throw new Error('Xcode is not set up. Open it once, then select it under Settings > Locations > Command Line Tools.');
-  }
-  if (options.devicectl && run('xcrun', ['--find', 'devicectl']).status !== 0) {
-    throw new Error('The selected Xcode has no devicectl. Select a current Xcode under Settings > Locations.');
-  }
-  mkdirSync(BUILD_ROOT, { recursive: true });
+	if (process.platform !== 'darwin') throw new Error('Needs macOS with Xcode.');
+	if (run('xcodebuild', ['-version']).status !== 0) {
+		throw new Error(
+			'Xcode is not set up. Open it once, then select it under Settings > Locations > Command Line Tools.',
+		);
+	}
+	if (options.devicectl && run('xcrun', ['--find', 'devicectl']).status !== 0) {
+		throw new Error('The selected Xcode has no devicectl. Select a current Xcode under Settings > Locations.');
+	}
+	mkdirSync(BUILD_ROOT, { recursive: true });
 }
 
 function resolveAppDir(app: string): string {
-  const dir = app.includes('/') || app.startsWith('.') ? path.resolve(app.replace(/^~(?=\/|$)/, os.homedir())) : path.join(CODE_ROOT, app);
-  if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`No app directory at ${tilde(dir)}.`);
-  return dir;
+	const dir =
+		app.includes('/') || app.startsWith('.')
+			? path.resolve(app.replace(/^~(?=\/|$)/, os.homedir()))
+			: path.join(CODE_ROOT, app);
+	if (!existsSync(dir) || !statSync(dir).isDirectory()) throw new Error(`No app directory at ${tilde(dir)}.`);
+	return dir;
 }
 
 // Everything that can reject an app runs for all apps before the first build starts.
 function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: string; team?: string }): AppPlan {
-  const name = path.basename(dir);
-  header(name, tilde(dir));
-  const repoRoot = gitRoot(dir);
-  if (options.pull && repoRoot) task('git', 'pull --ff-only', () => fastForward(repoRoot), (summary) => summary);
-  if (repoRoot && (existsSync(path.join(repoRoot, 'bun.lock')) || existsSync(path.join(repoRoot, 'bun.lockb')))) {
-    task('deps', 'bun install', () => runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${tilde(repoRoot)}` }));
-  }
-  const env = selectEnvironment(dir, repoRoot, options.env);
-  const project = findProject(dir, options.scheme);
-  const prepareDir = [...new Set([dir, repoRoot].filter((dir): dir is string => Boolean(dir)))].find((dir) => {
-    const manifest = path.join(dir, 'package.json');
-    return existsSync(manifest) && Boolean(JSON.parse(readFileSync(manifest, 'utf8')).scripts?.['env:ios']);
-  });
-  line('project', `${path.relative(dir, project.path) || project.path} ${chalk.dim('·')} scheme ${project.scheme}`);
-  return { dir, name, env, prepareDir, team: options.team, project };
+	const name = path.basename(dir);
+	header(name, tilde(dir));
+	const repoRoot = gitRoot(dir);
+	if (options.pull && repoRoot)
+		task(
+			'git',
+			'pull --ff-only',
+			() => fastForward(repoRoot),
+			summary => summary,
+		);
+	if (repoRoot && (existsSync(path.join(repoRoot, 'bun.lock')) || existsSync(path.join(repoRoot, 'bun.lockb')))) {
+		task('deps', 'bun install', () =>
+			runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${tilde(repoRoot)}` }),
+		);
+	}
+	const env = selectEnvironment(dir, repoRoot, options.env);
+	const project = findProject(dir, options.scheme);
+	const prepareDir = [...new Set([dir, repoRoot].filter((dir): dir is string => Boolean(dir)))].find(dir => {
+		const manifest = path.join(dir, 'package.json');
+		return existsSync(manifest) && Boolean(JSON.parse(readFileSync(manifest, 'utf8')).scripts?.['env:ios']);
+	});
+	line('project', `${path.relative(dir, project.path) || project.path} ${chalk.dim('·')} scheme ${project.scheme}`);
+	return { dir, name, env, prepareDir, team: options.team, project };
 }
 
 function readEnvManagerInfo(dir: string, repoRoot: string | undefined): EnvManagerInfo | null {
-  // env-manager walks up to the nearest .env, which can belong to an unrelated parent directory
-  // (and may not even parse, like a shell dotfile at ~/.env).
-  if (repoRoot && !hasEnvFileWithin(dir, repoRoot)) return null;
-  const result = spawnSync('env-manager', ['info'], { cwd: dir, encoding: 'utf8' });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null;
-  if (result.status === ENV_MANAGER_NOT_INITIALIZED) return null;
-  if (result.status !== 0) throw new Error(`env-manager info failed in ${tilde(dir)}:\n${(result.stderr || String(result.error)).trim()}`);
-  return JSON.parse(result.stdout);
+	// env-manager walks up to the nearest .env, which can belong to an unrelated parent directory
+	// (and may not even parse, like a shell dotfile at ~/.env).
+	if (repoRoot && !hasEnvFileWithin(dir, repoRoot)) return null;
+	const result = spawnSync('env-manager', ['info'], { cwd: dir, encoding: 'utf8' });
+	if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return null;
+	if (result.status === ENV_MANAGER_NOT_INITIALIZED) return null;
+	if (result.status !== 0)
+		throw new Error(`env-manager info failed in ${tilde(dir)}:\n${(result.stderr || String(result.error)).trim()}`);
+	return JSON.parse(result.stdout);
 }
 
 function hasEnvFileWithin(dir: string, root: string): boolean {
-  for (let current = dir; ; current = path.dirname(current)) {
-    if (existsSync(path.join(current, '.env'))) return true;
-    if (current === root || current === path.dirname(current)) return false;
-  }
+	for (let current = dir; ; current = path.dirname(current)) {
+		if (existsSync(path.join(current, '.env'))) return true;
+		if (current === root || current === path.dirname(current)) return false;
+	}
 }
 
 function selectEnvironment(dir: string, repoRoot: string | undefined, requested?: string): EnvSelection | null {
-  const name = path.basename(dir);
-  const info = readEnvManagerInfo(dir, repoRoot);
-  if (!info) {
-    if (requested) throw new Error(`--env ${requested}: ${name} has no env-manager setup (or env-manager is not installed).`);
-    line('env', chalk.dim('no env-manager setup'));
-    return null;
-  }
-  if (info.local) {
-    if (requested) throw new Error(`--env ${requested}: ${name} uses env-manager local mode, which has no stored environments.`);
-    line('env', `current local values ${chalk.dim('(local mode)')}`);
-    return null;
-  }
-  if (!info.environments) throw new Error(`Can't read ${name}'s env-manager environments: ${info.environmentsError}`);
-  const available = info.environments.join(', ') || 'none';
-  if (requested) {
-    if (!info.environments.includes(requested)) throw new Error(`Unknown environment "${requested}" for ${name}. Available: ${available}.`);
-  } else if (!info.environments.length) {
-    line('env', `current local values ${chalk.dim('(none stored)')}`);
-    return null;
-  }
+	const name = path.basename(dir);
+	const info = readEnvManagerInfo(dir, repoRoot);
+	if (!info) {
+		if (requested)
+			throw new Error(`--env ${requested}: ${name} has no env-manager setup (or env-manager is not installed).`);
+		line('env', chalk.dim('no env-manager setup'));
+		return null;
+	}
+	if (info.local) {
+		if (requested)
+			throw new Error(`--env ${requested}: ${name} uses env-manager local mode, which has no stored environments.`);
+		line('env', `current local values ${chalk.dim('(local mode)')}`);
+		return null;
+	}
+	if (!info.environments) throw new Error(`Can't read ${name}'s env-manager environments: ${info.environmentsError}`);
+	const available = info.environments.join(', ') || 'none';
+	if (requested) {
+		if (!info.environments.includes(requested))
+			throw new Error(`Unknown environment "${requested}" for ${name}. Available: ${available}.`);
+	} else if (!info.environments.length) {
+		line('env', `current local values ${chalk.dim('(none stored)')}`);
+		return null;
+	}
 
-  let selected = requested;
-  if (!selected) {
-    const production = info.environments.filter((env) => PRODUCTION_ENVIRONMENT.test(env));
-    if (production.length > 1) throw new Error(`${name} has several production environments (${production.join(', ')}); pick one with --env.`);
-    selected = production[0] ?? (info.environments.length === 1 ? info.environments[0] : undefined);
-    if (!selected) throw new Error(`${name} has no prod environment; pick one with --env. Available: ${available}.`);
-  }
-  const { current, valuesLoadedFrom } = info.environment;
-  const restored = chalk.dim(`(currently ${current}, restored after the build)`);
-  if (info.mode === 'targets') {
-    line('env', `${selected} ${restored}`);
-    return {
-      name: selected,
-      root: info.root,
-      args: ['gen', '--env', selected],
-      restore: info.outputs.filter((output) => output.target && output.kind === 'values').map((output) => output.path),
-    };
-  }
+	let selected = requested;
+	if (!selected) {
+		const production = info.environments.filter(env => PRODUCTION_ENVIRONMENT.test(env));
+		if (production.length > 1)
+			throw new Error(`${name} has several production environments (${production.join(', ')}); pick one with --env.`);
+		selected = production[0] ?? (info.environments.length === 1 ? info.environments[0] : undefined);
+		if (!selected) throw new Error(`${name} has no prod environment; pick one with --env. Available: ${available}.`);
+	}
+	const { current, valuesLoadedFrom } = info.environment;
+	const restored = chalk.dim(`(currently ${current}, restored after the build)`);
+	if (info.mode === 'targets') {
+		line('env', `${selected} ${restored}`);
+		return {
+			name: selected,
+			root: info.root,
+			args: ['gen', '--env', selected],
+			restore: info.outputs.filter(output => output.target && output.kind === 'values').map(output => output.path),
+		};
+	}
 
-  // Single-project values files are the build input, so they come from `down`. It also
-  // replaces .env with the stored schema, which would silently regress a newer local one.
-  if (info.storedSchema !== 'in-sync') {
-    throw new Error([
-      `${name}'s .env differs from the schema stored in AWS, so env-manager down would overwrite it.`,
-      `In ${tilde(info.root)}, run env-manager up (local is newer) or env-manager down (AWS is newer), then retry.`,
-    ].join('\n'));
-  }
-  if (current === selected && (valuesLoadedFrom ?? current) === selected) {
-    line('env', selected);
-    return { name: selected, root: info.root, args: ['down'], restore: [] };
-  }
-  line('env', `${selected} ${restored}`);
-  return {
-    name: selected,
-    root: info.root,
-    args: ['down', '--env', selected],
-    restore: [...new Set([info.values.path, path.join(info.root, '.env.local')])],
-  };
+	// Single-project values files are the build input, so they come from `down`. It also
+	// replaces .env with the stored schema, which would silently regress a newer local one.
+	if (info.storedSchema !== 'in-sync') {
+		throw new Error(
+			[
+				`${name}'s .env differs from the schema stored in AWS, so env-manager down would overwrite it.`,
+				`In ${tilde(info.root)}, run env-manager up (local is newer) or env-manager down (AWS is newer), then retry.`,
+			].join('\n'),
+		);
+	}
+	if (current === selected && (valuesLoadedFrom ?? current) === selected) {
+		line('env', selected);
+		return { name: selected, root: info.root, args: ['down'], restore: [] };
+	}
+	line('env', `${selected} ${restored}`);
+	return {
+		name: selected,
+		root: info.root,
+		args: ['down', '--env', selected],
+		restore: [...new Set([info.values.path, path.join(info.root, '.env.local')])],
+	};
 }
 
 // Restoring the touched files byte for byte keeps the checkout on its selected environment
 // without another AWS round trip, even if the build fails or is interrupted.
 function withEnvironment<T>(env: EnvSelection, build: () => T): T {
-  const snapshot = new Map(env.restore.map((file) => [file, existsSync(file) ? readFileSync(file) : null]));
-  let restored = false;
-  const restore = () => {
-    if (restored) return;
-    restored = true;
-    for (const [file, content] of snapshot) {
-      if (content) writeFileSync(file, content);
-      else if (existsSync(file)) unlinkSync(file);
-    }
-  };
-  const onSignal = () => {
-    restore();
-    process.exit(130);
-  };
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
-  try {
-    const command = `env-manager ${env.args.join(' ')}`;
-    task('env', command, () => runOrThrow('env-manager', env.args, { cwd: env.root, error: `${command} failed in ${tilde(env.root)}` }));
-    return build();
-  } finally {
-    restore();
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
-  }
+	const snapshot = new Map(env.restore.map(file => [file, existsSync(file) ? readFileSync(file) : null]));
+	let restored = false;
+	const restore = () => {
+		if (restored) return;
+		restored = true;
+		for (const [file, content] of snapshot) {
+			if (content) writeFileSync(file, content);
+			else if (existsSync(file)) unlinkSync(file);
+		}
+	};
+	const onSignal = () => {
+		restore();
+		process.exit(130);
+	};
+	process.once('SIGINT', onSignal);
+	process.once('SIGTERM', onSignal);
+	try {
+		const command = `env-manager ${env.args.join(' ')}`;
+		task('env', command, () =>
+			runOrThrow('env-manager', env.args, { cwd: env.root, error: `${command} failed in ${tilde(env.root)}` }),
+		);
+		return build();
+	} finally {
+		restore();
+		process.off('SIGINT', onSignal);
+		process.off('SIGTERM', onSignal);
+	}
 }
 
 function certificateTeam(): string | undefined {
-  const pem = run('security', ['find-certificate', '-a', '-c', 'Apple Development', '-p']).stdout;
-  const teams = new Set<string>();
-  for (const cert of pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []) {
-    const result = spawnSync('openssl', ['x509', '-noout', '-subject', '-checkend', '0'], { input: cert, encoding: 'utf8' });
-    const team = result.stdout.match(/OU\s*=\s*([A-Z0-9]{10})/)?.[1];
-    if (result.status === 0 && team) teams.add(team);
-  }
-  return teams.size === 1 ? [...teams][0] : undefined;
+	const pem = run('security', ['find-certificate', '-a', '-c', 'Apple Development', '-p']).stdout;
+	const teams = new Set<string>();
+	for (const cert of pem.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? []) {
+		const result = spawnSync('openssl', ['x509', '-noout', '-subject', '-checkend', '0'], {
+			input: cert,
+			encoding: 'utf8',
+		});
+		const team = result.stdout.match(/OU\s*=\s*([A-Z0-9]{10})/)?.[1];
+		if (result.status === 0 && team) teams.add(team);
+	}
+	return teams.size === 1 ? [...teams][0] : undefined;
 }
 
 // Some projects deliberately leave DEVELOPMENT_TEAM out of version control and expect it
 // per machine, so a missing team is filled in and the build retried instead of failing.
 // Returns the team that was passed, if any.
-function xcodebuild({ name, project, env, prepareDir, team: requestedTeam }: AppPlan, buildDir: string, args: string[]): string | undefined {
-  const buildLog = path.join(buildDir, 'build.log');
-  let team = requestedTeam;
-  const runOnce = () => task('build', `Release${team ? ` ${chalk.dim('·')} team ${team}` : ''}`, () => runLogged('xcodebuild', [
-    project.flag, project.path, '-scheme', project.scheme, '-configuration', 'Release',
-    '-derivedDataPath', buildDir, '-allowProvisioningUpdates', ...args, ...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
-  ], buildLog));
-  const runBuild = () => {
-    if (prepareDir) task('prepare', 'bun run env:ios', () => runOrThrow(process.execPath, ['run', 'env:ios'], {
-      cwd: prepareDir,
-      error: `Release preparation failed for ${name}`,
-    }));
-    const first = runOnce();
-    if (first.ok || team || !/requires a development team/i.test(first.log)) return first;
-    team = certificateTeam();
-    if (!team) throw new Error(`${name} sets no development team, and your Apple Development certificates don't name exactly one. Pass --team <TEAM_ID>.`);
-    line('team', `${team} ${chalk.dim('(project sets none; taken from your Apple Development certificate)')}`);
-    return runOnce();
-  };
-  const build = env ? withEnvironment(env, runBuild) : runBuild();
-  if (!build.ok) {
-    const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5);
-    const diagnosis = errors.length ? errors.join('\n') : build.log;
-    const hint = /Developer Mode disabled/i.test(build.log)
-      ? 'Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the device, and retry.'
-      : /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(diagnosis)
-      ? 'The App Group is enabled on that target\'s App ID but not assigned to it, which xcodebuild doesn\'t fix on its own. In Xcode > target > Signing & Capabilities > App Groups, tick the group (or developer.apple.com > Identifiers > that bundle ID > App Groups > Configure), then retry.'
-      : /provision|signing|certificate|development team/i.test(diagnosis)
-        ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
-        : /destination|device.*unavailable|device.*locked/i.test(diagnosis)
-          ? 'Reconnect and unlock the iPhone, then retry.'
-          : 'Build the Release scheme in Xcode to see the error.';
-    throw new Error([`Build failed for ${name}; nothing was installed.`, ...errors.map(error => chalk.red(`  ${error}`)), `Log: ${tilde(buildLog)}`, hint].join('\n'));
-  }
-  return team;
+function xcodebuild(
+	{ name, project, env, prepareDir, team: requestedTeam }: AppPlan,
+	buildDir: string,
+	args: string[],
+): string | undefined {
+	const buildLog = path.join(buildDir, 'build.log');
+	let team = requestedTeam;
+	const runOnce = () =>
+		task('build', `Release${team ? ` ${chalk.dim('·')} team ${team}` : ''}`, () =>
+			runLogged(
+				'xcodebuild',
+				[
+					project.flag,
+					project.path,
+					'-scheme',
+					project.scheme,
+					'-configuration',
+					'Release',
+					'-derivedDataPath',
+					buildDir,
+					'-allowProvisioningUpdates',
+					...args,
+					...(team ? [`DEVELOPMENT_TEAM=${team}`] : []),
+				],
+				buildLog,
+			),
+		);
+	const runBuild = () => {
+		if (prepareDir)
+			task('prepare', 'bun run env:ios', () =>
+				runOrThrow(process.execPath, ['run', 'env:ios'], {
+					cwd: prepareDir,
+					error: `Release preparation failed for ${name}`,
+				}),
+			);
+		const first = runOnce();
+		if (first.ok || team || !/requires a development team/i.test(first.log)) return first;
+		team = certificateTeam();
+		if (!team)
+			throw new Error(
+				`${name} sets no development team, and your Apple Development certificates don't name exactly one. Pass --team <TEAM_ID>.`,
+			);
+		line('team', `${team} ${chalk.dim('(project sets none; taken from your Apple Development certificate)')}`);
+		return runOnce();
+	};
+	const build = env ? withEnvironment(env, runBuild) : runBuild();
+	if (!build.ok) {
+		const errors = [...new Set(build.log.match(/(?<=\berror: ).+/g) ?? [])].slice(0, 5);
+		const diagnosis = errors.length ? errors.join('\n') : build.log;
+		const hint = /Developer Mode disabled/i.test(build.log)
+			? 'Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the device, and retry.'
+			: /doesn't match the entitlements file's value for the com\.apple\.security\.application-groups/i.test(diagnosis)
+				? "The App Group is enabled on that target's App ID but not assigned to it, which xcodebuild doesn't fix on its own. In Xcode > target > Signing & Capabilities > App Groups, tick the group (or developer.apple.com > Identifiers > that bundle ID > App Groups > Configure), then retry."
+				: /provision|signing|certificate|development team/i.test(diagnosis)
+					? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
+					: /destination|device.*unavailable|device.*locked/i.test(diagnosis)
+						? 'Reconnect and unlock the iPhone, then retry.'
+						: 'Build the Release scheme in Xcode to see the error.';
+		throw new Error(
+			[
+				`Build failed for ${name}; nothing was installed.`,
+				...errors.map(error => chalk.red(`  ${error}`)),
+				`Log: ${tilde(buildLog)}`,
+				hint,
+			].join('\n'),
+		);
+	}
+	return team;
 }
 
 function plistValue(plist: string, key: string): string | undefined {
-  const result = run('plutil', ['-extract', key, 'raw', '-o', '-', plist]);
-  return result.status === 0 ? result.stdout.trim() : undefined;
+	const result = run('plutil', ['-extract', key, 'raw', '-o', '-', plist]);
+	return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 function linkBucketUrl(): string {
-  const result = run('wrangler', ['r2', 'bucket', 'dev-url', 'get', LINK_BUCKET]);
-  const url = result.stdout.match(/https:\/\/pub-[a-z0-9]+\.r2\.dev/)?.[0];
-  if (result.status !== 0 || !url) {
-    throw new Error([
-      `iphone-deploy link needs the public R2 bucket "${LINK_BUCKET}" and a logged-in wrangler. One-time setup:`,
-      `  wrangler r2 bucket create ${LINK_BUCKET}`,
-      `  wrangler r2 bucket dev-url enable ${LINK_BUCKET} --force`,
-      `  wrangler r2 bucket lifecycle add ${LINK_BUCKET} expire-builds --expire-days ${LINK_EXPIRY_DAYS} --force`,
-      (result.stderr || result.stdout).trim(),
-    ].join('\n'));
-  }
-  return url;
+	const result = run('wrangler', ['r2', 'bucket', 'dev-url', 'get', LINK_BUCKET]);
+	const url = result.stdout.match(/https:\/\/pub-[a-z0-9]+\.r2\.dev/)?.[0];
+	if (result.status !== 0 || !url) {
+		throw new Error(
+			[
+				`iphone-deploy link needs the public R2 bucket "${LINK_BUCKET}" and a logged-in wrangler. One-time setup:`,
+				`  wrangler r2 bucket create ${LINK_BUCKET}`,
+				`  wrangler r2 bucket dev-url enable ${LINK_BUCKET} --force`,
+				`  wrangler r2 bucket lifecycle add ${LINK_BUCKET} expire-builds --expire-days ${LINK_EXPIRY_DAYS} --force`,
+				(result.stderr || result.stdout).trim(),
+			].join('\n'),
+		);
+	}
+	return url;
 }
 
 function escapeXml(value: string): string {
-  return value.replace(/[<>&'"]/g, (char) => `&#${char.charCodeAt(0)};`);
+	return value.replace(/[<>&'"]/g, char => `&#${char.charCodeAt(0)};`);
 }
 
 // Over-the-air install: iOS fetches the manifest from an itms-services:// link, which only
 // works from a tapped link in Safari, hence the HTML page. Development signing limits
 // installs to devices in the team's provisioning profile.
 function publishApp(plan: AppPlan, linkBase: string) {
-  const { name, project } = plan;
-  const buildDir = path.join(BUILD_ROOT, `${name}-link`);
-  const archivePath = path.join(buildDir, `${project.scheme}.xcarchive`);
-  const exportPath = path.join(buildDir, 'export');
-  mkdirSync(buildDir, { recursive: true });
-  header(name, 'install link');
-  const team = xcodebuild(plan, buildDir, ['-destination', 'generic/platform=iOS', '-archivePath', archivePath, 'archive']);
+	const { name, project } = plan;
+	const buildDir = path.join(BUILD_ROOT, `${name}-link`);
+	const archivePath = path.join(buildDir, `${project.scheme}.xcarchive`);
+	const exportPath = path.join(buildDir, 'export');
+	mkdirSync(buildDir, { recursive: true });
+	header(name, 'install link');
+	const team = xcodebuild(plan, buildDir, [
+		'-destination',
+		'generic/platform=iOS',
+		'-archivePath',
+		archivePath,
+		'archive',
+	]);
 
-  const optionsPath = path.join(buildDir, 'ExportOptions.plist');
-  writeFileSync(optionsPath, `<?xml version="1.0" encoding="UTF-8"?>
+	const optionsPath = path.join(buildDir, 'ExportOptions.plist');
+	writeFileSync(
+		optionsPath,
+		`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>method</key><string>debugging</string><key>signingStyle</key><string>automatic</string>${team ? `<key>teamID</key><string>${team}</string>` : ''}</dict></plist>
-`);
-  const exportLog = path.join(buildDir, 'export.log');
-  const exported = task('export', 'development .ipa', () => runLogged('xcodebuild', ['-exportArchive', '-archivePath', archivePath, '-exportPath', exportPath, '-exportOptionsPlist', optionsPath, '-allowProvisioningUpdates'], exportLog));
-  if (!exported.ok) throw new Error(`Export failed for ${name}.\nLog: ${tilde(exportLog)}\nCheck that the iPhone is registered to your team (Xcode > Settings > Accounts).`);
-  const ipa = readdirSync(exportPath).find((entry) => entry.endsWith('.ipa'));
-  if (!ipa) throw new Error(`Export produced no .ipa in ${tilde(exportPath)}.`);
+`,
+	);
+	const exportLog = path.join(buildDir, 'export.log');
+	const exported = task('export', 'development .ipa', () =>
+		runLogged(
+			'xcodebuild',
+			[
+				'-exportArchive',
+				'-archivePath',
+				archivePath,
+				'-exportPath',
+				exportPath,
+				'-exportOptionsPlist',
+				optionsPath,
+				'-allowProvisioningUpdates',
+			],
+			exportLog,
+		),
+	);
+	if (!exported.ok)
+		throw new Error(
+			`Export failed for ${name}.\nLog: ${tilde(exportLog)}\nCheck that the iPhone is registered to your team (Xcode > Settings > Accounts).`,
+		);
+	const ipa = readdirSync(exportPath).find(entry => entry.endsWith('.ipa'));
+	if (!ipa) throw new Error(`Export produced no .ipa in ${tilde(exportPath)}.`);
 
-  const appsDir = path.join(archivePath, 'Products/Applications');
-  const infoPlist = path.join(findBuiltApp(appsDir, project.scheme), 'Info.plist');
-  const bundleId = plistValue(infoPlist, 'CFBundleIdentifier');
-  if (!bundleId) throw new Error(`No bundle identifier in ${tilde(infoPlist)}.`);
-  const version = plistValue(infoPlist, 'CFBundleShortVersionString') ?? '1.0';
-  const build = plistValue(infoPlist, 'CFBundleVersion');
-  const title = plistValue(infoPlist, 'CFBundleDisplayName') ?? plistValue(infoPlist, 'CFBundleName') ?? name;
+	const appsDir = path.join(archivePath, 'Products/Applications');
+	const infoPlist = path.join(findBuiltApp(appsDir, project.scheme), 'Info.plist');
+	const bundleId = plistValue(infoPlist, 'CFBundleIdentifier');
+	if (!bundleId) throw new Error(`No bundle identifier in ${tilde(infoPlist)}.`);
+	const version = plistValue(infoPlist, 'CFBundleShortVersionString') ?? '1.0';
+	const build = plistValue(infoPlist, 'CFBundleVersion');
+	const title = plistValue(infoPlist, 'CFBundleDisplayName') ?? plistValue(infoPlist, 'CFBundleName') ?? name;
 
-  const prefix = `${randomBytes(16).toString('hex')}/${name}`;
-  const url = (file: string) => `${linkBase}/${prefix}/${file}`;
-  const manifest = `<?xml version="1.0" encoding="UTF-8"?>
+	const prefix = `${randomBytes(16).toString('hex')}/${name}`;
+	const url = (file: string) => `${linkBase}/${prefix}/${file}`;
+	const manifest = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict><key>items</key><array><dict>
 <key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${escapeXml(url('app.ipa'))}</string></dict></array>
 <key>metadata</key><dict><key>bundle-identifier</key><string>${escapeXml(bundleId)}</string><key>bundle-version</key><string>${escapeXml(version)}</string><key>kind</key><string>software</string><key>title</key><string>${escapeXml(title)}</string></dict>
 </dict></array></dict></plist>
 `;
-  const installHref = `itms-services://?action=download-manifest&url=${encodeURIComponent(url('manifest.plist'))}`;
-  const label = `${title} ${version}${build ? ` (${build})` : ''}${plan.env ? ` · ${plan.env.name}` : ''}`;
-  const page = `<!doctype html>
+	const installHref = `itms-services://?action=download-manifest&url=${encodeURIComponent(url('manifest.plist'))}`;
+	const label = `${title} ${version}${build ? ` (${build})` : ''}${plan.env ? ` · ${plan.env.name}` : ''}`;
+	const page = `<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Install ${escapeXml(title)}</title>
 <style>body{font:17px -apple-system,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0;text-align:center}a{display:inline-block;margin-top:16px;padding:14px 28px;border-radius:12px;background:#007aff;color:#fff;text-decoration:none;font-weight:600}p{color:#666}</style></head>
 <body><div><h1>${escapeXml(title)}</h1><p>${escapeXml(label)}<br>Built ${escapeXml(new Date().toLocaleString())}</p><a href="${escapeXml(installHref)}">Install</a></div></body></html>
 `;
-  writeFileSync(path.join(buildDir, 'manifest.plist'), manifest);
-  writeFileSync(path.join(buildDir, 'index.html'), page);
+	writeFileSync(path.join(buildDir, 'manifest.plist'), manifest);
+	writeFileSync(path.join(buildDir, 'index.html'), page);
 
-  const uploads = [
-    ['app.ipa', path.join(exportPath, ipa), 'application/octet-stream'],
-    ['manifest.plist', path.join(buildDir, 'manifest.plist'), 'text/xml'],
-    ['index.html', path.join(buildDir, 'index.html'), 'text/html; charset=utf-8'],
-  ] as const;
-  task('upload', `R2 bucket ${LINK_BUCKET}`, () => {
-    for (const [file, local, contentType] of uploads) {
-      runOrThrow('wrangler', ['r2', 'object', 'put', `${LINK_BUCKET}/${prefix}/${file}`, '--file', local, '--content-type', contentType, '--remote'], {
-        error: `Uploading ${file} to R2 failed.`,
-      });
-    }
-  });
-  line('ready', `${label} ${chalk.dim(`· expires in ${LINK_EXPIRY_DAYS} days`)}`);
-  line('', chalk.bold.underline(url('index.html')));
+	const uploads = [
+		['app.ipa', path.join(exportPath, ipa), 'application/octet-stream'],
+		['manifest.plist', path.join(buildDir, 'manifest.plist'), 'text/xml'],
+		['index.html', path.join(buildDir, 'index.html'), 'text/html; charset=utf-8'],
+	] as const;
+	task('upload', `R2 bucket ${LINK_BUCKET}`, () => {
+		for (const [file, local, contentType] of uploads) {
+			runOrThrow(
+				'wrangler',
+				[
+					'r2',
+					'object',
+					'put',
+					`${LINK_BUCKET}/${prefix}/${file}`,
+					'--file',
+					local,
+					'--content-type',
+					contentType,
+					'--remote',
+				],
+				{
+					error: `Uploading ${file} to R2 failed.`,
+				},
+			);
+		}
+	});
+	line('ready', `${label} ${chalk.dim(`· expires in ${LINK_EXPIRY_DAYS} days`)}`);
+	line('', chalk.bold.underline(url('index.html')));
 }
 
 function pushApp(plan: AppPlan, device: Device) {
-  const { name, project } = plan;
-  const buildDir = path.join(BUILD_ROOT, name);
-  mkdirSync(buildDir, { recursive: true });
-  header(name, device.name);
-  xcodebuild(plan, buildDir, ['-destination', `platform=iOS,id=${device.identifier}`, 'build']);
+	const { name, project } = plan;
+	const buildDir = path.join(BUILD_ROOT, name);
+	mkdirSync(buildDir, { recursive: true });
+	header(name, device.name);
+	xcodebuild(plan, buildDir, ['-destination', `platform=iOS,id=${device.identifier}`, 'build']);
 
-  const appPath = findBuiltApp(path.join(buildDir, 'Build/Products/Release-iphoneos'), project.scheme);
-  const bundleId = runOrThrow('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Info.plist')], {
-    error: `No bundle identifier in ${tilde(appPath)}.`,
-  }).trim();
+	const appPath = findBuiltApp(path.join(buildDir, 'Build/Products/Release-iphoneos'), project.scheme);
+	const bundleId = runOrThrow(
+		'/usr/libexec/PlistBuddy',
+		['-c', 'Print :CFBundleIdentifier', path.join(appPath, 'Info.plist')],
+		{
+			error: `No bundle identifier in ${tilde(appPath)}.`,
+		},
+	).trim();
 
-  const installLog = path.join(buildDir, 'install.log');
-  const install = task('install', bundleId, () => {
-    checkPhone(device);
-    return runLogged('xcrun', ['devicectl', 'device', 'install', 'app', '--device', device.identifier, '--timeout', '180', appPath], installLog);
-  });
-  if (!install.ok) deviceFailure(`Install failed for ${name}`, installLog, install.log);
+	const installLog = path.join(buildDir, 'install.log');
+	const install = task('install', bundleId, () => {
+		checkPhone(device);
+		return runLogged(
+			'xcrun',
+			['devicectl', 'device', 'install', 'app', '--device', device.identifier, '--timeout', '180', appPath],
+			installLog,
+		);
+	});
+	if (!install.ok) deviceFailure(`Install failed for ${name}`, installLog, install.log);
 
-  const launchLog = path.join(buildDir, 'launch.log');
-  const launch = task('launch', bundleId, () => runLogged('xcrun', ['devicectl', 'device', 'process', 'launch', '--device', device.identifier, '--timeout', '30', '--terminate-existing', bundleId], launchLog));
-  if (!launch.ok) deviceFailure(`${name} is installed, but launching it failed; open it manually`, launchLog, launch.log);
+	const launchLog = path.join(buildDir, 'launch.log');
+	const launch = task('launch', bundleId, () =>
+		runLogged(
+			'xcrun',
+			[
+				'devicectl',
+				'device',
+				'process',
+				'launch',
+				'--device',
+				device.identifier,
+				'--timeout',
+				'30',
+				'--terminate-existing',
+				bundleId,
+			],
+			launchLog,
+		),
+	);
+	if (!launch.ok)
+		deviceFailure(`${name} is installed, but launching it failed; open it manually`, launchLog, launch.log);
 
-  const watchNote = watchAppNote(appPath, listDevices());
-  if (watchNote) line('watch', watchNote);
+	const watchNote = watchAppNote(appPath, listDevices());
+	if (watchNote) line('watch', watchNote);
 }
 
 // devicectl installs only the iPhone app. A development-signed watch app then installs from the
 // iPhone's Watch app, and only on a watch its provisioning profile lists, which automatic signing
 // adds once Xcode has paired with that watch. Without one the watch app silently never appears.
 function watchAppNote(appPath: string, devices: Device[]): string | null {
-  const watchDir = path.join(appPath, 'Watch');
-  const watchApp = existsSync(watchDir) && statSync(watchDir).isDirectory() ? readdirSync(watchDir).find((entry) => entry.endsWith('.app')) : undefined;
-  if (!watchApp) return null;
-  const profile = path.join(watchDir, watchApp, 'embedded.mobileprovision');
-  const decoded = run('security', ['cms', '-D', '-i', profile]);
-  const provisioned = new Set(decoded.status === 0 ? [...decoded.stdout.matchAll(/<string>([0-9A-Fa-f-]{20,})<\/string>/g)].map((match) => match[1]!.toUpperCase()) : []);
-  const watch = devices.find((device) => device.physicalWatch && device.udid && provisioned.has(device.udid.toUpperCase()));
-  if (watch) return `${watchApp} is signed for ${watch.name}; install it from the iPhone's Watch app > Available Apps.`;
-  return chalk.yellow([
-    `${watchApp} is not signed for any watch Xcode knows, so no watch can install it.`,
-    'Pair the watch once (iPhone on USB or Wi-Fi, Developer Mode on in the watch\'s Settings > Privacy & Security,',
-    'then Xcode > Window > Devices and Simulators), rerun, then install it from the iPhone\'s Watch app > Available Apps.',
-    'Or use the TestFlight build, which installs on any watch.',
-  ].join('\n' + ' '.repeat(LABEL_WIDTH + 1)));
+	const watchDir = path.join(appPath, 'Watch');
+	const watchApp =
+		existsSync(watchDir) && statSync(watchDir).isDirectory()
+			? readdirSync(watchDir).find(entry => entry.endsWith('.app'))
+			: undefined;
+	if (!watchApp) return null;
+	const profile = path.join(watchDir, watchApp, 'embedded.mobileprovision');
+	const decoded = run('security', ['cms', '-D', '-i', profile]);
+	const provisioned = new Set(
+		decoded.status === 0
+			? [...decoded.stdout.matchAll(/<string>([0-9A-Fa-f-]{20,})<\/string>/g)].map(match => match[1]!.toUpperCase())
+			: [],
+	);
+	const watch = devices.find(
+		device => device.physicalWatch && device.udid && provisioned.has(device.udid.toUpperCase()),
+	);
+	if (watch) return `${watchApp} is signed for ${watch.name}; install it from the iPhone's Watch app > Available Apps.`;
+	return chalk.yellow(
+		[
+			`${watchApp} is not signed for any watch Xcode knows, so no watch can install it.`,
+			"Pair the watch once (iPhone on USB or Wi-Fi, Developer Mode on in the watch's Settings > Privacy & Security,",
+			"then Xcode > Window > Devices and Simulators), rerun, then install it from the iPhone's Watch app > Available Apps.",
+			'Or use the TestFlight build, which installs on any watch.',
+		].join('\n' + ' '.repeat(LABEL_WIDTH + 1)),
+	);
 }
 
 function gitRoot(dir: string): string | undefined {
-  const result = run('git', ['-C', dir, 'rev-parse', '--show-toplevel']);
-  return result.status === 0 ? result.stdout.trim() : undefined;
+	const result = run('git', ['-C', dir, 'rev-parse', '--show-toplevel']);
+	return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 function fastForward(repoRoot: string): string {
-  const head = () => run('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD']).stdout.trim();
-  const before = head();
-  const result = run('git', ['-C', repoRoot, 'pull', '--ff-only']);
-  if (result.status !== 0) {
-    throw new Error(`git pull --ff-only failed in ${tilde(repoRoot)}. Resolve it, or pass --no-pull.\n${result.stderr.trim()}`);
-  }
-  const after = head();
-  if (before === after) return 'up to date';
-  const count = Number(run('git', ['-C', repoRoot, 'rev-list', '--count', `${before}..${after}`]).stdout.trim());
-  return `${count} new commit${count === 1 ? '' : 's'} (${before}..${after})`;
+	const head = () => run('git', ['-C', repoRoot, 'rev-parse', '--short', 'HEAD']).stdout.trim();
+	const before = head();
+	const result = run('git', ['-C', repoRoot, 'pull', '--ff-only']);
+	if (result.status !== 0) {
+		throw new Error(
+			`git pull --ff-only failed in ${tilde(repoRoot)}. Resolve it, or pass --no-pull.\n${result.stderr.trim()}`,
+		);
+	}
+	const after = head();
+	if (before === after) return 'up to date';
+	const count = Number(run('git', ['-C', repoRoot, 'rev-list', '--count', `${before}..${after}`]).stdout.trim());
+	return `${count} new commit${count === 1 ? '' : 's'} (${before}..${after})`;
 }
 
 function findProject(dir: string, scheme?: string): XcodeProject {
-  const candidates = (base: string) => readdirSync(base, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /\.(xcworkspace|xcodeproj)$/.test(entry.name))
-    .map((entry) => path.join(base, entry.name))
-    .sort((a, b) => Number(b.endsWith('.xcworkspace')) - Number(a.endsWith('.xcworkspace')));
-  let found = candidates(dir);
-  if (!found.length) {
-    found = readdirSync(dir, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.') && !PROJECT_SEARCH_SKIP.has(entry.name))
-      .flatMap((entry) => candidates(path.join(dir, entry.name)));
-  }
-  const projectPath = found[0];
-  if (!projectPath) throw new Error(`No .xcodeproj or .xcworkspace in ${tilde(dir)} or one level down.`);
-  if (new Set(found.map((p) => path.dirname(p))).size > 1) {
-    throw new Error(`Several Xcode projects found; pass the directory of the one you want:\n${found.map((p) => `  ${tilde(p)}`).join('\n')}`);
-  }
+	const candidates = (base: string) =>
+		readdirSync(base, { withFileTypes: true })
+			.filter(entry => entry.isDirectory() && /\.(xcworkspace|xcodeproj)$/.test(entry.name))
+			.map(entry => path.join(base, entry.name))
+			.sort((a, b) => Number(b.endsWith('.xcworkspace')) - Number(a.endsWith('.xcworkspace')));
+	let found = candidates(dir);
+	if (!found.length) {
+		found = readdirSync(dir, { withFileTypes: true })
+			.filter(entry => entry.isDirectory() && !entry.name.startsWith('.') && !PROJECT_SEARCH_SKIP.has(entry.name))
+			.flatMap(entry => candidates(path.join(dir, entry.name)));
+	}
+	const projectPath = found[0];
+	if (!projectPath) throw new Error(`No .xcodeproj or .xcworkspace in ${tilde(dir)} or one level down.`);
+	if (new Set(found.map(p => path.dirname(p))).size > 1) {
+		throw new Error(
+			`Several Xcode projects found; pass the directory of the one you want:\n${found.map(p => `  ${tilde(p)}`).join('\n')}`,
+		);
+	}
 
-  const flag = projectPath.endsWith('.xcworkspace') ? '-workspace' : '-project';
-  if (scheme) return { flag, path: projectPath, scheme };
-  const listing = JSON.parse(runOrThrow('xcodebuild', ['-list', '-json', flag, projectPath], { error: `xcodebuild -list failed for ${projectPath}` }));
-  const info = listing.project ?? listing.workspace;
-  const schemes: string[] = info?.schemes ?? [];
-  const projectName = path.basename(projectPath).replace(/\.(xcworkspace|xcodeproj)$/, '');
-  const picked = schemes.find((s) => s === (info?.name ?? projectName)) ?? (schemes.length === 1 ? schemes[0] : undefined);
-  if (!picked) throw new Error(`Can't pick a scheme for ${tilde(projectPath)}; pass --scheme. Available: ${schemes.join(', ') || 'none'}.`);
-  return { flag, path: projectPath, scheme: picked };
+	const flag = projectPath.endsWith('.xcworkspace') ? '-workspace' : '-project';
+	if (scheme) return { flag, path: projectPath, scheme };
+	const listing = JSON.parse(
+		runOrThrow('xcodebuild', ['-list', '-json', flag, projectPath], {
+			error: `xcodebuild -list failed for ${projectPath}`,
+		}),
+	);
+	const info = listing.project ?? listing.workspace;
+	const schemes: string[] = info?.schemes ?? [];
+	const projectName = path.basename(projectPath).replace(/\.(xcworkspace|xcodeproj)$/, '');
+	const picked =
+		schemes.find(s => s === (info?.name ?? projectName)) ?? (schemes.length === 1 ? schemes[0] : undefined);
+	if (!picked)
+		throw new Error(
+			`Can't pick a scheme for ${tilde(projectPath)}; pass --scheme. Available: ${schemes.join(', ') || 'none'}.`,
+		);
+	return { flag, path: projectPath, scheme: picked };
 }
 
 function findBuiltApp(productsDir: string, scheme: string): string {
-  const apps = existsSync(productsDir) ? readdirSync(productsDir).filter((entry) => entry.endsWith('.app')) : [];
-  const app = apps.length === 1 ? apps[0] : apps.find((entry) => entry === `${scheme}.app`);
-  if (!app) throw new Error(`No built app in ${tilde(productsDir)} (found: ${apps.join(', ') || 'none'}).`);
-  return path.join(productsDir, app);
+	const apps = existsSync(productsDir) ? readdirSync(productsDir).filter(entry => entry.endsWith('.app')) : [];
+	const app = apps.length === 1 ? apps[0] : apps.find(entry => entry === `${scheme}.app`);
+	if (!app) throw new Error(`No built app in ${tilde(productsDir)} (found: ${apps.join(', ') || 'none'}).`);
+	return path.join(productsDir, app);
 }
 
 function listDevices(): Device[] {
-  const output = path.join(BUILD_ROOT, 'devices.json');
-  const log = path.join(BUILD_ROOT, 'device-check.log');
-  const list = runLogged('xcrun', ['devicectl', 'list', 'devices', '--timeout', '20', '--json-output', output], log);
-  if (!list.ok) deviceFailure('Xcode could not list devices', log, list.log);
+	const output = path.join(BUILD_ROOT, 'devices.json');
+	const log = path.join(BUILD_ROOT, 'device-check.log');
+	const list = runLogged('xcrun', ['devicectl', 'list', 'devices', '--timeout', '20', '--json-output', output], log);
+	if (!list.ok) deviceFailure('Xcode could not list devices', log, list.log);
 
-  const devices: Device[] = JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
-    const props = raw.properties ?? {};
-    const hardware = props.hardware ?? raw.hardwareProperties ?? {};
-    const connection = props.connection ?? raw.connectionProperties ?? {};
-    const deviceProps = raw.deviceProperties ?? props;
-    const mode = props.state?.developerModeStatus ?? raw.deviceProperties?.developerModeStatus;
-    return {
-      identifier: raw.identifier,
-      name: deviceProps.name ?? raw.identifier,
-      udid: hardware.udid,
-      model: hardware.marketingName ?? hardware.productType,
-      os: deviceProps.osVersionNumber && `${hardware.platform ?? ''} ${deviceProps.osVersionNumber}`.trim(),
-      // Real devices Xcode has not fully probed report reality as null, so only "simulated" is trusted here.
-      simulated: hardware.reality === 'simulated',
-      physicalIOS: hardware.reality !== 'simulated' && hardware.platform === 'iOS',
-      physicalWatch: hardware.reality !== 'simulated' && hardware.platform === 'watchOS',
-      iPhone: hardware.deviceType === 'iPhone',
-      paired: connection.pairingState === 'paired',
-      booted: deviceProps.bootState === 'booted',
-      transport: connection.transportType,
-      developerModeDisabled: mode === 'disabled',
-    };
-  });
-  return devices.sort((a, b) => Number(a.simulated) - Number(b.simulated));
+	const devices: Device[] = JSON.parse(readFileSync(output, 'utf8')).result.devices.map((raw: any): Device => {
+		const props = raw.properties ?? {};
+		const hardware = props.hardware ?? raw.hardwareProperties ?? {};
+		const connection = props.connection ?? raw.connectionProperties ?? {};
+		const deviceProps = raw.deviceProperties ?? props;
+		const mode = props.state?.developerModeStatus ?? raw.deviceProperties?.developerModeStatus;
+		return {
+			identifier: raw.identifier,
+			name: deviceProps.name ?? raw.identifier,
+			udid: hardware.udid,
+			model: hardware.marketingName ?? hardware.productType,
+			os: deviceProps.osVersionNumber && `${hardware.platform ?? ''} ${deviceProps.osVersionNumber}`.trim(),
+			// Real devices Xcode has not fully probed report reality as null, so only "simulated" is trusted here.
+			simulated: hardware.reality === 'simulated',
+			physicalIOS: hardware.reality !== 'simulated' && hardware.platform === 'iOS',
+			physicalWatch: hardware.reality !== 'simulated' && hardware.platform === 'watchOS',
+			iPhone: hardware.deviceType === 'iPhone',
+			paired: connection.pairingState === 'paired',
+			booted: deviceProps.bootState === 'booted',
+			transport: connection.transportType,
+			developerModeDisabled: mode === 'disabled',
+		};
+	});
+	return devices.sort((a, b) => Number(a.simulated) - Number(b.simulated));
 }
 
 function printDevices(devices: Device[]) {
-  const transports: Record<string, string> = { wired: 'USB', localNetwork: 'Wi-Fi' };
-  const rows = devices.map((d, i) => ({
-    device: d,
-    cells: [
-      String(i + 1),
-      d.name,
-      d.model ?? '',
-      d.os ?? '',
-      d.simulated
-        ? (d.booted ? 'booted' : 'shutdown')
-        : [d.transport && (transports[d.transport] ?? d.transport), !d.paired && 'unpaired', d.developerModeDisabled && 'dev mode off'].filter(Boolean).join(', '),
-      d.udid ?? d.identifier,
-    ],
-  }));
-  const widths = rows[0]?.cells.map((_, i) => Math.max(...rows.map((r) => r.cells[i]!.length))) ?? [];
-  const groups = [
-    { title: 'Real', rows: rows.filter((r) => !r.device.simulated) },
-    { title: 'Simulators', rows: rows.filter((r) => r.device.simulated) },
-  ];
-  for (const group of groups) {
-    header(group.title, group.rows.length ? undefined : 'none');
-    for (const { cells } of group.rows) {
-      const [index, name, ...rest] = cells.map((cell, i) => (i === 0 ? cell.padStart(widths[i]!) : i === cells.length - 1 ? cell : cell.padEnd(widths[i]!)));
-      console.log(`  ${chalk.cyan(index)}  ${name}  ${chalk.dim(rest.join('  '))}`);
-    }
-  }
+	const transports: Record<string, string> = { wired: 'USB', localNetwork: 'Wi-Fi' };
+	const rows = devices.map((d, i) => ({
+		device: d,
+		cells: [
+			String(i + 1),
+			d.name,
+			d.model ?? '',
+			d.os ?? '',
+			d.simulated
+				? d.booted
+					? 'booted'
+					: 'shutdown'
+				: [
+						d.transport && (transports[d.transport] ?? d.transport),
+						!d.paired && 'unpaired',
+						d.developerModeDisabled && 'dev mode off',
+					]
+						.filter(Boolean)
+						.join(', '),
+			d.udid ?? d.identifier,
+		],
+	}));
+	const widths = rows[0]?.cells.map((_, i) => Math.max(...rows.map(r => r.cells[i]!.length))) ?? [];
+	const groups = [
+		{ title: 'Real', rows: rows.filter(r => !r.device.simulated) },
+		{ title: 'Simulators', rows: rows.filter(r => r.device.simulated) },
+	];
+	for (const group of groups) {
+		header(group.title, group.rows.length ? undefined : 'none');
+		for (const { cells } of group.rows) {
+			const [index, name, ...rest] = cells.map((cell, i) =>
+				i === 0 ? cell.padStart(widths[i]!) : i === cells.length - 1 ? cell : cell.padEnd(widths[i]!),
+			);
+			console.log(`  ${chalk.cyan(index)}  ${name}  ${chalk.dim(rest.join('  '))}`);
+		}
+	}
 }
 
 function selectDevice(requested?: string): Device {
-  const devices = listDevices();
-  let device: Device | undefined;
-  if (requested) {
-    // Typed names usually have a straight apostrophe where devices use a curly one ("Stefan’s iPad").
-    const normalize = (name: string) => name.replaceAll('’', "'").toLowerCase();
-    const byName = devices.filter((d) => normalize(d.name) === normalize(requested));
-    if (byName.length > 1) {
-      throw new Error(`Several devices are named ${requested}; pick one by UDID:\n${byName.map((d) => `  ${d.udid ?? d.identifier}  ${d.model ?? ''}`).join('\n')}`);
-    }
-    device = /^\d+$/.test(requested)
-      ? devices[Number(requested) - 1]
-      : devices.find((d) => requested === d.identifier || requested === d.udid) ?? byName[0];
-    if (!device) throw new Error(`No device ${requested}. Connect it by USB and unlock it; list them with iphone-deploy devices.`);
-    if (!device.physicalIOS) throw new Error(`${device.name} is not a physical iOS device.`);
-  } else {
-    const phones = devices.filter((d) => d.physicalIOS && d.iPhone && d.paired);
-    if (phones.length !== 1) {
-      const ids = phones.map((d) => d.udid ?? d.identifier);
-      const width = Math.max(0, ...ids.map((id) => id.length));
-      throw new Error(phones.length
-        ? `Several paired iPhones; pick one with --device:\n${phones.map((d, i) => `  ${ids[i]!.padEnd(width)}  ${d.name}`).join('\n')}`
-        : 'No paired iPhone. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.');
-    }
-    device = phones[0]!;
-  }
-  if (!device.paired) throw new Error(`${device.name} is not paired. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.`);
-  if (device.developerModeDisabled) throw new Error('Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the iPhone, and retry.');
-  return device;
+	const devices = listDevices();
+	let device: Device | undefined;
+	if (requested) {
+		// Typed names usually have a straight apostrophe where devices use a curly one ("Stefan’s iPad").
+		const normalize = (name: string) => name.replaceAll('’', "'").toLowerCase();
+		const byName = devices.filter(d => normalize(d.name) === normalize(requested));
+		if (byName.length > 1) {
+			throw new Error(
+				`Several devices are named ${requested}; pick one by UDID:\n${byName.map(d => `  ${d.udid ?? d.identifier}  ${d.model ?? ''}`).join('\n')}`,
+			);
+		}
+		device = /^\d+$/.test(requested)
+			? devices[Number(requested) - 1]
+			: (devices.find(d => requested === d.identifier || requested === d.udid) ?? byName[0]);
+		if (!device)
+			throw new Error(`No device ${requested}. Connect it by USB and unlock it; list them with iphone-deploy devices.`);
+		if (!device.physicalIOS) throw new Error(`${device.name} is not a physical iOS device.`);
+	} else {
+		const phones = devices.filter(d => d.physicalIOS && d.iPhone && d.paired);
+		if (phones.length !== 1) {
+			const ids = phones.map(d => d.udid ?? d.identifier);
+			const width = Math.max(0, ...ids.map(id => id.length));
+			throw new Error(
+				phones.length
+					? `Several paired iPhones; pick one with --device:\n${phones.map((d, i) => `  ${ids[i]!.padEnd(width)}  ${d.name}`).join('\n')}`
+					: 'No paired iPhone. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.',
+			);
+		}
+		device = phones[0]!;
+	}
+	if (!device.paired)
+		throw new Error(`${device.name} is not paired. Connect it by USB, unlock it, tap Trust, and pair it in Xcode.`);
+	if (device.developerModeDisabled)
+		throw new Error(
+			'Developer Mode is off. Turn it on in Settings > Privacy & Security, restart the iPhone, and retry.',
+		);
+	return device;
 }
 
 function checkPhone(device: Device) {
-  const output = path.join(BUILD_ROOT, 'lock-state.json');
-  const log = path.join(BUILD_ROOT, 'device-check.log');
-  // A disconnected tunnel in the device list can reconnect on demand, so probe the phone directly.
-  // Over Wi-Fi the first call after the phone sleeps or roams often hits a dead tunnel
-  // ("Connection reset by peer") while the next call builds a fresh one, so retry before blaming USB.
-  const probeLockState = () => runLogged('xcrun', ['devicectl', 'device', 'info', 'lockState', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
-  let probe = probeLockState();
-  for (let attempt = 1; !probe.ok && attempt < PROBE_ATTEMPTS; attempt++) {
-    Bun.sleepSync(PROBE_RETRY_MS);
-    probe = probeLockState();
-  }
-  if (!probe.ok) deviceFailure(`${device.name} is paired but unreachable`, log, probe.log);
-  const state = JSON.parse(readFileSync(output, 'utf8')).result;
-  if (!('passcodeRequired' in state) && !('unlockedSinceBoot' in state)) {
-    throw new Error('Xcode reported an unknown lock state. Unlock the iPhone and check it in Xcode.');
-  }
-  if (state.passcodeRequired === true || state.unlockedSinceBoot === false) {
-    throw new Error('The iPhone is locked. Unlock it, keep it awake, and retry.');
-  }
+	const output = path.join(BUILD_ROOT, 'lock-state.json');
+	const log = path.join(BUILD_ROOT, 'device-check.log');
+	// A disconnected tunnel in the device list can reconnect on demand, so probe the phone directly.
+	// Over Wi-Fi the first call after the phone sleeps or roams often hits a dead tunnel
+	// ("Connection reset by peer") while the next call builds a fresh one, so retry before blaming USB.
+	const probeLockState = () =>
+		runLogged(
+			'xcrun',
+			[
+				'devicectl',
+				'device',
+				'info',
+				'lockState',
+				'--device',
+				device.identifier,
+				'--timeout',
+				'20',
+				'--json-output',
+				output,
+			],
+			log,
+		);
+	let probe = probeLockState();
+	for (let attempt = 1; !probe.ok && attempt < PROBE_ATTEMPTS; attempt++) {
+		Bun.sleepSync(PROBE_RETRY_MS);
+		probe = probeLockState();
+	}
+	if (!probe.ok) deviceFailure(`${device.name} is paired but unreachable`, log, probe.log);
+	const state = JSON.parse(readFileSync(output, 'utf8')).result;
+	if (!('passcodeRequired' in state) && !('unlockedSinceBoot' in state)) {
+		throw new Error('Xcode reported an unknown lock state. Unlock the iPhone and check it in Xcode.');
+	}
+	if (state.passcodeRequired === true || state.unlockedSinceBoot === false) {
+		throw new Error('The iPhone is locked. Unlock it, keep it awake, and retry.');
+	}
 }
 
 // The device list leaves developerModeStatus null for devices Xcode has not probed in detail.
 function checkDeveloperMode(device: Device) {
-  const output = path.join(BUILD_ROOT, 'device-details.json');
-  const log = path.join(BUILD_ROOT, 'device-check.log');
-  const details = runLogged('xcrun', ['devicectl', 'device', 'info', 'details', '--device', device.identifier, '--timeout', '20', '--json-output', output], log);
-  if (!details.ok) deviceFailure(`${device.name} is paired but unreachable`, log, details.log);
-  if (JSON.parse(readFileSync(output, 'utf8')).result.deviceProperties?.developerModeStatus === 'disabled') {
-    throw new Error(`Developer Mode is off on ${device.name}. Turn it on in Settings > Privacy & Security, restart the device, and retry.`);
-  }
+	const output = path.join(BUILD_ROOT, 'device-details.json');
+	const log = path.join(BUILD_ROOT, 'device-check.log');
+	const details = runLogged(
+		'xcrun',
+		[
+			'devicectl',
+			'device',
+			'info',
+			'details',
+			'--device',
+			device.identifier,
+			'--timeout',
+			'20',
+			'--json-output',
+			output,
+		],
+		log,
+	);
+	if (!details.ok) deviceFailure(`${device.name} is paired but unreachable`, log, details.log);
+	if (JSON.parse(readFileSync(output, 'utf8')).result.deviceProperties?.developerModeStatus === 'disabled') {
+		throw new Error(
+			`Developer Mode is off on ${device.name}. Turn it on in Settings > Privacy & Security, restart the device, and retry.`,
+		);
+	}
 }
 
 function deviceFailure(stage: string, logPath: string, log: string): never {
-  const hint = /locked|passcode|unlock/i.test(log)
-    ? 'Unlock the iPhone, keep it awake, and retry.'
-    : /developer mode/i.test(log)
-      ? 'Turn on Developer Mode in Settings > Privacy & Security, restart the iPhone, and retry.'
-      : /provision|signature|signing|certificate|integrity/i.test(log)
-        ? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
-        : /space|storage/i.test(log)
-          ? 'Free up storage under Settings > General > iPhone Storage.'
-          : 'Connect the iPhone by USB, unlock it, and tap Trust; it must show up in Xcode > Devices. Being on the same tailnet is not enough.';
-  throw new Error(`${stage}.\nLog: ${tilde(logPath)}\n${hint}`);
+	const hint = /locked|passcode|unlock/i.test(log)
+		? 'Unlock the iPhone, keep it awake, and retry.'
+		: /developer mode/i.test(log)
+			? 'Turn on Developer Mode in Settings > Privacy & Security, restart the iPhone, and retry.'
+			: /provision|signature|signing|certificate|integrity/i.test(log)
+				? 'Check signing in Xcode: Signing & Capabilities, with your team and automatic signing.'
+				: /space|storage/i.test(log)
+					? 'Free up storage under Settings > General > iPhone Storage.'
+					: 'Connect the iPhone by USB, unlock it, and tap Trust; it must show up in Xcode > Devices. Being on the same tailnet is not enough.';
+	throw new Error(`${stage}.\nLog: ${tilde(logPath)}\n${hint}`);
 }
 
 function run(command: string, args: string[], cwd?: string) {
-  const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
-  return { status: result.error ? 1 : result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? String(result.error ?? '') };
+	const result = spawnSync(command, args, { cwd, encoding: 'utf8' });
+	return {
+		status: result.error ? 1 : result.status,
+		stdout: result.stdout ?? '',
+		stderr: result.stderr ?? String(result.error ?? ''),
+	};
 }
 
 function runOrThrow(command: string, args: string[], options: { cwd?: string; error: string }): string {
-  const result = run(command, args, options.cwd);
-  if (result.status !== 0) throw new Error(`${options.error}\n${result.stderr.trim()}`);
-  return result.stdout;
+	const result = run(command, args, options.cwd);
+	if (result.status !== 0) throw new Error(`${options.error}\n${result.stderr.trim()}`);
+	return result.stdout;
 }
 
 function runLogged(command: string, args: string[], logPath: string) {
-  const fd = openSync(logPath, 'w');
-  const result = spawnSync(command, args, { stdio: ['ignore', fd, fd] });
-  closeSync(fd);
-  return { ok: !result.error && result.status === 0, log: readFileSync(logPath, 'utf8') };
+	const fd = openSync(logPath, 'w');
+	const result = spawnSync(command, args, { stdio: ['ignore', fd, fd] });
+	closeSync(fd);
+	return { ok: !result.error && result.status === 0, log: readFileSync(logPath, 'utf8') };
 }
 
 function tilde(file: string): string {
-  return file.startsWith(os.homedir()) ? `~${file.slice(os.homedir().length)}` : file;
+	return file.startsWith(os.homedir()) ? `~${file.slice(os.homedir().length)}` : file;
 }
 
 function header(title: string, detail?: string) {
-  console.log(`\n${chalk.bold(title)}${detail ? chalk.dim(` ${detail}`) : ''}`);
+	console.log(`\n${chalk.bold(title)}${detail ? chalk.dim(` ${detail}`) : ''}`);
 }
 
 function labelled(label: string, detail: string): string {
-  return `  ${chalk.cyan(label.padEnd(LABEL_WIDTH))}${detail}`;
+	return `  ${chalk.cyan(label.padEnd(LABEL_WIDTH))}${detail}`;
 }
 
 function line(label: string, detail: string) {
-  console.log(labelled(label, detail));
+	console.log(labelled(label, detail));
 }
 
 function elapsed(since: number): string {
-  const seconds = (Date.now() - since) / 1000;
-  if (seconds < 10) return `${seconds.toFixed(1)}s`;
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  return `${Math.floor(seconds / 60)}m${String(Math.round(seconds % 60)).padStart(2, '0')}s`;
+	const seconds = (Date.now() - since) / 1000;
+	if (seconds < 10) return `${seconds.toFixed(1)}s`;
+	if (seconds < 60) return `${Math.round(seconds)}s`;
+	return `${Math.floor(seconds / 60)}m${String(Math.round(seconds % 60)).padStart(2, '0')}s`;
 }
 
 // Prints the step up front so long builds show what is running, then appends the outcome
 // on the same line; work must not log. A `{ ok: false }` result counts as a failure.
 function task<T>(label: string, detail: string, work: () => T, summarize?: (result: T) => string): T {
-  process.stdout.write(`${labelled(label, detail)}  `);
-  const started = Date.now();
-  const finish = (ok: boolean, note?: string) => {
-    const mark = ok ? chalk.green('✓') : chalk.red('✗');
-    process.stdout.write(`${mark}${note ? ` ${note}` : ''} ${chalk.dim(elapsed(started))}\n`);
-  };
-  try {
-    const result = work();
-    const ok = (result as { ok?: boolean } | undefined)?.ok !== false;
-    finish(ok, ok && summarize ? summarize(result) : undefined);
-    return result;
-  } catch (error) {
-    finish(false);
-    throw error;
-  }
+	process.stdout.write(`${labelled(label, detail)}  `);
+	const started = Date.now();
+	const finish = (ok: boolean, note?: string) => {
+		const mark = ok ? chalk.green('✓') : chalk.red('✗');
+		process.stdout.write(`${mark}${note ? ` ${note}` : ''} ${chalk.dim(elapsed(started))}\n`);
+	};
+	try {
+		const result = work();
+		const ok = (result as { ok?: boolean } | undefined)?.ok !== false;
+		finish(ok, ok && summarize ? summarize(result) : undefined);
+		return result;
+	} catch (error) {
+		finish(false);
+		throw error;
+	}
 }

@@ -2,7 +2,7 @@ pre-commit:
   parallel: true
   commands:
     oxlint:
-      glob: "*.{js,ts,jsx,tsx}"
+      glob: '*.{js,ts,jsx,tsx}'
       run: bunx oxlint --fix {staged_files}
       stage_fixed: true
     typecheck:
