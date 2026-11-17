@@ -1,10 +1,10 @@
 import { afterEach, expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { cleanWorktreeCache, gitEnvironment, runningT3Worktree } from './worktreeCache';
+import { git } from './shell';
+import { cleanWorktreeCache, runningT3Worktree } from './worktreeCache';
 
 const temporary: string[] = [];
 afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true }); });
@@ -14,10 +14,6 @@ function fixture() {
   temporary.push(dir);
   const main = join(dir, 'main');
   mkdirSync(main);
-  function git(cwd: string, ...args: string[]) {
-    const r = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnvironment() });
-    if (r.status !== 0) throw new Error(r.stderr);
-  }
   git(main, 'init', '-q');
   writeFileSync(join(main, '.gitignore'), 'app-ios/DerivedData/\nDerivedData/\n');
   writeFileSync(join(main, 'source.txt'), 'source');
@@ -28,13 +24,13 @@ function fixture() {
   const cache = join(worktree, 'app-ios/DerivedData');
   mkdirSync(cache, { recursive: true });
   writeFileSync(join(cache, 'build.dat'), 'rebuildable');
-  return { dir, main, worktree, cache, git };
+  return { dir, main, worktree, cache };
 }
 
 const idle = { isRunning: () => false, openPaths: () => [] };
 
-test('cleans ignored output on a detached worktree without touching source, env or database files', () => {
-  const { worktree, cache, git } = fixture();
+test('cache cleanup removes ignored build output on a detached worktree without touching source, env or database files', () => {
+  const { worktree, cache } = fixture();
   git(worktree, 'checkout', '--detach', '-q');
   writeFileSync(join(worktree, 'source.txt'), 'uncommitted source');
   writeFileSync(join(worktree, '.env.local'), 'private');
@@ -44,7 +40,7 @@ test('cleans ignored output on a detached worktree without touching source, env 
   for (const file of ['source.txt', '.env.local', 'app.sqlite', '.git']) expect(existsSync(join(worktree, file))).toBe(true);
 });
 
-test('dry run and main checkout protection preserve output', () => {
+test('a dry run or the main checkout keeps build output', () => {
   const { main, worktree, cache } = fixture();
   cleanWorktreeCache(worktree, { ...idle, dryRun: true });
   expect(existsSync(cache)).toBe(true);
@@ -54,7 +50,7 @@ test('dry run and main checkout protection preserve output', () => {
 });
 
 test('tracked files, symlinks, active runs and open build files block deletion', () => {
-  const { dir, worktree, cache, git } = fixture();
+  const { dir, worktree, cache } = fixture();
   cleanWorktreeCache(worktree, { ...idle, isRunning: () => true });
   expect(existsSync(cache)).toBe(true);
   cleanWorktreeCache(worktree, { ...idle, openPaths: () => [join(cache, 'build.dat')] });

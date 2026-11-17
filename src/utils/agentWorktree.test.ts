@@ -1,19 +1,13 @@
 import { afterEach, expect, test } from 'bun:test';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { check, classify, setup, type Entry } from './agentWorktree';
-import { gitEnvironment } from './worktreeCache';
+import { git } from './shell';
 
 const temporary: string[] = [];
 afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true }); });
-
-function git(cwd: string, ...args: string[]) {
-  const result = spawnSync('git', ['-C', cwd, ...args], { encoding: 'utf8', env: gitEnvironment() });
-  if (result.status !== 0) throw new Error(result.stderr);
-}
 
 function repoWithWorktree(env: string) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'agent-worktree-test-')));
