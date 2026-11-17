@@ -12,6 +12,13 @@ bun src/setup.ts
 
 Each wrapper calls `src/run.ts`, which loads this repo's `.env` and `.env.local` before forwarding args, stdin, stdout, stderr, and the caller's current working directory to the real script.
 
+## Checks
+
+- `bun run lint` fixes lint findings (oxlint, `.oxlintrc.json`) and formats (oxfmt, `.oxfmtrc.json`); `bun run lint:ci` only checks. `bun run typecheck` runs `bun check` over the repo, including `cloudflare-workers/email-save`, whose dependencies `bun run worktree:setup` installs. `bun run test` runs the `bun test` suite.
+- The pre-commit hook (`lefthook.yml`) first runs `agent-t3-worktree check --heal`, then in parallel: oxlint `--fix` and oxfmt on the staged files (restaged), the type check, and the whole suite. The type check and tests run only when a staged file matches their `glob`. The test job unsets git's hook variables first, so a test that runs git in a temp directory never acts on this repository. It takes about 2 seconds.
+- CI (`.github/workflows/ci.yml`) runs `lint:ci`, `typecheck` and `test` as parallel jobs on every pull request and push to `master`. `deploy-email-save.yml` deploys the email Worker by hand.
+- `.oxlintrc.json` names, per rule, the files where that rule's findings are deliberate (system variables such as `HOME` read from `process.env`, sequential awaits in CLIs). A new file gets every rule.
+
 ## Scripts
 
 - `airbnb` (`airbnb.ts`): read reservations and wishlists as Markdown. Pass a confirmation code or wishlist ID for details; use `--refresh-session` to save credentials from signed-in Chrome via Browser Gate.
