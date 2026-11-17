@@ -5,6 +5,7 @@ import { addDays, format, isValid, parseISO } from 'date-fns';
 
 import env from './env';
 import { CONNECT_TOKEN_FILE, ConnectApi, PERSONAL_KEY_PAGE, PersonalApi, SWAGGER_PAGE, connectLoginEmail, loginToConnect, type Params } from './garminApi';
+import { estimateStrain, type HeartRatePoint } from './garminStrain';
 import { formatDurationMilliseconds } from './utils/date';
 import { OUTPUT_FORMATS, formatDisplayNumber, parseOutputFormat, renderCsvRecords, renderTableRecords, type CsvValue } from './utils/output';
 
@@ -25,6 +26,7 @@ const TABLE_COLUMNS = [
   'RHR',
   'readiness',
   'bb_wake',
+  'strain',
   'stress',
   'steps',
   'activities',
@@ -82,6 +84,7 @@ interface DailySleep {
   calendarDate: string;
   sleepTimeSeconds?: number | null;
   napTimeSeconds?: number | null;
+  sleepStartTimestampGMT?: number | null;
   sleepStartTimestampLocal?: string | number | null;
   sleepEndTimestampLocal?: string | number | null;
   deepSleepSeconds?: number | null;
@@ -249,13 +252,49 @@ async function fetchPersonalDaily(api: PersonalApi, range: Range) {
   const userSummaries = await mapLimited(eachDay(range), PER_DAY_CONCURRENCY, calendarDate =>
     api.get<UserSummary | null>('/usersummary-service/usersummary/daily', { calendarDate }).then(summary => ({ ...summary, calendarDate })),
   );
+  // Strain runs from one sleep onset to the next, like a WHOOP cycle, so it also needs the day after the range.
+  const nextDay = day(addDays(range.end, 1));
+  const hasNextDay = nextDay <= day(new Date());
+  const activities = chunks.flatMap(chunk => chunk.activities);
+  const [heartRateDays, nextSleeps, activityHeartRate] = await Promise.all([
+    mapLimited([...eachDay(range), ...(hasNextDay ? [nextDay] : [])], PER_DAY_CONCURRENCY, date =>
+      api.get<{ heartRateValues?: (number | null)[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', { date }),
+    ),
+    hasNextDay ? api.get<DailySleep[] | null>('/sleep-service/sleep/dailySleepSummariesByDate', { startDate: nextDay, endDate: nextDay }) : null,
+    mapLimited(
+      activities.filter(activity => activity.activityId != null),
+      PER_DAY_CONCURRENCY,
+      activity => fetchActivityHeartRate(api, activity.activityId!),
+    ),
+  ]);
   return {
     summaries: chunks.flatMap(chunk => chunk.summaries),
     sleeps: chunks.flatMap(chunk => chunk.sleeps),
     hrv: chunks.flatMap(chunk => chunk.hrv),
-    activities: chunks.flatMap(chunk => chunk.activities),
+    activities,
     userSummaries,
+    heartRate: heartRateDays.flatMap(dayData =>
+      (dayData?.heartRateValues ?? []).flatMap(([time, bpm]) => (typeof time === 'number' && typeof bpm === 'number' && bpm > 0 ? [{ time, bpm }] : [])),
+    ),
+    nextSleeps: nextSleeps ?? [],
+    activityHeartRate,
   };
+}
+
+async function fetchActivityHeartRate(api: PersonalApi, activityId: number): Promise<HeartRatePoint[]> {
+  const details = await api.get<{
+    metricDescriptors?: { key: string; metricsIndex: number }[] | null;
+    activityDetailMetrics?: { metrics: (number | null)[] }[] | null;
+  } | null>(`/activity-service/activity/${activityId}/details`, { maxChartSize: 100_000 });
+  const index = (key: string) => details?.metricDescriptors?.find(descriptor => descriptor.key === key)?.metricsIndex;
+  const timeIndex = index('directTimestamp');
+  const bpmIndex = index('directHeartRate');
+  if (timeIndex == null || bpmIndex == null) return [];
+  return (details?.activityDetailMetrics ?? []).flatMap(({ metrics }) => {
+    const time = metrics[timeIndex];
+    const bpm = metrics[bpmIndex];
+    return time != null && bpm != null && bpm > 0 ? [{ time, bpm }] : [];
+  });
 }
 
 const HEALTH_STATUS_FIELDS = '{ calendarDate outliersCount metrics { type status value } }';
@@ -380,6 +419,16 @@ function buildRows(personal: PersonalDaily, connect: ConnectDaily | null, range:
       awake_count: sleep.awakeCount ?? null,
       nap_duration: seconds(sleep.napTimeSeconds),
     });
+  }
+
+  const sleepOnsets = new Map(
+    [...personal.sleeps, ...personal.nextSleeps].flatMap(sleep => (sleep.sleepStartTimestampGMT ? [[sleep.calendarDate, sleep.sleepStartTimestampGMT] as const] : [])),
+  );
+  for (const date of rows.keys()) {
+    const nextDate = day(addDays(parseISO(date), 1));
+    const start = sleepOnsets.get(date) ?? parseISO(date).getTime();
+    const end = sleepOnsets.get(nextDate) ?? Math.min(Date.now(), parseISO(nextDate).getTime());
+    merge(date, { strain: estimateStrain(personal.heartRate, personal.activityHeartRate, start, end) });
   }
 
   for (const hrv of personal.hrv) {
@@ -565,7 +614,7 @@ const cli = createScript('garmin')
   )
   .command(
     ['daily', '$0'],
-    'One row per day: sleep, restorative sleep, HRV, resting HR, readiness, Body Battery, stress, steps, and activities',
+    'One row per day: sleep, restorative sleep, HRV, resting HR, readiness, Body Battery, WHOOP-style strain (estimated from heart rate, sleep onset to next sleep onset), stress, steps, and activities',
     cli =>
       cli
         .option('days', { alias: 'd', type: 'number', default: 7, describe: 'Days to include, ending at --end, when --start is not given' })
