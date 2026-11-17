@@ -51,6 +51,7 @@ const FULL_COLUMNS = [
   'hrv_status',
   'readiness_level',
   'acute_load',
+  'load_status',
   'health_status',
   'skin_temp',
   'vo2max',
@@ -141,8 +142,20 @@ interface TrainingReadiness {
   timestamp?: string | null;
   score?: number | null;
   level?: string | null;
-  acuteLoad?: number | null;
   inputContext?: string | null;
+}
+
+interface TrainingStatus {
+  mostRecentTrainingStatus?: {
+    latestTrainingStatusData?: Record<
+      string,
+      {
+        calendarDate?: string | null;
+        primaryTrainingDevice?: boolean | null;
+        acuteTrainingLoadDTO?: { dailyTrainingLoadAcute?: number | null; acwrStatus?: string | null } | null;
+      }
+    > | null;
+  } | null;
 }
 
 interface SleepStats {
@@ -266,7 +279,16 @@ async function fetchConnectDaily(api: ConnectApi, range: Range) {
       };
     }),
   );
+  // Training Readiness entries mostly leave acuteLoad null; the per-day training status always has it.
+  const trainingStatus = await mapLimited(eachDay(range), PER_DAY_CONCURRENCY, date =>
+    api.get<TrainingStatus | null>(`/metrics-service/metrics/trainingstatus/aggregated/${date}`).then(status => {
+      const devices = Object.values(status?.mostRecentTrainingStatus?.latestTrainingStatusData ?? {});
+      const data = devices.find(device => device.primaryTrainingDevice) ?? devices[0];
+      return { date, load: data?.calendarDate === date ? data.acuteTrainingLoadDTO : null };
+    }),
+  );
   return {
+    trainingStatus,
     readiness: chunks.flatMap(chunk => chunk.readiness),
     sleepStats: chunks.flatMap(chunk => chunk.sleepStats),
     maxMetrics: chunks.flatMap(chunk => chunk.maxMetrics),
@@ -406,7 +428,13 @@ function buildRows(personal: PersonalDaily, connect: ConnectDaily | null, range:
       if (!current || entry.inputContext === 'AFTER_WAKEUP_RESET' || current.inputContext !== 'AFTER_WAKEUP_RESET') readinessByDate.set(entry.calendarDate, entry);
     }
     for (const [date, entry] of readinessByDate) {
-      merge(date, { readiness: entry.score ?? null, readiness_level: entry.level && entry.level !== 'NONE' ? entry.level.toLowerCase() : null, acute_load: entry.acuteLoad ?? null });
+      merge(date, { readiness: entry.score ?? null, readiness_level: entry.level && entry.level !== 'NONE' ? entry.level.toLowerCase() : null });
+    }
+    for (const { date, load } of connect.trainingStatus) {
+      merge(date, {
+        acute_load: load?.dailyTrainingLoadAcute ?? null,
+        load_status: load?.acwrStatus && load.acwrStatus !== 'NONE' ? load.acwrStatus.toLowerCase() : null,
+      });
     }
     for (const stat of connect.sleepStats) merge(stat.calendarDate, { skin_temp: stat.values?.skinTempC ?? null });
     for (const metric of connect.maxMetrics) {
@@ -444,13 +472,15 @@ function samples(rows: unknown[][] | null | undefined, valueIndex = 1): Sample[]
 }
 
 async function fetchIntraday(personal: PersonalApi, connect: ConnectApi, date: string) {
-  const [heartRate, hrv, spo2, stress, respiration, sleep] = await Promise.all([
+  const [heartRate, hrv, stress, respiration, sleep] = await Promise.all([
     personal.get<{ heartRateValues?: number[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', { date }),
     personal.get<{ hrvReadings?: { hrvValue: number; readingTimeLocal: string }[] | null } | null>(`/hrv-service/hrv/${date}`),
-    personal.get<{ spO2SingleValues?: number[][] | null } | null>(`/wellness-service/wellness/daily/spo2acclimation/${date}`),
     connect.get<{ stressValuesArray?: number[][] | null; bodyBatteryValuesArray?: unknown[][] | null } | null>(`/wellness-service/wellness/dailyStress/${date}`),
     connect.get<{ respirationValuesArray?: number[][] | null } | null>(`/wellness-service/wellness/daily/respiration/${date}`),
-    connect.get<{ sleepLevels?: { startGMT: string; endGMT: string; activityLevel: number }[] | null } | null>('/sleep-service/sleep/dailySleepData', {
+    connect.get<{
+      sleepLevels?: { startGMT: string; endGMT: string; activityLevel: number }[] | null;
+      wellnessEpochSPO2DataDTOList?: { epochTimestamp: string; spo2Reading?: number | null }[] | null;
+    } | null>('/sleep-service/sleep/dailySleepData', {
       date,
       nonSleepBufferMinutes: 60,
     }),
@@ -463,7 +493,10 @@ async function fetchIntraday(personal: PersonalApi, connect: ConnectApi, date: s
       body_battery: samples(stress?.bodyBatteryValuesArray, 2),
       respiration: samples(respiration?.respirationValuesArray),
       hrv: (hrv?.hrvReadings ?? []).map(reading => ({ time: reading.readingTimeLocal.slice(0, 16), value: reading.hrvValue })),
-      spo2: samples(spo2?.spO2SingleValues),
+      // The CIRQA measures SpO2 only in sleep; the Personal API's spo2acclimation series stays empty.
+      spo2: (sleep?.wellnessEpochSPO2DataDTOList ?? []).flatMap(epoch =>
+        epoch.spo2Reading != null && epoch.spo2Reading > 0 ? [{ time: gmtToLocal(epoch.epochTimestamp), value: epoch.spo2Reading }] : [],
+      ),
     } satisfies Record<string, Sample[]>,
     sleep_stages: (sleep?.sleepLevels ?? []).map(level => ({
       start: gmtToLocal(level.startGMT),
