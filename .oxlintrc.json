@@ -1,0 +1,243 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": [
+		"typescript",
+		"unicorn",
+		"oxc",
+		"import",
+		"promise",
+		"node"
+	],
+	"categories": {
+		"correctness": "error",
+		"suspicious": "warn",
+		"perf": "warn"
+	},
+	"rules": {
+		"no-unused-vars": "warn",
+		"no-console": "off",
+		"unicorn/no-null": "off",
+		"unicorn/prefer-top-level-await": "off",
+		"unicorn/filename-case": "off",
+		"node/no-process-env": "error"
+	},
+	"overrides": [
+		{
+			"files": [
+				"**/env.ts",
+				"scripts/**",
+				".claude/**",
+				"src/anylist.ts",
+				"src/bgstats.ts",
+				"src/convex-manage.ts",
+				"src/cron-bgstats-sync.ts",
+				"src/fork-sync.test.ts",
+				"src/fork-sync.ts",
+				"src/garminApi.ts",
+				"src/git-invite-ai-to-repos.ts",
+				"src/git-worktree.ts",
+				"src/localias-peer.ts",
+				"src/repo-sync.ts",
+				"src/run.ts",
+				"src/setup.ts",
+				"src/testEnvironment.ts",
+				"src/utils/222Rich.ts",
+				"src/utils/createScript.ts",
+				"src/utils/simulators.ts",
+				"src/utils/worktreeCache.ts",
+				"src/voice-memo-parse.ts",
+				"src/whoop.ts",
+				"src/workoutsLocal.ts"
+			],
+			"rules": {
+				"node/no-process-env": "off"
+			}
+		},
+		{
+			"files": [
+				"airbnb.ts",
+				"cloudflare-workers/email-save/src/index.ts",
+				"src/222.ts",
+				"src/anylist.ts",
+				"src/bgstats.ts",
+				"src/clocktracker.ts",
+				"src/convex-manage.ts",
+				"src/cookunity.ts",
+				"src/fork-sync.ts",
+				"src/garmin.ts",
+				"src/localias-peer.ts",
+				"src/macrofactor.ts",
+				"src/procrastimate.ts",
+				"src/repo-sync.ts",
+				"src/tampermonkey/amazon-undelivered.user.js",
+				"src/utils/222Rich.ts",
+				"src/utils/agentWorktree.ts",
+				"src/utils/prShip.test.ts",
+				"src/utils/prShip.ts",
+				"src/utils/simulators.ts",
+				"src/voice-memo-parse.ts",
+				"src/whoop.ts",
+				"src/workouts.ts",
+				"src/x.ts"
+			],
+			"rules": {
+				"no-await-in-loop": "off"
+			}
+		},
+		{
+			"files": [
+				"src/222.ts",
+				"src/agent-simulator.ts",
+				"src/cookunity.ts",
+				"src/email-inbox.ts",
+				"src/fork-sync.ts",
+				"src/garmin.ts",
+				"src/git-commit-ai.ts",
+				"src/iphone-deploy.ts",
+				"src/localias-peer.ts",
+				"src/setup.ts",
+				"src/tampermonkey/amazon-undelivered.user.js",
+				"src/utils/agentWorktree.ts",
+				"src/utils/createScript.ts",
+				"src/utils/simulators.ts",
+				"src/utils/validateDefaults.ts",
+				"src/whoop.ts",
+				"src/workouts.ts"
+			],
+			"rules": {
+				"no-shadow": "off"
+			}
+		},
+		{
+			"files": [
+				"airbnb.ts",
+				"src/anylist.ts",
+				"src/utils/222Rich.ts",
+				"src/utils/prShip.ts"
+			],
+			"rules": {
+				"no-underscore-dangle": "off"
+			}
+		},
+		{
+			"files": [
+				"src/bgstats.ts"
+			],
+			"rules": {
+				"no-unmodified-loop-condition": "off"
+			}
+		},
+		{
+			"files": [
+				"cloudflare-workers/email-save/src/index.ts",
+				"src/git-worktree.ts",
+				"src/google-maps.ts",
+				"src/macrofactor.ts",
+				"src/repo-sync.ts",
+				"src/tampermonkey/amazon-undelivered.user.js",
+				"src/whoop.ts"
+			],
+			"rules": {
+				"oxc/no-map-spread": "off"
+			}
+		},
+		{
+			"files": [
+				"src/bgstats.ts",
+				"src/clocktracker.ts",
+				"src/convex-manage.ts",
+				"src/cron-bgstats-sync.ts",
+				"src/repo-sync.ts",
+				"src/voice-memo-parse.ts",
+				"src/whoop.ts",
+				"src/workouts.ts"
+			],
+			"rules": {
+				"preserve-caught-error": "off"
+			}
+		},
+		{
+			"files": [
+				"src/utils/validateDefaults.ts"
+			],
+			"rules": {
+				"promise/always-return": "off"
+			}
+		},
+		{
+			"files": [
+				"src/fork-sync.ts",
+				"src/google-maps.ts",
+				"src/iphone-deploy.ts",
+				"src/localias-peer.ts",
+				"src/procrastimate.ts",
+				"src/tampermonkey/amazon-undelivered.user.js",
+				"src/utils/createScript.ts",
+				"src/utils/simulators.ts"
+			],
+			"rules": {
+				"unicorn/consistent-function-scoping": "off"
+			}
+		},
+		{
+			"files": [
+				"src/workouts.test.ts"
+			],
+			"rules": {
+				"unicorn/no-array-fill-with-reference-type": "off"
+			}
+		},
+		{
+			"files": [
+				"src/222.ts",
+				"src/anylist.ts",
+				"src/bgstats.ts",
+				"src/clocktracker.ts",
+				"src/convex-manage.ts",
+				"src/cookunity.ts",
+				"src/cron-bgstats-sync.ts",
+				"src/git-invite-ai-to-repos.ts",
+				"src/git-worktree.ts",
+				"src/iphone-deploy.ts",
+				"src/localias-peer.ts",
+				"src/macrofactor.ts",
+				"src/repo-sync.ts",
+				"src/utils/agentWorktree.ts",
+				"src/utils/simulators.ts",
+				"src/voice-memo-parse.ts",
+				"src/whoop.ts",
+				"src/workouts.ts",
+				"src/x.ts"
+			],
+			"rules": {
+				"unicorn/no-array-sort": "off"
+			}
+		},
+		{
+			"files": [
+				"src/tampermonkey/amazon-undelivered.user.js"
+			],
+			"rules": {
+				"unicorn/prefer-add-event-listener": "off"
+			}
+		},
+		{
+			"files": [
+				"cloudflare-workers/email-save/src/index.ts",
+				"src/voice-memo-parse.ts"
+			],
+			"rules": {
+				"unicorn/prefer-set-has": "off"
+			}
+		}
+	],
+	"ignorePatterns": [
+		"node_modules",
+		"dist",
+		"build",
+		"generated",
+		"**/generated",
+		"**/*.generated.ts",
+		"**/*.gen.ts"
+	]
+}

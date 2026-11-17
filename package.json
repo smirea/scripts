@@ -2,8 +2,10 @@
     "name": "scripts",
     "private": true,
     "scripts": {
-        "lint": "oxlint --fix",
-        "test": "bun test",
+        "lint": "oxlint --fix && oxfmt",
+        "lint:ci": "oxlint && oxfmt --check",
+        "typecheck": "bun check",
+        "test": "bun test --pass-with-no-tests",
         "worktree:setup": "bun install --cwd cloudflare-workers/email-save --frozen-lockfile"
     },
     "dependencies": {
@@ -19,6 +21,7 @@
         "kill-port-process": "^4.0.2",
         "lefthook": "^2.2.2",
         "lodash": "^4.18.1",
+        "oxfmt": "^0.79.0",
         "oxlint": "^1.94.0",
         "protobufjs": "^8.7.1",
         "xlsx": "^0.18.5",
@@ -28,5 +31,6 @@
     "devDependencies": {
         "@types/html-to-text": "^9.0.4",
         "@types/yargs": "^17.0.35"
-    }
+    },
+    "packageManager": "bun@1.4.4"
 }
