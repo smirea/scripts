@@ -211,6 +211,11 @@ async function runCli(): Promise<void> {
         describe:
           'Print the WHOOP API responses as JSON keyed by data type (e.g. workout zone durations) instead of daily rows',
       })
+      .option('get', {
+        type: 'string',
+        describe:
+          'Fetch one WHOOP API path (relative to /developer/v2, or a full https://api.prod.whoop.com URL) with the stored token and print its JSON, e.g. --get /cycle?limit=1',
+      })
       .option('auth-code', {
         type: 'string',
         describe:
@@ -297,6 +302,11 @@ async function runCli(): Promise<void> {
           ].join('\n'),
         );
       }
+    }
+
+    if (args.get) {
+      console.log(JSON.stringify(await fetchJson(args.get, accessToken), null, 2));
+      return;
     }
 
     const data: Partial<Record<DataType, unknown>> = {};
