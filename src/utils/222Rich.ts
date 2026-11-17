@@ -26,7 +26,7 @@ export async function printRich(markdown: string, people: RichPerson[][] = []): 
   });
 }
 
-export async function renderRich(markdown: string, people: RichPerson[][], options: RichOptions): Promise<string> {
+async function renderRich(markdown: string, people: RichPerson[][], options: RichOptions): Promise<string> {
   const style = new Chalk({ level: options.color ? 1 : 0 });
   const width = Math.max(10, options.columns - 1);
   const lines: string[] = [];
@@ -96,7 +96,7 @@ async function peopleGrid(people: RichPerson[], options: RichOptions): Promise<s
   return result.join('\n');
 }
 
-export function inlineImage(bytes: Uint8Array, width: number, height: number): string {
+function inlineImage(bytes: Uint8Array, width: number, height: number): string {
   const arguments_ = `inline=1;size=${bytes.length};width=${width};height=${height};preserveAspectRatio=1`;
   const data = Buffer.from(bytes).toString('base64');
   if (data.length < 900_000) return `${ESC}]1337;File=${arguments_}:${data}\x07`;

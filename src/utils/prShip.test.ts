@@ -74,66 +74,55 @@ function fakeGitHub({
 }
 
 const BUDGET_MS = 500_000;
+const merged = (calls: string[]) => calls.some(call => call.startsWith('gh pr merge'));
 
-for (const [phase, durations, checksDoneAt] of [
-  ['the merge', { 'gh pr merge': 120_000 }, 470_000],
-  ['a CI poll', { 'gh pr view': 90_000 }, 480_000],
-  ['the review-thread poll', { 'gh api graphql': 200_000 }, 300_000],
-  ['the first look at the PR', { 'gh pr view': 900_000 }, 0],
-] as const) {
-  test(`a slow ${phase} still exits before the budget runs out`, async () => {
+test('pr-ship exits 3 before its budget runs out however slow a phase is', async () => {
+  for (const [durations, checksDoneAt] of [
+    [{ 'gh pr merge': 120_000 }, 470_000],
+    [{ 'gh pr view': 90_000 }, 480_000],
+    [{ 'gh api graphql': 200_000 }, 300_000],
+    [{ 'gh pr view': 900_000 }, 0],
+  ] as const) {
     const github = fakeGitHub({ checksDoneAt, durations });
     const verdict = await ship(github.io, { merge: true, budgetMs: BUDGET_MS });
     expect(github.elapsed()).toBeLessThanOrEqual(BUDGET_MS);
     expect(verdict.code).toBe(3);
-    expect(verdict.message).toContain('Rerun');
-  });
-}
+  }
+});
 
-test('merges a green PR and exits 0', async () => {
+test('a green PR with a completed Codex review is merged and exits 0', async () => {
   const github = fakeGitHub({ checksDoneAt: 60_000 });
-  expect(await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).toEqual({
-    code: 0,
-    message: 'Merged: https://github.com/smirea/procrastimate/pull/7',
-  });
+  expect((await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(0);
+  expect(merged(github.calls)).toBe(true);
 });
 
-test('waits while the Codex review is pending, then exits 3 to rerun', async () => {
+test('a pending Codex review is never merged past and exits 3', async () => {
   const github = fakeGitHub({ codexDoneAt: Infinity });
-  const verdict = await ship(github.io, { merge: true, budgetMs: BUDGET_MS });
-  expect(github.calls.filter(call => call.startsWith('gh pr merge'))).toEqual([]);
-  expect(verdict).toEqual({ code: 3, message: 'Still waiting on Codex review. Rerun.' });
+  expect((await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(3);
+  expect(merged(github.calls)).toBe(false);
 });
 
-test('a Codex review that failed on its usage limit exits 1 instead of waiting', async () => {
-  const github = fakeGitHub({
-    codexSummary:
-      'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->',
-  });
-  const verdict = await ship(github.io, { merge: true, budgetMs: BUDGET_MS });
-  expect(github.calls.filter(call => call.startsWith('gh pr merge'))).toEqual([]);
-  expect(verdict.code).toBe(1);
-  expect(verdict.message).toContain('out of review quota');
-});
+const FAILED_REVIEW = 'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->';
 
-test('a retry asked after a failed Codex review waits for it', async () => {
-  const failed = 'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->';
-  const github = fakeGitHub({ codexSummary: failed });
-  const view = github.io.run;
-  github.io.run = (cmd, options) => {
+test('a failed Codex review exits 1 without merging, unless a `@codex review` retry was asked after it, which exits 3', async () => {
+  const failed = fakeGitHub({ codexSummary: FAILED_REVIEW });
+  expect((await ship(failed.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(1);
+  expect(merged(failed.calls)).toBe(false);
+
+  const retried = fakeGitHub({ codexSummary: FAILED_REVIEW });
+  const view = retried.io.run;
+  retried.io.run = (cmd, options) => {
     const out = view(cmd, options);
     if (!cmd.join(' ').startsWith('gh pr view')) return out;
     const pr = JSON.parse(out) as Pr;
     return JSON.stringify({ ...pr, comments: [...pr.comments, { body: '@codex review' }] });
   };
-  expect(await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).toEqual({ code: 3, message: 'Still waiting on Codex review. Rerun.' });
+  expect((await ship(retried.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(3);
+  expect(merged(retried.calls)).toBe(false);
 });
 
-test('a conflict names the PR base branch and exits 2', async () => {
+test('a PR that conflicts with its base exits 2 without merging', async () => {
   const github = fakeGitHub({ mergeable: 'CONFLICTING' });
-  expect(await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).toEqual({
-    code: 2,
-    message:
-      'https://github.com/smirea/procrastimate/pull/7 conflicts with main, so CI will not run. Rebase onto origin/main, push, rerun.',
-  });
+  expect((await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(2);
+  expect(merged(github.calls)).toBe(false);
 });

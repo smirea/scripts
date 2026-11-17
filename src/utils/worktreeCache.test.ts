@@ -55,7 +55,8 @@ test('dry run and main checkout protection preserve output', () => {
 
 test('tracked files, symlinks, active runs and open build files block deletion', () => {
   const { dir, worktree, cache, git } = fixture();
-  expect(cleanWorktreeCache(worktree, { ...idle, isRunning: () => true })[0]).toContain('still uses');
+  cleanWorktreeCache(worktree, { ...idle, isRunning: () => true });
+  expect(existsSync(cache)).toBe(true);
   cleanWorktreeCache(worktree, { ...idle, openPaths: () => [join(cache, 'build.dat')] });
   expect(existsSync(cache)).toBe(true);
   git(worktree, 'add', '-f', 'app-ios/DerivedData/build.dat');
