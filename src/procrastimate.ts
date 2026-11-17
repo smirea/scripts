@@ -205,15 +205,10 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
           console.log(out);
           continue;
         }
-        const parts: ArrayBuffer[] = [];
-        for (let size = 0, part = 0; size < bytes; part++) {
-          const chunk = await (await api.call('GET', `/images?id=${id}&size=part${part}`)).arrayBuffer();
-          if (chunk.byteLength === 0) throw new Error(`attachment ${id} ended at ${size} of ${bytes} bytes; rerun to download it again`);
-          parts.push(chunk);
-          size += chunk.byteLength;
-        }
+        const file = await (await api.call('GET', `/images?id=${id}&size=file`)).arrayBuffer();
+        if (file.byteLength !== bytes) throw new Error(`attachment ${id} came back with ${file.byteLength} of ${bytes} bytes; rerun to download it again`);
         const out = path.join(argv.dir, `${argv.task}-${name}`);
-        await Bun.write(out, new Blob(parts));
+        await Bun.write(out, file);
         console.log(out);
       }
     },

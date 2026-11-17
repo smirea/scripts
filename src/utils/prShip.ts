@@ -62,11 +62,12 @@ function checks(pr: Pr) {
 }
 
 // The summary's has_unresolved_findings never clears after the threads resolve, so findings come from the threads.
-function codexRunning(pr: Pr): boolean {
+function codexReview(pr: Pr): 'running' | 'completed' | 'failed' {
   const summary = pr.comments.find(comment => comment.body.includes('codex-review-state:v1'));
   const state = summary?.body.match(/codex-review-state:v1 (\{.*?\}) -->/)?.[1];
-  if (!state) return true;
-  return (JSON.parse(state).code_review as { status: string | null }).status !== 'completed';
+  if (!state) return 'running';
+  const status = (JSON.parse(state).code_review as { status: string | null }).status;
+  return status === 'completed' || status === 'failed' ? status : 'running';
 }
 
 /**
@@ -125,7 +126,12 @@ export async function ship(io: Io, { merge, budgetMs }: { merge: boolean; budget
       const threads = unresolvedThreads(owner, repo, pr.number);
       if (threads.length) exit(1, `Unresolved review threads:\n${threads.join('\n')}\nFix or answer each, resolve the thread, push, rerun.`);
 
-      const waiting = [...(all.length ? [] : ['checks to start']), ...pending.map(check => check.name), ...(codexRunning(pr) ? ['Codex review'] : [])];
+      const review = codexReview(pr);
+      if (review === 'failed') {
+        const reason = pr.comments.findLast(comment => /usage limit/i.test(comment.body)) ? ' Codex is out of review quota.' : '';
+        exit(1, `The Codex review of ${pr.url} failed.${reason} Comment \`@codex review\` on the PR to retry once it can run, then rerun.`);
+      }
+      const waiting = [...(all.length ? [] : ['checks to start']), ...pending.map(check => check.name), ...(review === 'running' ? ['Codex review'] : [])];
       if (!waiting.length && pr.mergeable === 'MERGEABLE') {
         if (!merge) exit(0, `Ready to merge: ${pr.url}`);
         gh(['pr', 'merge', String(pr.number), '--merge']);

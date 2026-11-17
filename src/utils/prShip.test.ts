@@ -11,11 +11,13 @@ const SUMMARY_DONE = '<!-- codex-review-state:v1 {"code_review":{"status":"compl
 function fakeGitHub({
   checksDoneAt = 0,
   codexDoneAt = 0,
+  codexSummary = SUMMARY_DONE,
   durations = {},
   mergeable = 'MERGEABLE',
 }: {
   checksDoneAt?: number;
   codexDoneAt?: number;
+  codexSummary?: string;
   durations?: Record<string, number>;
   mergeable?: string;
 } = {}) {
@@ -36,7 +38,7 @@ function fakeGitHub({
         ? { __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }
         : { __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS' },
     ],
-    comments: elapsed() >= codexDoneAt ? [{ body: SUMMARY_DONE }] : [],
+    comments: elapsed() >= codexDoneAt ? [{ body: codexSummary }] : [],
   });
   const answer = (cmd: string): string => {
     if (cmd === 'git rev-parse HEAD') return HEAD;
@@ -101,6 +103,17 @@ test('waits while the Codex review is pending, then exits 3 to rerun', async () 
   const verdict = await ship(github.io, { merge: true, budgetMs: BUDGET_MS });
   expect(github.calls.filter(call => call.startsWith('gh pr merge'))).toEqual([]);
   expect(verdict).toEqual({ code: 3, message: 'Still waiting on Codex review. Rerun.' });
+});
+
+test('a Codex review that failed on its usage limit exits 1 instead of waiting', async () => {
+  const github = fakeGitHub({
+    codexSummary:
+      'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->',
+  });
+  const verdict = await ship(github.io, { merge: true, budgetMs: BUDGET_MS });
+  expect(github.calls.filter(call => call.startsWith('gh pr merge'))).toEqual([]);
+  expect(verdict.code).toBe(1);
+  expect(verdict.message).toContain('out of review quota');
 });
 
 test('a conflict names the PR base branch and exits 2', async () => {
