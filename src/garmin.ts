@@ -14,7 +14,7 @@ import {
 	loginToConnect,
 	type Params,
 } from './garminApi';
-import { estimateStrain, type HeartRatePoint } from './garminStrain';
+import { averageHeartRate, estimateStrain, strainTimeline, type HeartRatePoint } from './garminStrain';
 import { formatDurationMilliseconds } from './utils/date';
 import {
 	OUTPUT_FORMATS,
@@ -24,6 +24,7 @@ import {
 	renderTableRecords,
 	type CsvValue,
 } from './utils/output';
+import { parseWhoopRange, WhoopAppApi } from './whoopApp';
 
 // The tightest range cap in the Personal API spec (steps and stress); sleep and Body Battery allow 31, daily summaries a year.
 const MAX_RANGE_DAYS = 28;
@@ -292,12 +293,8 @@ async function fetchPersonalDaily(api: PersonalApi, range: Range) {
 	const nextDay = day(addDays(range.end, 1));
 	const hasNextDay = nextDay <= day(new Date());
 	const activities = chunks.flatMap(chunk => chunk.activities);
-	const [heartRateDays, nextSleeps, activityHeartRate] = await Promise.all([
-		mapLimited([...eachDay(range), ...(hasNextDay ? [nextDay] : [])], PER_DAY_CONCURRENCY, date =>
-			api.get<{ heartRateValues?: (number | null)[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', {
-				date,
-			}),
-		),
+	const [heartRate, nextSleeps, activityHeartRate] = await Promise.all([
+		fetchAllDayHeartRate(api, [...eachDay(range), ...(hasNextDay ? [nextDay] : [])]),
 		hasNextDay
 			? api.get<DailySleep[] | null>('/sleep-service/sleep/dailySleepSummariesByDate', {
 					startDate: nextDay,
@@ -316,14 +313,24 @@ async function fetchPersonalDaily(api: PersonalApi, range: Range) {
 		hrv: chunks.flatMap(chunk => chunk.hrv),
 		activities,
 		userSummaries,
-		heartRate: heartRateDays.flatMap(dayData =>
-			(dayData?.heartRateValues ?? []).flatMap(([time, bpm]) =>
-				typeof time === 'number' && typeof bpm === 'number' && bpm > 0 ? [{ time, bpm }] : [],
-			),
-		),
+		heartRate,
 		nextSleeps: nextSleeps ?? [],
 		activityHeartRate,
 	};
+}
+
+/** All-day heart rate: 2-minute averages, local midnight to midnight per date. */
+async function fetchAllDayHeartRate(api: PersonalApi, dates: string[]): Promise<HeartRatePoint[]> {
+	const days = await mapLimited(dates, PER_DAY_CONCURRENCY, date =>
+		api.get<{ heartRateValues?: (number | null)[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', {
+			date,
+		}),
+	);
+	return days.flatMap(dayData =>
+		(dayData?.heartRateValues ?? []).flatMap(([time, bpm]) =>
+			typeof time === 'number' && typeof bpm === 'number' && bpm > 0 ? [{ time, bpm }] : [],
+		),
+	);
 }
 
 async function fetchActivityHeartRate(api: PersonalApi, activityId: number): Promise<HeartRatePoint[]> {
@@ -698,6 +705,106 @@ function parseParams(pairs: string[]): Params {
 	);
 }
 
+const COMPARE_STEP_MS = 5 * 60_000;
+// The shared table renderer rounds numbers >= 10 to integers, which would hide strain's decimal.
+const oneDecimal = (value: CsvValue) => (typeof value === 'number' ? (value + 0).toFixed(1) : (value ?? ''));
+const COMPARE_COLUMNS = [
+	'date',
+	'what',
+	'start',
+	'end',
+	'whoop',
+	'from_whoop_hr',
+	'from_garmin_hr',
+	'garmin_minus_whoop',
+	'whoop_avg_hr',
+	'garmin_avg_hr',
+] as const;
+
+/**
+ * WHOOP's strain next to this model's estimate from WHOOP's own 6-second heart rate and from Garmin's, per WHOOP cycle
+ * (labeled by its start day) and per WHOOP workout. The WHOOP-HR column separates formula error from sensor differences.
+ */
+async function fetchStrainComparison(personal: PersonalApi, whoop: WhoopAppApi, range: Range) {
+	const cycles = (await whoop.cycles(range.start.getTime(), addDays(range.end, 1).getTime()))
+		.map(details => {
+			const window = parseWhoopRange(details.cycle.during);
+			// WHOOP labels a cycle by its first day even when it starts the evening before (days "['2026-11-12','2026-11-13')").
+			const date = details.cycle.days.match(/\d{4}-\d{2}-\d{2}/)?.[0] ?? day(new Date(window.start));
+			return { details, date, start: window.start, end: window.end ?? Date.now() };
+		})
+		.filter(cycle => cycle.date >= day(range.start) && cycle.date <= day(range.end))
+		.toSorted((a, b) => a.start - b.start);
+	if (cycles.length === 0) {
+		throw new Error(
+			`WHOOP has no cycles starting ${day(range.start)}..${day(range.end)}; widen --days or check --start/--end.`,
+		);
+	}
+	const dates = eachDay({ start: new Date(cycles[0]!.start), end: new Date(cycles.at(-1)!.end) });
+	const [allDay, garminActivities, whoopHeartRate] = await Promise.all([
+		fetchAllDayHeartRate(personal, dates),
+		fetchActivities(personal, dates[0]!, dates.at(-1)!).then(activities =>
+			mapLimited(
+				activities.filter(activity => activity.activityId != null),
+				PER_DAY_CONCURRENCY,
+				activity => fetchActivityHeartRate(personal, activity.activityId!),
+			),
+		),
+		mapLimited(cycles, 2, cycle => whoop.heartRate(cycle.start, cycle.end)),
+	]);
+	const whoopStreams = [whoopHeartRate.flat()];
+
+	const rows: Record<(typeof COMPARE_COLUMNS)[number], CsvValue>[] = [];
+	const timelines: { date: string; points: Record<string, number | null>[] }[] = [];
+	const compare = (
+		date: string,
+		what: string,
+		start: number,
+		end: number,
+		whoopStrain: number | null,
+		whoopAvg: number | null,
+	) => {
+		const fromWhoop = estimateStrain([], whoopStreams, start, end);
+		const fromGarmin = estimateStrain(allDay, garminActivities, start, end);
+		rows.push({
+			date,
+			what,
+			start: format(start, 'HH:mm'),
+			end: format(end, 'HH:mm'),
+			whoop: whoopStrain == null ? null : Math.round(whoopStrain * 10) / 10,
+			from_whoop_hr: fromWhoop,
+			from_garmin_hr: fromGarmin,
+			garmin_minus_whoop:
+				fromGarmin != null && whoopStrain != null ? Math.round((fromGarmin - whoopStrain) * 10) / 10 + 0 : null,
+			whoop_avg_hr: whoopAvg ?? averageHeartRate([], whoopStreams, start, end),
+			garmin_avg_hr: averageHeartRate(allDay, garminActivities, start, end),
+		});
+	};
+	for (const { details, date, start, end } of cycles) {
+		compare(date, 'day', start, end, details.cycle.scaled_strain, details.cycle.day_avg_heart_rate);
+		for (const workout of [...details.workouts].toSorted((a, b) => a.during.localeCompare(b.during))) {
+			const window = parseWhoopRange(workout.during);
+			const name =
+				details.v2_activities.find(activity => activity.id === workout.activity_id)?.translated_type ??
+				`sport ${workout.sport_id}`;
+			compare(date, name, window.start, window.end ?? end, workout.score, workout.average_heart_rate);
+		}
+		const fromWhoop = strainTimeline([], whoopStreams, start, end, COMPARE_STEP_MS);
+		const fromGarmin = strainTimeline(allDay, garminActivities, start, end, COMPARE_STEP_MS);
+		timelines.push({
+			date,
+			points: fromWhoop.map((point, index) => ({
+				time: point.time,
+				whoop_hr: point.bpm,
+				garmin_hr: fromGarmin[index]!.bpm,
+				strain_from_whoop_hr: point.strain,
+				strain_from_garmin_hr: fromGarmin[index]!.strain,
+			})),
+		});
+	}
+	return { rows, timelines };
+}
+
 const writeJson = (value: unknown) => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 
 const cli = createScript('garmin')
@@ -776,6 +883,46 @@ const cli = createScript('garmin')
 			const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
 			const [personal, connect] = await Promise.all([PersonalApi.connect(), ConnectApi.connect()]);
 			renderIntraday(await fetchIntraday(personal, connect, date), outputFormat);
+		},
+	)
+	.command(
+		'strain-compare',
+		"WHOOP's strain next to this script's estimate from WHOOP's 6-second heart rate and from Garmin's, per WHOOP day and workout. Needs a WHOOP app token (`whoop-pull --app-token`)",
+		cli =>
+			cli
+				.option('days', {
+					alias: 'd',
+					type: 'number',
+					default: 7,
+					describe: 'WHOOP days to include, ending at --end, when --start is not given',
+				})
+				.option('start', { alias: ['since', 's'], type: 'string', describe: 'First day (YYYY-MM-DD)' })
+				.option('end', { alias: ['until', 'e'], type: 'string', describe: 'Last day (YYYY-MM-DD), default today' })
+				.option('format', {
+					alias: 'f',
+					type: 'string',
+					choices: OUTPUT_FORMATS,
+					default: 'table',
+					describe: 'json adds a 5-minute timeline per day: both heart rates and the strain built from each',
+				}),
+		async argv => {
+			const outputFormat = parseOutputFormat(argv.format);
+			const range = resolveRange(argv);
+			const whoop = WhoopAppApi.connect();
+			const { rows, timelines } = await fetchStrainComparison(await PersonalApi.connect(), whoop, range);
+			if (outputFormat === 'json') return void writeJson({ rows, timelines });
+			if (outputFormat !== 'table') return void process.stdout.write(renderCsvRecords(rows, COMPARE_COLUMNS));
+			renderTableRecords(
+				rows.map(row => ({
+					...row,
+					whoop: oneDecimal(row.whoop),
+					from_whoop_hr: oneDecimal(row.from_whoop_hr),
+					from_garmin_hr: oneDecimal(row.from_garmin_hr),
+					garmin_minus_whoop: oneDecimal(row.garmin_minus_whoop),
+					whoop_avg_hr: row.whoop_avg_hr ?? '',
+					garmin_avg_hr: row.garmin_avg_hr ?? '',
+				})),
+			);
 		},
 	)
 	.command(

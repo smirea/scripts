@@ -17,6 +17,7 @@ import {
 	type CsvValue,
 	type OutputFormat,
 } from './utils/output';
+import { saveWhoopAppToken, WHOOP_APP_TOKEN_FILE, WhoopAppApi } from './whoopApp';
 
 const BASE_URL = 'https://api.prod.whoop.com/developer/v2';
 const AUTH_URL = 'https://api.prod.whoop.com/oauth/oauth2/auth';
@@ -211,6 +212,15 @@ async function runCli(): Promise<void> {
 				describe:
 					'Fetch one WHOOP API path (relative to /developer/v2, or a full https://api.prod.whoop.com URL) with the stored token and print its JSON, e.g. --get /cycle?limit=1',
 			})
+			.option('app-token', {
+				type: 'string',
+				describe: `Save a WHOOP app access token (the whoop-auth-token cookie on id.whoop.com after signing in at app.whoop.com) to ${WHOOP_APP_TOKEN_FILE}; it lasts 24 hours and unlocks --app-get and \`garmin strain-compare\``,
+			})
+			.option('app-get', {
+				type: 'string',
+				describe:
+					"Fetch one path from the WHOOP app's own API with the saved app token and print its JSON, e.g. --app-get '/home-service/v1/deep-dive/strain?date=2026-11-16'",
+			})
 			.option('auth-code', {
 				type: 'string',
 				describe: 'OAuth authorization code copied from the redirect URL after approving access in your browser',
@@ -224,6 +234,20 @@ async function runCli(): Promise<void> {
 				describe: 'Manually set WHOOP_REFRESH_TOKEN in .env.local before fetching data',
 			})
 			.parseAsync();
+
+		const appToken = normalizeOptionalString(args['app-token']);
+		if (appToken) {
+			const { userId, expiresAt } = await saveWhoopAppToken(appToken);
+			console.log(`Saved the WHOOP app token for user ${userId}; it expires ${new Date(expiresAt).toLocaleString()}.`);
+			return;
+		}
+		if (args['app-get']) {
+			const url = new URL(args['app-get'], 'https://api.prod.whoop.com');
+			console.log(
+				JSON.stringify(await WhoopAppApi.connect().get(url.pathname, Object.fromEntries(url.searchParams)), null, 2),
+			);
+			return;
+		}
 
 		const providedRefreshToken = normalizeOptionalString(args.token);
 		const types = resolveTypes(args.include, args.exclude);
