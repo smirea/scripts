@@ -183,13 +183,16 @@ function planApp(dir: string, options: { scheme?: string; pull: boolean; env?: s
 	const name = path.basename(dir);
 	header(name, tilde(dir));
 	const repoRoot = gitRoot(dir);
-	if (options.pull && repoRoot)
-		task(
-			'git',
-			'pull --ff-only',
-			() => fastForward(repoRoot),
-			summary => summary,
-		);
+	if (options.pull && repoRoot) {
+		if (hasUpstream(repoRoot))
+			task(
+				'git',
+				'pull --ff-only',
+				() => fastForward(repoRoot),
+				summary => summary,
+			);
+		else line('git', chalk.dim('no upstream branch, not pulling'));
+	}
 	if (repoRoot && (existsSync(path.join(repoRoot, 'bun.lock')) || existsSync(path.join(repoRoot, 'bun.lockb')))) {
 		task('deps', 'bun install', () =>
 			runOrThrow(process.execPath, ['install'], { cwd: repoRoot, error: `bun install failed in ${tilde(repoRoot)}` }),
@@ -631,6 +634,10 @@ function watchAppNote(appPath: string, devices: Device[]): string | null {
 function gitRoot(dir: string): string | undefined {
 	const result = run('git', ['-C', dir, 'rev-parse', '--show-toplevel']);
 	return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function hasUpstream(repoRoot: string): boolean {
+	return run('git', ['-C', repoRoot, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}']).status === 0;
 }
 
 function fastForward(repoRoot: string): string {
