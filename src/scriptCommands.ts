@@ -35,6 +35,7 @@ export const SCRIPT_COMMANDS = [
 	{ name: 'localias-peer', source: 'src/localias-peer.ts' },
 	{ name: 'fork-sync', source: 'src/fork-sync.ts' },
 	{ name: 'cron', source: 'src/cron.ts' },
+	{ name: 'pstack-update', source: 'src/pstack-update.ts' },
 ] as const satisfies ScriptCommand[];
 
 export function findScriptCommand(name: string): ScriptCommand | undefined {
