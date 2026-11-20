@@ -86,9 +86,13 @@ function codexReview(pr: Pr): 'running' | 'completed' | 'failed' {
 /**
  * Drives the current branch's open PR to a verdict. Waits for CI and for Codex's first review; Codex reviews every PR
  * on its own when it opens, so after the first review it never waits for another. The budget is a hard stop: every
- * command is killed when it would outlive it.
+ * command is killed when it would outlive it. With `once` it never waits: an agent whose T3 PR watch does the waiting
+ * runs it on each wake.
  */
-export async function ship(io: Io, { merge, budgetMs }: { merge: boolean; budgetMs: number }): Promise<Verdict> {
+export async function ship(
+	io: Io,
+	{ merge, budgetMs, once = false }: { merge: boolean; budgetMs: number; once?: boolean },
+): Promise<Verdict> {
 	const deadline = io.now() + budgetMs;
 	function bounded(cmd: string[]): string {
 		const timeoutMs = deadline - EXIT_RESERVE_MS - io.now();
@@ -197,6 +201,7 @@ export async function ship(io: Io, { merge, budgetMs }: { merge: boolean; budget
 				continue;
 			}
 			if (!waiting.length) waiting.push('GitHub to compute mergeability');
+			if (once) exit(3, `Still waiting on ${waiting.join(', ')}. Rerun on the next PR watch wake.`);
 			if (io.now() + POLL_MS > deadline) exit(3, `Still waiting on ${waiting.join(', ')}. Rerun.`);
 			io.log(`Waiting on ${waiting.join(', ')}…`);
 			await io.sleep(POLL_MS);
