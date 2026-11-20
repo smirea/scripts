@@ -28,7 +28,9 @@ const TRASH = path.join(home, '.Trash');
 const TCC_DATABASE = path.join(home, 'Library/Application Support/com.apple.TCC/TCC.db');
 const CONTAINER_ROOT = path.join(home, 'Library/Application Support/com.apple.container/containers');
 const CONTAINER_LOGS = path.join(home, 'Library/Logs/repo-containers');
+const PACKAGE_STAMP = path.join(home, '.local/state/cron-cleanup/last-package-prune');
 const DAY_MS = 24 * 60 * 60_000;
+const WEEK_MS = 7 * DAY_MS;
 const BOOT_DELAY_MS = 10 * 60_000;
 const SCHEDULE_WINDOW_MIN = 30;
 const LOG_LIMIT = 20 * 1024 * 1024;
@@ -42,11 +44,12 @@ const STEPS: Step[] = [
 	{ name: 'repo containers', action: containers },
 	{ name: 'logs', action: dryRun => [...trimLogs(CONTAINER_LOGS, dryRun), ...trimLog(LOG_FILE, dryRun)] },
 	{ name: 'trash', action: emptyTrash },
+	{ name: 'package caches (weekly)', action: packageCaches },
 ];
 
 await createScript('cron-cleanup')
 	.usage(
-		'$0 <command>\n\nDaily disk cleanup for this Mac: removes T3 worktrees no open thread uses (with their simulators), prunes and trims the home-mac repo containers, caps their logs, and empties the Trash. `install` schedules it at 03:14, and 10 minutes after login when the last run is over 24 hours old.',
+		'$0 <command>\n\nDaily disk cleanup for this Mac: removes T3 worktrees no open thread uses (with their simulators), prunes and trims the home-mac repo containers, caps their logs, empties the Trash, and once a week prunes the pnpm store and clears the bun cache. `install` schedules it at 03:14, and 10 minutes after login when the last run is over 24 hours old.',
 	)
 	.command(
 		'run',
@@ -176,6 +179,35 @@ function trimLog(file: string, dryRun: boolean): string[] {
 		writeFileSync(file, tail);
 	}
 	return [`${dryRun ? 'would trim' : 'trimmed'} ${file} from ${human(bytes)} to its last ${human(LOG_KEEP)}`];
+}
+
+function packageCaches(dryRun: boolean): string[] {
+	const last = existsSync(PACKAGE_STAMP) ? statSync(PACKAGE_STAMP).mtimeMs : undefined;
+	if (last && Date.now() - last < WEEK_MS)
+		return [`skipped: last pruned ${new Date(last).toLocaleString()}, under a week ago`];
+	for (const tool of ['pnpm', 'bun'])
+		if (!Bun.which(tool)) throw new Error(`\`${tool}\` is not on PATH; check the PATH in ${PLIST}.`);
+	const store = run(['pnpm', 'store', 'path']);
+	const bunCache = run(['bun', 'pm', 'cache']).split('\n').at(-1)!;
+	// pnpm only prunes its current store version; a store left by an older major version is never read again.
+	const oldStores = readdirSync(path.dirname(store))
+		.filter(name => /^v\d+$/.test(name) && name !== path.basename(store))
+		.map(name => path.join(path.dirname(store), name));
+	const before = allocated(store) + allocated(bunCache) + oldStores.reduce((sum, dir) => sum + allocated(dir), 0);
+	if (dryRun)
+		return [
+			`would run \`pnpm store prune\`, delete ${oldStores.length} old pnpm stores, and clear the bun cache (${human(before)} now)`,
+		];
+	run(['pnpm', 'store', 'prune']);
+	for (const dir of oldStores) run(['rm', '-rf', dir]);
+	// bun has no prune: clearing is the only way to drop packages no project uses anymore.
+	run(['bun', 'pm', 'cache', 'rm']);
+	mkdirSync(path.dirname(PACKAGE_STAMP), { recursive: true });
+	writeFileSync(PACKAGE_STAMP, new Date().toISOString());
+	const after = allocated(store) + allocated(bunCache);
+	return [
+		`pruned the pnpm store, ${oldStores.length} old pnpm stores, and the bun cache: ${human(before)} → ${human(after)}`,
+	];
 }
 
 // Without Full Disk Access macOS lists ~/.Trash as empty instead of failing, so a protected file is the probe.
