@@ -14,7 +14,7 @@ import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 
 import { checkout, git, run, type Checkout } from './shell';
-import { gc as simulatorGc, ownedBy, remove as removeSimulator, shutdown, status } from './simulators';
+import { devices, gc as simulatorGc, ownedBy, remove as removeSimulator, shutdown, status } from './simulators';
 import { cleanWorktreeCache, runningT3Worktree } from './worktreeCache';
 
 const T3_WORKTREES = join(homedir(), '.t3/worktrees');
@@ -398,8 +398,13 @@ function belowEnvManagerCommits(main: string, head: string): string {
 	return tip === head ? head : run(['git', '-C', main, 'rev-parse', tip], { allowFail: true }).trim() || head;
 }
 
-/** The working directories of every process except this one and its ancestors, so settle can remove its own worktree. */
-function processCwds(): string[] {
+const SHELLS = new Set(['zsh', 'bash', 'sh', 'fish']);
+
+/**
+ * The working directories of every process except this one and its ancestors, so settle can remove its own worktree.
+ * `skipIdleShells` leaves out shells running nothing, such as a settled thread's terminal tab.
+ */
+function processCwds({ skipIdleShells = false } = {}): string[] {
 	const own = new Set<string>();
 	for (
 		let pid = String(process.pid);
@@ -407,14 +412,26 @@ function processCwds(): string[] {
 		pid = run(['ps', '-o', 'ppid=', '-p', pid], { allowFail: true }).trim()
 	)
 		own.add(pid);
+	const parents = new Set(
+		skipIdleShells
+			? run(['ps', '-axo', 'ppid='])
+					.split('\n')
+					.map(line => line.trim())
+			: [],
+	);
 	const cwds: string[] = [];
 	let pid = '';
-	const listing = Bun.spawnSync(['lsof', '-a', '-d', 'cwd', '-F', 'pn'], { stderr: 'ignore' }).stdout.toString();
+	let command = '';
+	const listing = Bun.spawnSync(['lsof', '-a', '-d', 'cwd', '-F', 'pcn'], { stderr: 'ignore' }).stdout.toString();
 	// Without the list every worktree could be in use, so gc stops instead of guessing.
 	if (!listing.trim()) throw new Error('lsof listed no process working directories; not removing anything.');
 	for (const line of listing.split('\n')) {
 		if (line.startsWith('p')) pid = line.slice(1);
-		else if (line.startsWith('n') && !own.has(pid)) cwds.push(line.slice(1));
+		else if (line.startsWith('c')) command = line.slice(1);
+		else if (line.startsWith('n') && !own.has(pid)) {
+			if (skipIdleShells && SHELLS.has(command) && !parents.has(pid)) continue;
+			cwds.push(line.slice(1));
+		}
 	}
 	return cwds;
 }
@@ -588,6 +605,52 @@ export function gc(mains: string[], { dryRun = false, includeOpenThreads = false
 			const files = readdirSync(path).filter(name => name !== '.DS_Store');
 			if (files.length) report.push(`keep ${path}: not a registered worktree, but not empty`);
 			else act(`remove empty ${path}`, () => rmSync(path, { recursive: true, force: true }));
+		}
+	}
+	return report;
+}
+
+const FRESH_MS = 60 * 60_000;
+
+/**
+ * Removes every T3 worktree directory no open thread uses: a settled or archived thread's, or an orphan whose thread
+ * was deleted or never recorded it. Unlike gc it needs no merged PR. Branches stay, so committed work survives;
+ * uncommitted changes are deleted with the directory.
+ */
+export function pruneAbandoned({ dryRun = false } = {}): string[] {
+	if (!existsSync(T3_WORKTREES)) return [];
+	const report: string[] = [];
+	const cwds = processCwds({ skipIdleShells: true });
+	const sims = devices();
+	for (const project of readdirSync(T3_WORKTREES, { withFileTypes: true }).filter(entry => entry.isDirectory())) {
+		for (const dir of readdirSync(join(T3_WORKTREES, project.name), { withFileTypes: true })) {
+			if (!dir.isDirectory()) continue;
+			const path = join(T3_WORKTREES, project.name, dir.name);
+			const keep = openThread(path)
+				? 'a T3 thread on it is still open'
+				: runningT3Worktree(path)
+					? 'a T3 run is active in it'
+					: cwds.some(cwd => cwd === path || cwd.startsWith(`${path}/`))
+						? 'a process is running in it'
+						: // T3 records a thread's worktree only after creating it.
+							Date.now() - statSync(path).birthtimeMs < FRESH_MS
+							? 'created in the last hour'
+							: undefined;
+			if (keep) {
+				report.push(`keep ${path}: ${keep}`);
+				continue;
+			}
+			const current = checkout(path);
+			const linked = current?.root === path && current.linked ? current : undefined;
+			const why = linked
+				? `no open T3 thread${dirty(path) ? ', discarding its uncommitted changes' : ''}`
+				: 'not a git worktree';
+			report.push(`${dryRun ? 'would remove' : 'removed'} ${path} (${why})`);
+			if (dryRun) continue;
+			for (const pid of listeningPids(path)) run(['kill', pid], { allowFail: true });
+			for (const device of ownedBy(path, sims)) removeSimulator(device);
+			rmSync(path, { recursive: true, force: true });
+			if (linked) run(['git', '-C', linked.main, 'worktree', 'prune'], { allowFail: true });
 		}
 	}
 	return report;
