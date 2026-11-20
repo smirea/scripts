@@ -75,6 +75,18 @@ export class PersonalApi {
 					: '',
 		);
 	}
+
+	async getBytes(pathname: string, params: Params = {}): Promise<Uint8Array> {
+		const url = buildUrl(PERSONAL_BASE_URL, pathname, params);
+		const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+		if (!res.ok) {
+			const body = await res.text();
+			throw new Error(
+				`GET ${url.pathname}${url.search} (Personal API) failed with ${res.status}: ${body.slice(0, 300)}`,
+			);
+		}
+		return new Uint8Array(await res.arrayBuffer());
+	}
 }
 
 /**
@@ -101,6 +113,18 @@ export class ConnectApi {
 		const url = buildUrl(CONNECT_BASE_URL, pathname, params);
 		const res = await fetch(url, { headers: { Accept: 'application/json', Authorization: `Bearer ${this.token}` } });
 		return readJson<T>(res, `GET ${url.pathname}${url.search} (Garmin Connect)`, connectHint);
+	}
+
+	async getBytes(pathname: string, params: Params = {}): Promise<Uint8Array> {
+		const url = buildUrl(CONNECT_BASE_URL, pathname, params);
+		const res = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` } });
+		if (!res.ok) {
+			const body = await res.text();
+			throw new Error(
+				`GET ${url.pathname}${url.search} (Garmin Connect) failed with ${res.status}: ${body.slice(0, 300)}${connectHint(res.status)}`,
+			);
+		}
+		return new Uint8Array(await res.arrayBuffer());
 	}
 
 	async delete(pathname: string): Promise<void> {

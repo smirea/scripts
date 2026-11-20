@@ -14,6 +14,7 @@ import {
 	loginToConnect,
 	type Params,
 } from './garminApi';
+import { parseWellnessZip, type WellnessFitData } from './garminFit';
 import { averageHeartRate, estimateStrain, strainTimeline, type HeartRatePoint } from './garminStrain';
 import { formatDurationMilliseconds } from './utils/date';
 import {
@@ -695,6 +696,63 @@ function renderIntraday(data: Intraday, outputFormat: ReturnType<typeof parseOut
 	}
 }
 
+function renderWellnessFit(data: WellnessFitData, outputFormat: ReturnType<typeof parseOutputFormat>): void {
+	if (outputFormat === 'json') {
+		writeJson(data);
+		return;
+	}
+	if (outputFormat === 'csv' || outputFormat === 'csv:full') {
+		const rows: Record<string, CsvValue>[] = [
+			...Object.entries(data.series).flatMap(([metric, series]) =>
+				series.map(sample => ({ time: sample.time, metric, value: sample.value })),
+			),
+			...data.sleep_levels.map(level => ({ time: level.time, metric: 'sleep_level', value: level.stage })),
+		];
+		process.stdout.write(renderCsvRecords(rows, ['time', 'metric', 'value']));
+		return;
+	}
+	renderTableRecords(
+		Object.entries(data.series).map(([metric, series]) => {
+			const values = series.map(sample => sample.value);
+			return {
+				metric,
+				samples: values.length,
+				min: values.length ? Math.min(...values) : '',
+				avg: values.length ? formatDisplayNumber(values.reduce((sum, value) => sum + value, 0) / values.length) : '',
+				max: values.length ? Math.max(...values) : '',
+				from: series[0]?.time.slice(11) ?? '',
+				to: series.at(-1)?.time.slice(11) ?? '',
+			};
+		}),
+	);
+	const summaryRows: Record<string, CsvValue>[] = [];
+	if (data.summary.resting_hr) {
+		summaryRows.push({
+			metric: 'resting_hr',
+			value: `${data.summary.resting_hr.current_day ?? '?'} (7d: ${data.summary.resting_hr.seven_day ?? '?'})`,
+		});
+	}
+	if (data.summary.hrv) {
+		summaryRows.push({
+			metric: 'hrv',
+			value: `${data.summary.hrv.last_night_avg ?? '?'} ms (5m high: ${data.summary.hrv.last_night_5min_high ?? '?'}, 7d: ${data.summary.hrv.weekly_avg ?? '?'})`,
+		});
+	}
+	if (data.summary.skin_temp_overnight) {
+		summaryRows.push({
+			metric: 'skin_temp_overnight',
+			value: `${data.summary.skin_temp_overnight.nightly_c ?? '?'}°C (Δ ${data.summary.skin_temp_overnight.deviation_c ?? '?'}°C, 7d Δ ${data.summary.skin_temp_overnight.seven_day_deviation_c ?? '?'}°C)`,
+		});
+	}
+	if (data.summary.sleep_assessment?.overallSleepScore != null) {
+		summaryRows.push({
+			metric: 'sleep_score',
+			value: `${data.summary.sleep_assessment.overallSleepScore} (awakenings: ${data.summary.sleep_assessment.awakeningsCount ?? '?'}, disruption: ${data.summary.sleep_disruption_severity ?? 'none'})`,
+		});
+	}
+	if (summaryRows.length) renderTableRecords(summaryRows);
+}
+
 function parseParams(pairs: string[]): Params {
 	return Object.fromEntries(
 		pairs.map(pair => {
@@ -883,6 +941,26 @@ const cli = createScript('garmin')
 			const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
 			const [personal, connect] = await Promise.all([PersonalApi.connect(), ConnectApi.connect()]);
 			renderIntraday(await fetchIntraday(personal, connect, date), outputFormat);
+		},
+	)
+	.command(
+		'wellness-fit [date]',
+		'Download and decode raw daily wellness .FIT archive (1-min HR, stress, Body Battery, respiration, SpO2, skin temp delta, 5-min HRV, sleep scores & disruptions)',
+		cli =>
+			cli.positional('date', { type: 'string', describe: 'Day (YYYY-MM-DD), default today' }).option('format', {
+				alias: 'f',
+				type: 'string',
+				choices: OUTPUT_FORMATS,
+				default: 'table',
+				describe:
+					'table summarizes each 1-min series + overnight summaries; json dumps everything; csv lists every sample',
+			}),
+		async argv => {
+			const outputFormat = parseOutputFormat(argv.format);
+			const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
+			const connect = await ConnectApi.connect();
+			const zip = await connect.getBytes(`/download-service/files/wellness/${date}`);
+			renderWellnessFit(parseWellnessZip(date, zip), outputFormat);
 		},
 	)
 	.command(
