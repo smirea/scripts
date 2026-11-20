@@ -39,8 +39,10 @@ const ignored = (root: string) =>
 	);
 
 function readStamp(root: string): Stamp | undefined {
-	const file = stampPath(root);
-	return existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Stamp) : undefined;
+	// A worktree whose repository dropped it still has a `.git` file, but no git dir to hold a stamp.
+	const gitDir = run(['git', '-C', root, 'rev-parse', '--path-format=absolute', '--git-dir'], { allowFail: true });
+	const file = gitDir && join(gitDir, 'agent-t3-worktree.json');
+	return file && existsSync(file) ? (JSON.parse(readFileSync(file, 'utf8')) as Stamp) : undefined;
 }
 
 /** Ports come from the root `.env` defaults: every `*PORT` key, and every `*_URL` on 127.0.0.1 or localhost at one of them. */

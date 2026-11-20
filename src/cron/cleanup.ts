@@ -22,6 +22,7 @@ const TRASH = path.join(home, '.Trash');
 const TCC_DATABASE = path.join(home, 'Library/Application Support/com.apple.TCC/TCC.db');
 const CONTAINER_ROOT = path.join(home, 'Library/Application Support/com.apple.container/containers');
 const CONTAINER_LOGS = path.join(home, 'Library/Logs/repo-containers');
+const REPO_CONTAINERS_STATE = path.join(home, 'code/.repo-containers');
 const PACKAGE_STAMP = path.join(STATE_DIR, 'last-package-prune');
 const WEEK_MS = 7 * 24 * 60 * 60_000;
 const LOG_LIMIT = 20 * 1024 * 1024;
@@ -37,6 +38,8 @@ export const CLEANUP_STEPS: Step[] = [
 ];
 
 function containers(dryRun: boolean): string[] {
+	if (!existsSync(REPO_CONTAINERS_STATE))
+		return [`this Mac hosts no repo containers (${REPO_CONTAINERS_STATE} is missing)`];
 	if (!Bun.which('setup-repo-container'))
 		throw new Error('`setup-repo-container` is not on PATH; it is ~/bin/setup-repo-container from ~/code/home-mac.');
 	const report: string[] = [];
