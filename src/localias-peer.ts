@@ -1,15 +1,6 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import type { Subprocess } from 'bun';
-import { writeFileSync } from 'node:fs';
-import path from 'node:path';
-
-const home = process.env.HOME;
-if (!home) throw new Error('HOME is not set.');
-
-const LOG_FILE = path.join(home, 'Library', 'Logs', 'localias-peer.log');
-const LAUNCHD_LABEL = 'com.stefan.localias-peer';
-const PLIST = path.join(home, 'Library', 'LaunchAgents', `${LAUNCHD_LABEL}.plist`);
 const RESYNC_MS = 15_000;
 const MAX_BACKOFF_MS = 60_000;
 const SSH_OPTIONS = [
@@ -168,19 +159,8 @@ if (import.meta.main) {
 			argv => run({ peer: argv.peer, name: argv.name, portOffset: argv.portOffset }, argv.dryRun),
 		)
 		.command(
-			'install',
-			`Install a launchd agent that keeps \`run\` alive. Logs: ${LOG_FILE}`,
-			command =>
-				peerOptions(command).option('dry-run', {
-					type: 'boolean',
-					default: false,
-					describe: 'Print the plist without installing it.',
-				}),
-			argv => install({ peer: argv.peer, name: argv.name, portOffset: argv.portOffset }, argv.dryRun),
-		)
-		.command(
-			'uninstall',
-			'Remove the launchd agent and every <project>.<name>.localhost alias.',
+			'clean',
+			'Remove every <project>.<name>.localhost alias.',
 			command =>
 				command
 					.option('name', { type: 'string', default: 'mini', describe: 'Subdomain whose aliases to remove.' })
@@ -189,10 +169,10 @@ if (import.meta.main) {
 						default: false,
 						describe: 'Print what would be removed without removing it.',
 					}),
-			argv => uninstall(argv.name, argv.dryRun),
+			argv => clean(argv.name, argv.dryRun),
 		)
 		.strictCommands()
-		.demandCommand(1, 'Choose run, install, or uninstall.')
+		.demandCommand(1, 'Choose run or clean.')
 		.recommendCommands()
 		.parseAsync();
 }
@@ -296,99 +276,16 @@ async function readPeerState(peer: string): Promise<PeerState | undefined> {
 	return parsePeerState(result.stdout);
 }
 
-async function install(options: Options, dryRun: boolean): Promise<void> {
-	requireLocalias();
-	const status = await exec(['localias', 'status']);
-	if (!status.stdout.includes('daemon running'))
-		throw new Error(
-			`localias daemon is not running on this machine; start it with \`localias start\`, then rerun install.\n${status.output}`,
-		);
-	const bun = Bun.which('bun');
-	if (!bun)
-		throw new Error('`bun` is not on PATH; install it (curl -fsSL https://bun.sh/install | bash) and rerun install.');
-	const pathEnv = [
-		path.dirname(bun),
-		path.dirname(Bun.which('localias')!),
-		'/opt/homebrew/bin',
-		'/usr/local/bin',
-		'/usr/bin',
-		'/bin',
-		'/usr/sbin',
-		'/sbin',
-	].join(':');
-	const args = [
-		bun,
-		'--no-env-file',
-		import.meta.path,
-		'run',
-		'--peer',
-		options.peer,
-		'--name',
-		options.name,
-		'--port-offset',
-		String(options.portOffset),
-	];
-	const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${LAUNCHD_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-${args.map(arg => `    <string>${arg}</string>`).join('\n')}
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>30</integer>
-  <key>ProcessType</key>
-  <string>Background</string>
-  <key>StandardOutPath</key>
-  <string>${LOG_FILE}</string>
-  <key>StandardErrorPath</key>
-  <string>${LOG_FILE}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${pathEnv}</string>
-  </dict>
-</dict>
-</plist>
-`;
-	if (dryRun) {
-		process.stdout.write(`Would write ${PLIST}:\n${plist}`);
-		return;
-	}
-	writeFileSync(PLIST, plist);
-	const domain = `gui/${process.getuid!()}`;
-	await exec(['launchctl', 'bootout', `${domain}/${LAUNCHD_LABEL}`]);
-	// bootout returns before the old job is gone, and bootstrapping over it fails with "5: Input/output error".
-	for (let i = 0; i < 50 && (await exec(['launchctl', 'print', `${domain}/${LAUNCHD_LABEL}`])).code === 0; i++)
-		await Bun.sleep(200);
-	const bootstrap = await exec(['launchctl', 'bootstrap', domain, PLIST]);
-	if (bootstrap.code !== 0) throw new Error(`launchctl bootstrap ${domain} ${PLIST} failed:\n${bootstrap.output}`);
-	process.stdout.write(
-		`Installed ${PLIST}: https://<project>.${options.name}.localhost serves ${options.peer}. Logs: ${LOG_FILE}\n`,
-	);
-}
-
-async function uninstall(name: string, dryRun: boolean): Promise<void> {
+async function clean(name: string, dryRun: boolean): Promise<void> {
 	requireLocalias();
 	const { remove } = planAliasChanges(parseLocaliasList((await exec(['localias', 'list'])).stdout), [], name);
-	const domain = `gui/${process.getuid!()}`;
 	if (dryRun) {
-		console.log(`[dry-run] launchctl bootout ${domain}/${LAUNCHD_LABEL} and delete ${PLIST}`);
 		for (const host of remove) console.log(`[dry-run] localias rm ${host}`);
 		return;
 	}
-	await exec(['launchctl', 'bootout', `${domain}/${LAUNCHD_LABEL}`]);
-	await exec(['trash', PLIST]);
 	for (const host of remove) await mustExec(['localias', 'rm', host]);
 	if (remove.length) await mustExec(['localias', 'reload']);
-	console.log(`Removed the launchd agent and ${remove.length} aliases.`);
+	console.log(`Removed ${remove.length} aliases.`);
 }
 
 function requireLocalias(): void {
