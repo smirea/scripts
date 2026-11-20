@@ -274,3 +274,126 @@ export function parseWellnessZip(date: string, zipBytes: Uint8Array): WellnessFi
 		sleep_disruptions: sleepDisruptions.toSorted((a, b) => a.time.localeCompare(b.time)),
 	};
 }
+
+export interface ActivityFitRecord {
+	time: string;
+	epochMs: number;
+	heart_rate: number | null;
+	distance_m: number | null;
+	speed_mps: number | null;
+	cadence: number | null;
+	altitude_m: number | null;
+	power_w: number | null;
+}
+
+export interface ActivityFitZone {
+	zone: number;
+	seconds: number;
+	high_bpm: number | null;
+}
+
+export interface ActivityFitData {
+	activity_id: number;
+	file: string;
+	session: {
+		sport: string | null;
+		sub_sport: string | null;
+		name: string | null;
+		start_time: string | null;
+		elapsed_seconds: number | null;
+		timer_seconds: number | null;
+		calories: number | null;
+		distance_m: number | null;
+		avg_hr: number | null;
+		max_hr: number | null;
+	} | null;
+	hr_zones: ActivityFitZone[];
+	laps: {
+		start_time: string | null;
+		elapsed_seconds: number | null;
+		timer_seconds: number | null;
+		calories: number | null;
+		distance_m: number | null;
+		avg_hr: number | null;
+		max_hr: number | null;
+	}[];
+	records: ActivityFitRecord[];
+}
+
+const localSecond = (epochMs: number) => format(new Date(epochMs), "yyyy-MM-dd'T'HH:mm:ss");
+const num = (value: unknown): number | null => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+const str = (value: unknown): string | null => (typeof value === 'string' && value.length > 0 ? value : null);
+
+export function parseActivityZip(activityId: number, zipBytes: Uint8Array): ActivityFitData {
+	const entry = unzipEntries(zipBytes).find(file => file.name.endsWith('.fit'));
+	if (!entry) throw new Error(`No .fit file found in activity ${activityId} archive.`);
+
+	const decoder = new Decoder(Stream.fromByteArray(entry.data));
+	const { messages } = decoder.read({
+		expandSubFields: true,
+		convertDateTimesToDates: true,
+		includeUnknownData: false,
+	}) as unknown as { messages: Record<string, Record<string, unknown>[]> };
+
+	const rawSession = messages.sessionMesgs?.[0];
+	const sessionStartMs = rawSession ? fitTimestampToMs(rawSession.startTime) : null;
+	const session = rawSession
+		? {
+				sport: str(rawSession.sport),
+				sub_sport: str(rawSession.subSport),
+				name: str(rawSession.sportProfileName),
+				start_time: sessionStartMs != null ? localSecond(sessionStartMs) : null,
+				elapsed_seconds: num(rawSession.totalElapsedTime),
+				timer_seconds: num(rawSession.totalTimerTime),
+				calories: num(rawSession.totalCalories),
+				distance_m: num(rawSession.totalDistance),
+				avg_hr: num(rawSession.avgHeartRate),
+				max_hr: num(rawSession.maxHeartRate),
+			}
+		: null;
+
+	// timeInZoneMesgs can hold both session and lap entries; prefer the session-level one.
+	const tzMesg =
+		(messages.timeInZoneMesgs ?? []).find(m => m.referenceMesg === 'session') ?? messages.timeInZoneMesgs?.[0];
+	const times = Array.isArray(tzMesg?.timeInHrZone) ? (tzMesg.timeInHrZone as unknown[]) : [];
+	const highs = Array.isArray(tzMesg?.hrZoneHighBoundary) ? (tzMesg.hrZoneHighBoundary as unknown[]) : [];
+	const hr_zones: ActivityFitZone[] = times
+		.map((seconds, index) => ({
+			zone: index,
+			seconds: num(seconds) ?? 0,
+			high_bpm: num(highs[index]),
+		}))
+		.filter(z => z.seconds > 0 || z.high_bpm != null);
+
+	const laps = (messages.lapMesgs ?? []).map(lap => {
+		const startMs = fitTimestampToMs(lap.startTime);
+		return {
+			start_time: startMs != null ? localSecond(startMs) : null,
+			elapsed_seconds: num(lap.totalElapsedTime),
+			timer_seconds: num(lap.totalTimerTime),
+			calories: num(lap.totalCalories),
+			distance_m: num(lap.totalDistance),
+			avg_hr: num(lap.avgHeartRate),
+			max_hr: num(lap.maxHeartRate),
+		};
+	});
+
+	const records: ActivityFitRecord[] = [];
+	for (const rec of messages.recordMesgs ?? []) {
+		const ms = fitTimestampToMs(rec.timestamp);
+		if (ms == null) continue;
+		const hr = num(rec.heartRate);
+		records.push({
+			time: localSecond(ms),
+			epochMs: ms,
+			heart_rate: hr != null && hr > 0 && hr < 255 ? hr : null,
+			distance_m: num(rec.distance),
+			speed_mps: num(rec.enhancedSpeed ?? rec.speed),
+			cadence: num(rec.cadence),
+			altitude_m: num(rec.enhancedAltitude ?? rec.altitude),
+			power_w: num(rec.power),
+		});
+	}
+
+	return { activity_id: activityId, file: entry.name, session, hr_zones, laps, records };
+}

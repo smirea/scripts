@@ -14,7 +14,7 @@ import {
 	loginToConnect,
 	type Params,
 } from './garminApi';
-import { parseWellnessZip, type WellnessFitData } from './garminFit';
+import { parseActivityZip, parseWellnessZip, type ActivityFitData, type WellnessFitData } from './garminFit';
 import { averageHeartRate, estimateStrain, strainTimeline, type HeartRatePoint } from './garminStrain';
 import { formatDurationMilliseconds } from './utils/date';
 import {
@@ -196,6 +196,44 @@ interface HealthStatus {
 	calendarDate: string;
 	outliersCount?: number | null;
 	metrics?: { type: string; status?: string | null; value?: number | null }[] | null;
+}
+
+interface BodyBatteryReport {
+	date?: string | null;
+	charged?: number | null;
+	drained?: number | null;
+	bodyBatteryValuesArray?: (number | null)[][] | null;
+}
+
+interface HeartRateZoneConfig {
+	sport?: string | null;
+	trainingMethod?: string | null;
+	restingHeartRateUsed?: number | null;
+	lactateThresholdHeartRateUsed?: number | null;
+	maxHeartRateUsed?: number | null;
+	zone1Floor?: number | null;
+	zone2Floor?: number | null;
+	zone3Floor?: number | null;
+	zone4Floor?: number | null;
+	zone5Floor?: number | null;
+}
+
+interface FitnessAge {
+	chronologicalAge?: number | null;
+	fitnessAge?: number | null;
+	achievableFitnessAge?: number | null;
+	previousFitnessAge?: number | null;
+	lastUpdated?: string | null;
+	components?: Record<
+		string,
+		{
+			value?: number | null;
+			targetValue?: number | null;
+			potentialAge?: number | null;
+			priority?: number | null;
+			stale?: boolean | null;
+		}
+	> | null;
 }
 
 type Range = { start: Date; end: Date };
@@ -607,32 +645,47 @@ function samples(rows: unknown[][] | null | undefined, valueIndex = 1): Sample[]
 	});
 }
 
-async function fetchIntraday(personal: PersonalApi, connect: ConnectApi, date: string) {
-	const [heartRate, hrv, stress, respiration, sleep] = await Promise.all([
+async function fetchIntraday(personal: PersonalApi, connect: ConnectApi | null, date: string) {
+	const [heartRate, hrv, bbReports, stress, respiration, sleep] = await Promise.all([
 		personal.get<{ heartRateValues?: number[][] | null } | null>('/wellness-service/wellness/dailyHeartRate', { date }),
 		personal.get<{ hrvReadings?: { hrvValue: number; readingTimeLocal: string }[] | null } | null>(
 			`/hrv-service/hrv/${date}`,
 		),
-		connect.get<{ stressValuesArray?: number[][] | null; bodyBatteryValuesArray?: unknown[][] | null } | null>(
-			`/wellness-service/wellness/dailyStress/${date}`,
-		),
-		connect.get<{ respirationValuesArray?: number[][] | null } | null>(
-			`/wellness-service/wellness/daily/respiration/${date}`,
-		),
-		connect.get<{
-			sleepLevels?: { startGMT: string; endGMT: string; activityLevel: number }[] | null;
-			wellnessEpochSPO2DataDTOList?: { epochTimestamp: string; spo2Reading?: number | null }[] | null;
-		} | null>('/sleep-service/sleep/dailySleepData', {
-			date,
-			nonSleepBufferMinutes: 60,
-		}),
+		connect
+			? null
+			: personal.get<BodyBatteryReport[] | null>('/wellness-service/wellness/bodyBattery/reports/daily', {
+					startDate: date,
+					endDate: date,
+				}),
+		connect
+			? connect.get<{ stressValuesArray?: number[][] | null; bodyBatteryValuesArray?: unknown[][] | null } | null>(
+					`/wellness-service/wellness/dailyStress/${date}`,
+				)
+			: null,
+		connect
+			? connect.get<{ respirationValuesArray?: number[][] | null } | null>(
+					`/wellness-service/wellness/daily/respiration/${date}`,
+				)
+			: null,
+		connect
+			? connect.get<{
+					sleepLevels?: { startGMT: string; endGMT: string; activityLevel: number }[] | null;
+					wellnessEpochSPO2DataDTOList?: { epochTimestamp: string; spo2Reading?: number | null }[] | null;
+				} | null>('/sleep-service/sleep/dailySleepData', {
+					date,
+					nonSleepBufferMinutes: 60,
+				})
+			: null,
 	]);
+	const bodyBattery = stress
+		? samples(stress.bodyBatteryValuesArray, 2)
+		: samples(bbReports?.[0]?.bodyBatteryValuesArray, 1);
 	return {
 		date,
 		series: {
 			heart_rate: samples(heartRate?.heartRateValues),
 			stress: samples(stress?.stressValuesArray),
-			body_battery: samples(stress?.bodyBatteryValuesArray, 2),
+			body_battery: bodyBattery,
 			respiration: samples(respiration?.respirationValuesArray),
 			hrv: (hrv?.hrvReadings ?? []).map(reading => ({
 				time: reading.readingTimeLocal.slice(0, 16),
@@ -751,6 +804,52 @@ function renderWellnessFit(data: WellnessFitData, outputFormat: ReturnType<typeo
 		});
 	}
 	if (summaryRows.length) renderTableRecords(summaryRows);
+}
+
+function renderActivityFit(data: ActivityFitData, outputFormat: ReturnType<typeof parseOutputFormat>): void {
+	if (outputFormat === 'json') {
+		writeJson(data);
+		return;
+	}
+	if (outputFormat === 'csv' || outputFormat === 'csv:full') {
+		const rows: Record<string, CsvValue>[] = data.records.map(rec => ({
+			time: rec.time,
+			heart_rate: rec.heart_rate,
+			distance_m: rec.distance_m,
+			speed_mps: rec.speed_mps,
+			cadence: rec.cadence,
+			altitude_m: rec.altitude_m,
+			power_w: rec.power_w,
+		}));
+		process.stdout.write(
+			renderCsvRecords(rows, ['time', 'heart_rate', 'distance_m', 'speed_mps', 'cadence', 'altitude_m', 'power_w']),
+		);
+		return;
+	}
+	const hrs = data.records.map(r => r.heart_rate).filter((v): v is number => v != null);
+	renderTableRecords([
+		{
+			activity_id: data.activity_id,
+			sport: data.session?.sport ?? '',
+			name: data.session?.name ?? '',
+			start: data.session?.start_time ?? '',
+			duration: seconds(data.session?.elapsed_seconds) ?? '',
+			calories: data.session?.calories ?? '',
+			samples: data.records.length,
+			hr_min: hrs.length ? Math.min(...hrs) : '',
+			hr_avg: hrs.length ? Math.round(hrs.reduce((s, v) => s + v, 0) / hrs.length) : '',
+			hr_max: hrs.length ? Math.max(...hrs) : '',
+		},
+	]);
+	if (data.hr_zones.length) {
+		renderTableRecords(
+			data.hr_zones.map(z => ({
+				zone: `Z${z.zone}`,
+				high_bpm: z.high_bpm ?? '',
+				time: seconds(z.seconds) ?? '0s',
+			})),
+		);
+	}
 }
 
 function parseParams(pairs: string[]): Params {
@@ -939,8 +1038,104 @@ const cli = createScript('garmin')
 		async argv => {
 			const outputFormat = parseOutputFormat(argv.format);
 			const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
-			const [personal, connect] = await Promise.all([PersonalApi.connect(), ConnectApi.connect()]);
+			const [personal, connect] = await Promise.all([PersonalApi.connect(), connectOrWarn()]);
 			renderIntraday(await fetchIntraday(personal, connect, date), outputFormat);
+		},
+	)
+	.command(
+		'activity-fit <activityId>',
+		'Download and decode raw 1-second activity .FIT file from the official Personal API (HR stream, zones, laps, session)',
+		cli =>
+			cli
+				.positional('activityId', {
+					type: 'number',
+					demandOption: true,
+					describe: 'Activity id from `garmin activities`',
+				})
+				.option('format', {
+					alias: 'f',
+					type: 'string',
+					choices: OUTPUT_FORMATS,
+					default: 'table',
+					describe: 'table shows session + HR zones; json dumps everything; csv lists every 1-second record',
+				}),
+		async argv => {
+			const outputFormat = parseOutputFormat(argv.format);
+			const personal = await PersonalApi.connect();
+			const zip = await personal.getBytes(`/download-service/files/activity/${argv.activityId}`);
+			renderActivityFit(parseActivityZip(argv.activityId, zip), outputFormat);
+		},
+	)
+	.command(
+		'zones',
+		'Show configured heart rate zones, max HR, RHR, and lactate threshold from the official Personal API',
+		cli =>
+			cli.option('format', {
+				alias: 'f',
+				type: 'string',
+				choices: OUTPUT_FORMATS,
+				default: 'table',
+				describe: 'Output format',
+			}),
+		async argv => {
+			const outputFormat = parseOutputFormat(argv.format);
+			const zones =
+				(await (
+					await PersonalApi.connect()
+				).get<HeartRateZoneConfig[] | null>('/biometric-service/heartRateZones/v2')) ?? [];
+			if (outputFormat === 'json') return void writeJson(zones);
+			const records = zones.map(z => ({
+				sport: z.sport ?? '',
+				method: z.trainingMethod ?? '',
+				rhr: z.restingHeartRateUsed ?? null,
+				max_hr: z.maxHeartRateUsed ?? null,
+				lthr: z.lactateThresholdHeartRateUsed ?? null,
+				z1: z.zone1Floor ?? null,
+				z2: z.zone2Floor ?? null,
+				z3: z.zone3Floor ?? null,
+				z4: z.zone4Floor ?? null,
+				z5: z.zone5Floor ?? null,
+			}));
+			if (outputFormat === 'table') renderTableRecords(records);
+			else process.stdout.write(renderCsvRecords(records, Object.keys(records[0] ?? {})));
+		},
+	)
+	.command(
+		'fitness-age [date]',
+		'Show Garmin Fitness Age, achievable age, and component breakdown from the official Personal API',
+		cli =>
+			cli.positional('date', { type: 'string', describe: 'Day (YYYY-MM-DD), default today' }).option('format', {
+				alias: 'f',
+				type: 'string',
+				choices: OUTPUT_FORMATS,
+				default: 'table',
+				describe: 'Output format',
+			}),
+		async argv => {
+			const outputFormat = parseOutputFormat(argv.format);
+			const date = argv.date ? day(parseDay(argv.date, 'date')) : day(new Date());
+			const data = await (
+				await PersonalApi.connect()
+			).get<FitnessAge | null>(`/fitnessage-service/fitnessage/v2/${date}`);
+			if (outputFormat === 'json') return void writeJson(data);
+			const rows: Record<string, CsvValue>[] = [
+				{
+					component: 'overall',
+					value: data?.fitnessAge != null ? formatDisplayNumber(data.fitnessAge) : null,
+					target: data?.achievableFitnessAge != null ? formatDisplayNumber(data.achievableFitnessAge) : null,
+					potential_age: data?.chronologicalAge ?? null,
+					priority: null,
+				},
+				...Object.entries(data?.components ?? {}).map(([name, comp]) => ({
+					component: name,
+					value: comp.value != null ? formatDisplayNumber(comp.value) : null,
+					target: comp.targetValue != null ? formatDisplayNumber(comp.targetValue) : null,
+					potential_age: comp.potentialAge != null ? formatDisplayNumber(comp.potentialAge) : null,
+					priority: comp.priority ?? null,
+				})),
+			];
+			if (outputFormat === 'table') renderTableRecords(rows);
+			else process.stdout.write(renderCsvRecords(rows, ['component', 'value', 'target', 'potential_age', 'priority']));
 		},
 	)
 	.command(
