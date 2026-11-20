@@ -1,0 +1,78 @@
+name: Sync GLOBAL_AGENTS.md
+
+on:
+  push:
+    branches: ['master']
+    paths:
+      - 'src/scriptCommands.ts'
+      - 'src/sync-global-agents.ts'
+      - '.github/workflows/sync-global-agents.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sync-global-agents
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CI: 'true'
+      LEFTHOOK: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: .bun-version
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('.bun-version') }}-${{ hashFiles('bun.lock', 'bun.lockb', 'cloudflare-workers/*/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('.bun-version') }}-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Update smirea/ai-files GLOBAL_AGENTS.md
+        env:
+          AI_FILES_DEPLOY_KEY_B64: ${{ secrets.AI_FILES_DEPLOY_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$AI_FILES_DEPLOY_KEY_B64" ]; then
+            echo "Missing secret AI_FILES_DEPLOY_KEY_B64. Sync it with: env-manager sync github local --only AI_FILES_DEPLOY_KEY_B64" >&2
+            exit 1
+          fi
+
+          KEY_FILE="$RUNNER_TEMP/ai_files_deploy_key"
+          TARGET_DIR="$RUNNER_TEMP/ai-files"
+          printf '%s' "$AI_FILES_DEPLOY_KEY_B64" | base64 -d > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+
+          export GIT_SSH_COMMAND="ssh -i $KEY_FILE -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone --depth 1 --branch master git@github.com:smirea/ai-files.git "$TARGET_DIR"
+
+          ./src/sync-global-agents.ts --target "$TARGET_DIR/GLOBAL_AGENTS.md"
+
+          cd "$TARGET_DIR"
+          if git diff --quiet -- GLOBAL_AGENTS.md; then
+            echo "GLOBAL_AGENTS.md is already up to date."
+            exit 0
+          fi
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add GLOBAL_AGENTS.md
+          git commit -m "docs: sync scripts list from smirea/scripts" -m "Source: smirea/scripts@${GITHUB_SHA:0:7}"
+          git push origin HEAD:master
+      - name: Clean up deploy key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/ai_files_deploy_key"
