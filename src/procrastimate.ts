@@ -18,6 +18,7 @@ type Task = {
 	labelIds: string[];
 	attachments: Attachment[];
 	completedAt: number | null;
+	reactions: { emoji: string; authorIds: string[] }[];
 };
 type View = { projects: Named[]; labels: Named[]; sections: Named[]; tasks: Task[] };
 type Comment = { body: string; createdAt: number; author: { name: string; kind: string } };
@@ -88,14 +89,17 @@ class Api {
 		return (await this.json<{ url: string }>('POST', '/links', body)).url;
 	}
 
+	/** Comments `comment` unless a comment already starts with `key`; safe to rerun. */
+	async comment(task: string, comment: string, key: string) {
+		const { comments } = await this.json<{ comments: Comment[] }>('GET', `/comments?id=${task}`);
+		const body = { taskId: task, body: comment };
+		if (!comments.some(c => c.body.startsWith(key)) && !this.skip(describeRequest('POST', '/comments', body)))
+			await this.call('POST', '/comments', body);
+	}
+
 	/** Comments `comment` unless a comment already starts with `key`, then completes the task; safe to rerun. */
 	async complete(task: string, comment: string, key: string) {
-		if (comment) {
-			const { comments } = await this.json<{ comments: Comment[] }>('GET', `/comments?id=${task}`);
-			const body = { taskId: task, body: comment };
-			if (!comments.some(c => c.body.startsWith(key)) && !this.skip(describeRequest('POST', '/comments', body)))
-				await this.call('POST', '/comments', body);
-		}
+		if (comment) await this.comment(task, comment, key);
 		const open = findTask(await this.view(), task).completedAt === null;
 		const completion = `/tasks/complete?id=${task}`;
 		if (open && !this.skip(describeRequest('POST', completion))) await this.call('POST', completion);
@@ -146,6 +150,21 @@ function labelId(view: View, name: string): string {
 	return label.id;
 }
 
+const REACTIONS: Record<string, string> = { up: '👍', down: '👎', eyes: '👀', stop: '🛑', question: '❓' };
+
+/** An emoji, its name, or `none`; the name spares a shell or a prompt from carrying the emoji. */
+function reactionArg(value: string): string | null {
+	if (value === 'none') return null;
+	const emoji = REACTIONS[value] ?? value;
+	if (!Object.values(REACTIONS).includes(emoji))
+		throw new Error(
+			`unknown reaction '${value}'; use one of ${Object.entries(REACTIONS)
+				.map(([name, e]) => `${e} (${name})`)
+				.join(', ')}, or none`,
+		);
+	return emoji;
+}
+
 const dryRun = {
 	type: 'boolean',
 	default: false,
@@ -160,17 +179,27 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
 \`procrastimate GET /docs/agent\` is the full API guide.`)
 	.command(
 		'tasks <project>',
-		'Open tasks with section, parent, priority, label names, notes, and each title as a markdown link to the task in the app.',
-		command => command.positional('project', { type: 'string', demandOption: true, describe: 'Project name or id.' }),
+		'Open tasks with section, parent, priority, label names, reactions, notes, and each title as a markdown link to the task in the app.',
+		command =>
+			command
+				.positional('project', { type: 'string', demandOption: true, describe: 'Project name or id.' })
+				.option('reaction', {
+					type: 'string',
+					describe: 'Only tasks with this reaction from anyone: an emoji or its name (eyes, question, stop, up, down).',
+				}),
 		async argv => {
 			const view = await new Api().view();
 			const names = (list: Named[]) => new Map(list.map(x => [x.id, x.name]));
 			const labels = names(view.labels);
 			const sections = names(view.sections);
+			const only = argv.reaction === undefined ? null : reactionArg(argv.reaction);
 			for (const t of openTasks(view, argv.project)) {
+				if (only && !t.reactions.some(r => r.emoji === only)) continue;
+				const reactions = t.reactions.map(r => r.emoji + (r.authorIds.length > 1 ? r.authorIds.length : '')).join('');
 				console.log(
 					`${t.id} p${t.priority} section=${sections.get(t.sectionId ?? '') ?? '-'} parent=${t.parentId ?? '-'}` +
-						` labels=${t.labelIds.map(id => labels.get(id)).join(',')} attachments=${t.attachments.length}`,
+						` labels=${t.labelIds.map(id => labels.get(id)).join(',')} reactions=${reactions || '-'}` +
+						` attachments=${t.attachments.length}`,
 				);
 				console.log(`  ${taskRef(t)}`);
 				if (t.notes) console.log(`  ${t.notes.replaceAll('\n', '\n  ')}`);
@@ -200,6 +229,20 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
 				console.log(
 					`[${new Date(c.createdAt).toISOString().slice(0, 19)}Z ${c.author.name} (${c.author.kind})] ${c.body}`,
 				);
+		},
+	)
+	.command(
+		'comment <task> <body>',
+		'Comment on the task as the AI account, unless the same comment is already there; safe to rerun.',
+		command =>
+			command
+				.positional('task', { type: 'string', demandOption: true, describe: 'Task id.' })
+				.positional('body', { type: 'string', demandOption: true, describe: 'Comment text; links show as links.' })
+				.option('dry-run', dryRun),
+		async argv => {
+			const api = new Api(argv.dryRun);
+			await api.comment(argv.task, argv.body, argv.body);
+			api.report();
 		},
 	)
 	.command(
@@ -280,6 +323,31 @@ ProcrastiMate's agent API as the AI account, with PROCRASTIMATE_TOKEN from env-m
 			if (!api.skip(describeRequest('PATCH', target, body))) {
 				const updated = await api.json<Task>('PATCH', target, body);
 				console.log(JSON.stringify({ id: updated.id, labelIds: updated.labelIds }));
+			}
+			api.report();
+		},
+	)
+	.command(
+		'react <reaction> <tasks..>',
+		"Set the AI account's one reaction on each task, replacing the one it had, or take it back with `none`; safe to rerun.",
+		command =>
+			command
+				.positional('reaction', {
+					type: 'string',
+					demandOption: true,
+					describe: 'An emoji (👍 👎 👀 🛑 ❓), its name (up, down, eyes, stop, question), or none.',
+				})
+				.positional('tasks', { type: 'string', array: true, demandOption: true, describe: 'Task ids.' })
+				.option('dry-run', dryRun),
+		async argv => {
+			const emoji = reactionArg(argv.reaction);
+			const api = new Api(argv.dryRun);
+			for (const task of argv.tasks) {
+				const target = `/reactions?id=${task}`;
+				const body = { emoji };
+				if (api.skip(describeRequest('PUT', target, body))) continue;
+				const { reactions } = await api.json<Pick<Task, 'reactions'>>('PUT', target, body);
+				console.log(`${task} ${reactions.map(r => `${r.emoji}${r.authorIds.length}`).join(' ') || '-'}`);
 			}
 			api.report();
 		},
