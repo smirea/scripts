@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { type Io, type Pr, ship, TimeoutError } from './prShip';
+import { LOCAL_REVIEW_MARKER } from './prShipReview';
 
 const HEAD = 'abc1234def';
 const SUMMARY_DONE = '<!-- codex-review-state:v1 {"code_review":{"status":"completed"}} -->';
@@ -14,18 +15,22 @@ function fakeGitHub({
 	codexSummary = SUMMARY_DONE,
 	durations = {},
 	mergeable = 'MERGEABLE',
+	localReviewTakes = 300_000,
 }: {
 	checksDoneAt?: number;
 	codexDoneAt?: number;
 	codexSummary?: string;
 	durations?: Record<string, number>;
 	mergeable?: string;
+	localReviewTakes?: number;
 } = {}) {
 	const start = Date.parse('2026-10-31T12:00:00Z');
 	let now = start;
 	let state = 'OPEN';
 	const calls: string[] = [];
 	const elapsed = () => now - start;
+	const localReviews: number[] = [];
+	const localReviewPosted = () => localReviews.length > 0 && elapsed() >= localReviews[0]! + localReviewTakes;
 	const pr = (): Pr => ({
 		number: 7,
 		url: 'https://github.com/smirea/procrastimate/pull/7',
@@ -38,7 +43,12 @@ function fakeGitHub({
 				? { __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'SUCCESS' }
 				: { __typename: 'CheckRun', name: 'ci', status: 'IN_PROGRESS' },
 		],
-		comments: elapsed() >= codexDoneAt ? [{ body: codexSummary }] : [],
+		comments: [
+			...(elapsed() >= codexDoneAt ? [{ body: codexSummary }] : []),
+			...(localReviewPosted()
+				? [{ body: `Local review <!-- ${LOCAL_REVIEW_MARKER} {"sha":"${HEAD}","findings":0,"unthreaded":0} -->` }]
+				: []),
+		],
 	});
 	const answer = (cmd: string): string => {
 		if (cmd === 'git rev-parse HEAD') return HEAD;
@@ -69,8 +79,14 @@ function fakeGitHub({
 			return answer(line);
 		},
 		log: () => {},
+		localReview: {
+			status: () => (localReviews.length ? { kind: 'running' } : { kind: 'idle' }),
+			start: () => localReviews.push(elapsed()),
+			unthreadedSeen: () => false,
+			markUnthreadedSeen: () => {},
+		},
 	};
-	return { io, calls, elapsed };
+	return { io, calls, elapsed, localReviews };
 }
 
 const BUDGET_MS = 500_000;
@@ -105,11 +121,18 @@ test('a pending Codex review is never merged past and exits 3', async () => {
 const FAILED_REVIEW =
 	'You have reached your Codex usage limits for code reviews. <!-- codex-review-state:v1 {"code_review":{"status":"failed"}} -->';
 
-test('a failed Codex review exits 1 without merging, unless a `@codex review` retry was asked after it, which exits 3', async () => {
-	const failed = fakeGitHub({ codexSummary: FAILED_REVIEW });
-	expect((await ship(failed.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(1);
-	expect(merged(failed.calls)).toBe(false);
+test('a review bot that cannot review is replaced by one local review, and the PR merges only once it posted', async () => {
+	for (const summary of [FAILED_REVIEW, 'Codex: You have reached your usage limits for code reviews.']) {
+		const github = fakeGitHub({ codexSummary: summary });
+		expect((await ship(github.io, { merge: true, budgetMs: 200_000 })).code).toBe(3);
+		expect(merged(github.calls)).toBe(false);
+		expect((await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(0);
+		expect(merged(github.calls)).toBe(true);
+		expect(github.localReviews).toHaveLength(1);
+	}
+});
 
+test('a `@codex review` retry asked after the failure waits for Codex instead of reviewing locally', async () => {
 	const retried = fakeGitHub({ codexSummary: FAILED_REVIEW });
 	const view = retried.io.run;
 	retried.io.run = (cmd, options) => {
@@ -120,6 +143,7 @@ test('a failed Codex review exits 1 without merging, unless a `@codex review` re
 	};
 	expect((await ship(retried.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(3);
 	expect(merged(retried.calls)).toBe(false);
+	expect(retried.localReviews).toHaveLength(0);
 });
 
 test('a PR that conflicts with its base exits 2 without merging', async () => {

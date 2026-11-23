@@ -1,5 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
+import { LOCAL_REVIEW_MARKER, type LocalReviewStatus, type ReviewTarget } from './prShipReview';
+
 const POLL_MS = 20_000;
 const EXIT_RESERVE_MS = 2_000;
 
@@ -24,11 +26,20 @@ export type Pr = {
 	comments: { body: string }[];
 };
 
+/** The local review pr-ship runs when the review bot can't; `prShipReview.ts` is the real one. */
+export type LocalReview = {
+	status(sha: string): LocalReviewStatus;
+	start(target: ReviewTarget): void;
+	unthreadedSeen(sha: string): boolean;
+	markUnthreadedSeen(sha: string): void;
+};
+
 export type Io = {
 	now(): number;
 	sleep(ms: number): Promise<void>;
 	run(cmd: string[], options?: { timeoutMs?: number }): string;
 	log(line: string): void;
+	localReview: LocalReview;
 };
 export type Verdict = { code: 0 | 1 | 2 | 3; message: string };
 
@@ -67,25 +78,37 @@ function checks(pr: Pr) {
 	return { all, failed: all.filter(check => check.done && !check.ok), pending: all.filter(check => !check.done) };
 }
 
-// The summary's has_unresolved_findings never clears after the threads resolve, so findings come from the threads.
-function codexReview(pr: Pr): 'running' | 'completed' | 'failed' {
-	const summary = pr.comments.find(comment => comment.body.includes('codex-review-state:v1'));
-	const state = summary?.body.match(/codex-review-state:v1 (\{.*?\}) -->/)?.[1];
-	if (!state) return 'running';
-	const status = (JSON.parse(state).code_review as { status: string | null }).status;
-	if (status === 'completed') return status;
-	if (status !== 'failed') return 'running';
-	// A failed summary stays until Codex runs again, so a `@codex review` asked after its last reply means a retry is pending.
-	const retry = pr.comments.findLastIndex(comment => /@codex review/i.test(comment.body));
-	const reply = pr.comments.findLastIndex(
-		comment => comment.body.includes('Codex') && !/@codex review/i.test(comment.body),
-	);
-	return retry > reply ? 'running' : 'failed';
+// A bot that can't review says so in a comment: Codex's quota message, or another bot's usage or rate limit.
+const BOT_FAILURE =
+	/usage limits?|out of (review )?(quota|credits)|quota (is )?(exceeded|exhausted|reached)|rate limit|unable to review|review (failed|errored)/i;
+const RETRY = /@\S+ review/i;
+
+const localReviewState = (pr: Pr) =>
+	pr.comments
+		.findLast(comment => comment.body.includes(LOCAL_REVIEW_MARKER))
+		?.body.match(new RegExp(`${LOCAL_REVIEW_MARKER} (\\{.*?\\}) -->`))?.[1];
+
+/**
+ * `failed` once the review bot reports it can't review and nobody asked it to retry since; pr-ship's own local review
+ * then stands in for it. The Codex summary's has_unresolved_findings never clears after the threads resolve, so
+ * findings come from the threads.
+ */
+function botReview(pr: Pr): 'running' | 'completed' | 'failed' {
+	if (localReviewState(pr)) return 'completed';
+	const retried = (index: number) => pr.comments.findLastIndex(comment => RETRY.test(comment.body)) > index;
+	const summary = pr.comments.findLastIndex(comment => comment.body.includes('codex-review-state:v1'));
+	const state = pr.comments[summary]?.body.match(/codex-review-state:v1 (\{.*?\}) -->/)?.[1];
+	const status = state && (JSON.parse(state).code_review as { status: string | null }).status;
+	if (status === 'completed') return 'completed';
+	if (status === 'failed' && !retried(summary)) return 'failed';
+	const failure = pr.comments.findLastIndex(comment => !RETRY.test(comment.body) && BOT_FAILURE.test(comment.body));
+	return failure >= 0 && !retried(failure) ? 'failed' : 'running';
 }
 
 /**
  * Drives the current branch's open PR to a verdict. Waits for CI and for Codex's first review; Codex reviews every PR
- * on its own when it opens, so after the first review it never waits for another. The budget is a hard stop: every
+ * on its own when it opens, so after the first review it never waits for another. When the review bot can't review, it
+ * starts one local review instead, whose findings land as review threads like the bot's. The budget is a hard stop: every
  * command is killed when it would outlive it. With `once` it never waits: an agent whose T3 PR watch does the waiting
  * runs it on each wake.
  */
@@ -180,20 +203,35 @@ export async function ship(
 					`Unresolved review threads:\n${threads.join('\n')}\nFix or answer each, resolve the thread, push, rerun.`,
 				);
 
-			const review = codexReview(pr);
+			const review = botReview(pr);
 			if (review === 'failed') {
-				const reason = pr.comments.findLast(comment => /usage limit/i.test(comment.body))
-					? ' Codex is out of review quota.'
-					: '';
-				exit(
-					1,
-					`The Codex review of ${pr.url} failed.${reason} Comment \`@codex review\` on the PR to retry once it can run, then rerun.`,
-				);
+				const status = io.localReview.status(head);
+				if (status.kind === 'failed')
+					exit(
+						1,
+						`The local review of ${pr.url} failed:\n${status.reason}\nFix the cause if it is in this repo, then rerun to start it again.`,
+					);
+				if (status.kind === 'idle') {
+					io.localReview.start({ owner, repo, number: pr.number, base: pr.baseRefName, sha: head });
+					io.log(`The review bot could not review ${pr.url}, so a local review runs; it posts to the PR when done.`);
+				}
+			}
+			const local = localReviewState(pr);
+			if (local) {
+				const { sha, unthreaded } = JSON.parse(local) as { sha: string; unthreaded: number };
+				if (unthreaded && !io.localReview.unthreadedSeen(sha)) {
+					io.localReview.markUnthreadedSeen(sha);
+					exit(
+						1,
+						`The local review has findings outside the diff's lines:\n${pr.comments.findLast(comment => comment.body.includes(LOCAL_REVIEW_MARKER))!.body}\nFix the real ones and push, then rerun.`,
+					);
+				}
 			}
 			const waiting = [
 				...(all.length ? [] : ['checks to start']),
 				...pending.map(check => check.name),
 				...(review === 'running' ? ['Codex review'] : []),
+				...(review === 'failed' ? ['the local review (5 to 15 minutes)'] : []),
 			];
 			if (!waiting.length && pr.mergeable === 'MERGEABLE') {
 				if (!merge) exit(0, `Ready to merge: ${pr.url}`);

@@ -210,8 +210,7 @@ export function gc({ dryRun = false } = {}): string[] {
 			// Only a simulator made for that worktree is deleted; a stock one it borrowed just loses the claim.
 			if (!namedFor(claimed.worktree).test(device.name))
 				act(`release ${device.name}, claimed by the removed ${claimed.worktree}`, () => unclaim(device));
-			else if (device.state !== 'Shutdown' || inUse)
-				messages.push(`keep ${device.name}: booted or in use, though its worktree ${claimed.worktree} is gone`);
+			else if (inUse) messages.push(`keep ${device.name}: in use, though its worktree ${claimed.worktree} is gone`);
 			else act(`delete simulator ${device.name}; its worktree ${claimed.worktree} is gone`, () => remove(device));
 		} else if (device.state === 'Booted' && Date.now() - claimed.lastUsed > IDLE_MS && !inUse) {
 			act(`shut down ${device.name}, idle ${Math.round((Date.now() - claimed.lastUsed) / 60_000)} minutes`, () =>
