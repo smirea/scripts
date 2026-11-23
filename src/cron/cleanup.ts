@@ -5,6 +5,7 @@ import {
 	mkdirSync,
 	openSync,
 	readdirSync,
+	readFileSync,
 	readSync,
 	realpathSync,
 	statSync,
@@ -21,6 +22,8 @@ import { allocated, human, LOG_FILE, STATE_DIR, type Step } from './steps';
 const home = homedir();
 const TRASH = path.join(home, '.Trash');
 const TMP = '/private/tmp';
+const DERIVED_DATA = path.join(home, 'Library/Developer/Xcode/DerivedData');
+const PLAYWRIGHT_CACHE = path.join(home, 'Library/Caches/ms-playwright');
 const TCC_DATABASE = path.join(home, 'Library/Application Support/com.apple.TCC/TCC.db');
 const CONTAINER_ROOT = path.join(home, 'Library/Application Support/com.apple.container/containers');
 const CONTAINER_LOGS = path.join(home, 'Library/Logs/repo-containers');
@@ -41,7 +44,9 @@ export const CLEANUP_STEPS: Step[] = [
 		name: 'logs',
 		action: dryRun => [...trimLogs(CONTAINER_LOGS, dryRun), ...trimLog(LOG_FILE, dryRun)],
 	},
-	{ name: '/tmp', action: cleanTmp },
+	{ name: '/tmp', action: dryRun => removeStale(TMP, dryRun) },
+	{ name: 'xcode derived data', action: dryRun => removeStale(DERIVED_DATA, dryRun) },
+	{ name: 'playwright browsers', action: playwrightBrowsers },
 	{ name: 'trash', action: emptyTrash },
 	{ name: 'package caches (weekly)', action: packageCaches },
 ];
@@ -121,24 +126,63 @@ function packageCaches(dryRun: boolean): string[] {
 }
 
 /**
- * Removes each top-level /tmp entry as a whole once nothing inside it was modified or changed in the last day.
+ * Removes each top-level entry of `dir` as a whole once nothing inside it was modified or changed in the last day.
  * ctime counts because extracted archives keep old mtimes; sockets and FIFOs keep their entry because a live process owns them.
  */
-function cleanTmp(dryRun: boolean): string[] {
+function removeStale(dir: string, dryRun: boolean): string[] {
+	if (!existsSync(dir)) return [`${dir} is missing`];
 	const uid = process.getuid!();
-	const stale = readdirSync(TMP)
-		.map(name => path.join(TMP, name))
+	const stale = readdirSync(dir)
+		.map(name => path.join(dir, name))
 		.filter(entry => lstatSync(entry).uid === uid)
 		.filter(isStale);
-	if (!stale.length) return ['nothing in /tmp is over a day old'];
+	if (!stale.length) return [`nothing in ${dir} is over a day old`];
 	const bytes = stale.reduce((sum, entry) => sum + allocated(entry), 0);
-	const failed = dryRun
-		? []
-		: stale.filter(entry => !run(['rm', '-rf', entry], { allowFail: true }) && existsSync(entry));
+	const failed = dryRun ? [] : removeAll(stale);
 	return [
 		...(dryRun ? stale.map(entry => `would delete ${entry}`) : []),
-		`${dryRun ? 'would delete' : 'deleted'} ${stale.length - failed.length} /tmp entries over a day old (${human(bytes)})`,
+		`${dryRun ? 'would delete' : 'deleted'} ${stale.length - failed.length} entries in ${dir} over a day old (${human(bytes)})`,
 		...failed.map(entry => `could not fully delete ${entry}; check its permissions`),
+	];
+}
+
+/** Returns the entries still there after `rm -rf`. */
+function removeAll(entries: string[]): string[] {
+	return entries.filter(entry => !run(['rm', '-rf', entry], { allowFail: true }) && existsSync(entry));
+}
+
+/**
+ * Playwright records each install that downloaded browsers in `.links`, and only prunes the rest on its next install.
+ * This does that prune now: browsers no live install's browsers.json names go, along with links to removed installs.
+ */
+function playwrightBrowsers(dryRun: boolean): string[] {
+	const links = path.join(PLAYWRIGHT_CACHE, '.links');
+	if (!existsSync(links)) return [`no Playwright browsers (${links} is missing)`];
+	const keep = new Set<string>();
+	const deadLinks: string[] = [];
+	for (const name of readdirSync(links)) {
+		const install = readFileSync(path.join(links, name), 'utf8').trim();
+		const manifest = path.join(install, 'browsers.json');
+		if (!existsSync(manifest)) {
+			deadLinks.push(path.join(links, name));
+			continue;
+		}
+		const { browsers } = JSON.parse(readFileSync(manifest, 'utf8')) as {
+			browsers: { name: string; revision: string; revisionOverrides?: Record<string, string> }[];
+		};
+		for (const browser of browsers)
+			for (const revision of [browser.revision, ...Object.values(browser.revisionOverrides ?? {})])
+				keep.add(`${browser.name.replaceAll('-', '_')}-${revision}`);
+	}
+	const unused = readdirSync(PLAYWRIGHT_CACHE)
+		.filter(name => /^[a-z_]+-\d+$/.test(name) && !keep.has(name))
+		.map(name => path.join(PLAYWRIGHT_CACHE, name));
+	const bytes = unused.reduce((sum, dir) => sum + allocated(dir), 0);
+	const failed = dryRun ? [] : removeAll([...unused, ...deadLinks]);
+	return [
+		...(dryRun ? unused.map(dir => `would delete ${dir}`) : []),
+		`${dryRun ? 'would delete' : 'deleted'} ${unused.length} unused Playwright browsers (${human(bytes)}) and ${deadLinks.length} links to removed installs`,
+		...failed.map(entry => `could not delete ${entry}; check its permissions`),
 	];
 }
 

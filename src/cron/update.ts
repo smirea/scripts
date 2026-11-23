@@ -54,7 +54,7 @@ function homebrew(dryRun: boolean): string[] {
 	const upgrade = outdated.filter(name => !HELD[name]);
 	if (upgrade.length) exec(['brew', 'upgrade', ...upgrade], dryRun, BREW_ENV);
 	try {
-		exec(['brew', 'cleanup', '--prune=30'], dryRun, BREW_ENV);
+		exec(['brew', 'cleanup', '--prune=all'], dryRun, BREW_ENV);
 	} catch (error) {
 		// tailscaled runs as root, so every replaced tailscale keg holds a root-owned binary brew can't delete.
 		const kegs = (error as Error).message.match(/^\s+\/opt\/homebrew\/Cellar\/\S+$/gm);

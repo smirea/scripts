@@ -32,7 +32,7 @@ const atOption = {
 
 await createScript('cron')
 	.usage(
-		"$0 <command>\n\nThis Mac's nightly maintenance. `cleanup` removes T3 worktrees no open thread uses (with their simulators), prunes the home-mac repo containers, caps logs, deletes /tmp entries untouched for a day, empties the Trash, and weekly prunes the pnpm and bun caches. `update` upgrades Homebrew, Tailscale, bun and its globals, npm and pnpm, the agent CLIs, the Codex app, uv tools, App Store apps, and the ai-files skills and plugins. `run` does both; `install` schedules it daily at 03:14, and 10 minutes after login when the last run is over 24 hours old.",
+		"$0 <command>\n\nThis Mac's nightly maintenance. `cleanup` removes T3 worktrees no open thread uses (with their simulators), prunes the home-mac repo containers, caps logs, deletes /tmp entries and Xcode DerivedData untouched for a day, deletes Playwright browsers no install uses, empties the Trash, and weekly prunes the pnpm and bun caches. `update` upgrades Homebrew (then empties its download cache), Tailscale, bun and its globals, npm and pnpm, the agent CLIs, the Codex app, uv tools, App Store apps, and the ai-files skills and plugins. `run` does both; `install` schedules it daily at 03:14, and 10 minutes after login when the last run is over 24 hours old.",
 	)
 	.command(
 		'run',
