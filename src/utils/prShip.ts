@@ -28,10 +28,10 @@ export type Pr = {
 
 /** The local review pr-ship runs when the review bot can't; `prShipReview.ts` is the real one. */
 export type LocalReview = {
-	status(sha: string): LocalReviewStatus;
+	status(pr: number): LocalReviewStatus;
 	start(target: ReviewTarget): void;
-	unthreadedSeen(sha: string): boolean;
-	markUnthreadedSeen(sha: string): void;
+	unthreadedSeen(pr: number): boolean;
+	markUnthreadedSeen(pr: number): void;
 };
 
 export type Io = {
@@ -78,10 +78,12 @@ function checks(pr: Pr) {
 	return { all, failed: all.filter(check => check.done && !check.ok), pending: all.filter(check => !check.done) };
 }
 
-// A bot that can't review says so in a comment: Codex's quota message, or another bot's usage or rate limit.
+// A bot that can't review says so in a comment about a review: Codex's quota message, or another bot's usage or rate
+// limit. Requiring the review context keeps a deploy bot's rate limit from counting.
 const BOT_FAILURE =
-	/usage limits?|out of (review )?(quota|credits)|quota (is )?(exceeded|exhausted|reached)|rate limit|unable to review|review (failed|errored)/i;
-const RETRY = /@\S+ review/i;
+	/(usage limits?|quota|credits|rate limit)[\s\S]*\breviews?\b|\breviews?\b[\s\S]*(usage limits?|quota|credits|rate limit)|unable to review|\breview (failed|errored)/i;
+// Only a comment that is the retry command counts, not a bot's hint that quotes it.
+const RETRY = /^\s*@\S+ review\b/i;
 
 const localReviewState = (pr: Pr) =>
 	pr.comments
@@ -205,7 +207,7 @@ export async function ship(
 
 			const review = botReview(pr);
 			if (review === 'failed') {
-				const status = io.localReview.status(head);
+				const status = io.localReview.status(pr.number);
 				if (status.kind === 'failed')
 					exit(
 						1,
@@ -218,9 +220,9 @@ export async function ship(
 			}
 			const local = localReviewState(pr);
 			if (local) {
-				const { sha, unthreaded } = JSON.parse(local) as { sha: string; unthreaded: number };
-				if (unthreaded && !io.localReview.unthreadedSeen(sha)) {
-					io.localReview.markUnthreadedSeen(sha);
+				const { unthreaded } = JSON.parse(local) as { unthreaded: number };
+				if (unthreaded && !io.localReview.unthreadedSeen(pr.number)) {
+					io.localReview.markUnthreadedSeen(pr.number);
 					exit(
 						1,
 						`The local review has findings outside the diff's lines:\n${pr.comments.findLast(comment => comment.body.includes(LOCAL_REVIEW_MARKER))!.body}\nFix the real ones and push, then rerun.`,

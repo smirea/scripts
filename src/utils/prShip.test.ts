@@ -132,6 +132,23 @@ test('a review bot that cannot review is replaced by one local review, and the P
 	}
 });
 
+test('a failure that is not about a review, or a bot hint quoting the retry command, never stands in for a retry', async () => {
+	const deploy = fakeGitHub({ codexDoneAt: Infinity });
+	const view = deploy.io.run;
+	deploy.io.run = (cmd, options) => {
+		const out = view(cmd, options);
+		if (!cmd.join(' ').startsWith('gh pr view')) return out;
+		const pr = JSON.parse(out) as Pr;
+		return JSON.stringify({ ...pr, comments: [{ body: 'Deploy preview skipped: Cloudflare API rate limit.' }] });
+	};
+	expect((await ship(deploy.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(3);
+	expect(deploy.localReviews).toHaveLength(0);
+
+	const hint = fakeGitHub({ codexSummary: 'Review rate limit exceeded. Comment `@coderabbitai review` to retry.' });
+	await ship(hint.io, { merge: true, budgetMs: BUDGET_MS });
+	expect(hint.localReviews).toHaveLength(1);
+});
+
 test('a `@codex review` retry asked after the failure waits for Codex instead of reviewing locally', async () => {
 	const retried = fakeGitHub({ codexSummary: FAILED_REVIEW });
 	const view = retried.io.run;

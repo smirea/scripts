@@ -28,13 +28,13 @@ const FINDINGS_SCHEMA = {
 	required: ['findings'],
 };
 
-// Per worktree, so two worktrees of one repo never share a review.
+// Per worktree and per PR: one local review per PR, like the bot's first review, whatever is pushed while it runs.
 function stateDir() {
 	const dir = run(['git', 'rev-parse', '--path-format=absolute', '--git-path', 'pr-ship']);
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
-const file = (sha: string, ext: string) => join(stateDir(), `review-${sha.slice(0, 12)}.${ext}`);
+const file = (pr: number, ext: string) => join(stateDir(), `review-${pr}.${ext}`);
 
 function alive(pid: number) {
 	try {
@@ -45,22 +45,24 @@ function alive(pid: number) {
 	}
 }
 
-export function localReviewStatus(sha: string): LocalReviewStatus {
-	const pidFile = file(sha, 'pid');
+export function localReviewStatus(pr: number): LocalReviewStatus {
+	const pidFile = file(pr, 'pid');
 	if (!existsSync(pidFile)) return { kind: 'idle' };
 	// Once it posted, the next PR read shows its marker, so until then it still counts as running.
-	if (alive(Number(readFileSync(pidFile, 'utf8'))) || existsSync(file(sha, 'done'))) return { kind: 'running' };
-	const log = existsSync(file(sha, 'log')) ? readFileSync(file(sha, 'log'), 'utf8') : '';
+	if (alive(Number(readFileSync(pidFile, 'utf8'))) || existsSync(file(pr, 'done'))) return { kind: 'running' };
+	const log = existsSync(file(pr, 'log')) ? readFileSync(file(pr, 'log'), 'utf8') : '';
 	rmSync(pidFile, { force: true });
-	return { kind: 'failed', reason: `${log.trim().split('\n').slice(-15).join('\n')}\nFull log: ${file(sha, 'log')}` };
+	return { kind: 'failed', reason: `${log.trim().split('\n').slice(-15).join('\n')}\nFull log: ${file(pr, 'log')}` };
 }
 
 /** Starts `pr-ship review` detached, so it outlives pr-ship's budget and posts to the PR when it finishes. */
 export function startLocalReview(target: ReviewTarget) {
-	const log = openSync(file(target.sha, 'log'), 'w');
+	const log = openSync(file(target.number, 'log'), 'w');
 	const child = spawn(
 		process.execPath,
 		[
+			// The cwd is the PR's repo, whose .env could hold a GH_TOKEN that would post as someone else.
+			'--no-env-file',
 			join(import.meta.dir, '../pr-ship.ts'),
 			'review',
 			`--repo=${target.owner}/${target.repo}`,
@@ -70,19 +72,18 @@ export function startLocalReview(target: ReviewTarget) {
 		],
 		{ detached: true, stdio: ['ignore', log, log] },
 	);
-	writeFileSync(file(target.sha, 'pid'), String(child.pid));
+	writeFileSync(file(target.number, 'pid'), String(child.pid));
 	child.unref();
 }
 
-const seenFile = (sha: string) => file(sha, 'seen');
-export const unthreadedSeen = (sha: string) => existsSync(seenFile(sha));
-export const markUnthreadedSeen = (sha: string) => writeFileSync(seenFile(sha), '');
+export const unthreadedSeen = (pr: number) => existsSync(file(pr, 'seen'));
+export const markUnthreadedSeen = (pr: number) => writeFileSync(file(pr, 'seen'), '');
 
 function review(target: ReviewTarget): Finding[] {
 	run(['git', 'fetch', 'origin', target.base]);
-	const diffFile = file(target.sha, 'diff');
+	const diffFile = file(target.number, 'diff');
 	writeFileSync(diffFile, run(['git', 'diff', `origin/${target.base}...${target.sha}`]));
-	const schemaFile = file(target.sha, 'schema.json');
+	const schemaFile = file(target.number, 'schema.json');
 	writeFileSync(schemaFile, JSON.stringify(FINDINGS_SCHEMA));
 	const prompt = `You review pull request #${target.number} of ${target.owner}/${target.repo} because its review bot could not run. The working directory is the PR's checkout at ${target.sha}; its diff against origin/${target.base} is in ${diffFile}. Read AGENTS.md and the AGENTS.md or CLAUDE.md of each folder the diff touches, then the changed code with enough context to judge it.
 
@@ -149,6 +150,6 @@ export function runLocalReview(target: ReviewTarget, { dryRun = false } = {}) {
 		'--body',
 		lines.join('\n'),
 	]);
-	writeFileSync(file(target.sha, 'done'), '');
+	writeFileSync(file(target.number, 'done'), '');
 	console.log(`Posted the local review of #${target.number}: ${findings.length} finding(s).`);
 }
