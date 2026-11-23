@@ -85,10 +85,11 @@ const BOT_FAILURE =
 // Only a comment that is the retry command counts, not a bot's hint that quotes it.
 const RETRY = /^\s*@\S+ review\b/i;
 
+// Matched whole, so a later comment that only mentions a marker never hides the real one.
+const LOCAL_STATE = new RegExp(`${LOCAL_REVIEW_MARKER} (\\{.*?\\}) -->`);
+const CODEX_STATE = /codex-review-state:v1 (\{.*?\}) -->/;
 const localReviewState = (pr: Pr) =>
-	pr.comments
-		.findLast(comment => comment.body.includes(LOCAL_REVIEW_MARKER))
-		?.body.match(new RegExp(`${LOCAL_REVIEW_MARKER} (\\{.*?\\}) -->`))?.[1];
+	pr.comments.findLast(comment => LOCAL_STATE.test(comment.body))?.body.match(LOCAL_STATE)?.[1];
 
 /**
  * `failed` once the review bot reports it can't review and nobody asked it to retry since; pr-ship's own local review
@@ -98,8 +99,8 @@ const localReviewState = (pr: Pr) =>
 function botReview(pr: Pr): 'running' | 'completed' | 'failed' {
 	if (localReviewState(pr)) return 'completed';
 	const retried = (index: number) => pr.comments.findLastIndex(comment => RETRY.test(comment.body)) > index;
-	const summary = pr.comments.findLastIndex(comment => comment.body.includes('codex-review-state:v1'));
-	const state = pr.comments[summary]?.body.match(/codex-review-state:v1 (\{.*?\}) -->/)?.[1];
+	const summary = pr.comments.findLastIndex(comment => CODEX_STATE.test(comment.body));
+	const state = pr.comments[summary]?.body.match(CODEX_STATE)?.[1];
 	const status = state && (JSON.parse(state).code_review as { status: string | null }).status;
 	if (status === 'completed') return 'completed';
 	if (status === 'failed' && !retried(summary)) return 'failed';
@@ -225,7 +226,7 @@ export async function ship(
 					io.localReview.markUnthreadedSeen(pr.number);
 					exit(
 						1,
-						`The local review has findings outside the diff's lines:\n${pr.comments.findLast(comment => comment.body.includes(LOCAL_REVIEW_MARKER))!.body}\nFix the real ones and push, then rerun.`,
+						`The local review has findings outside the diff's lines:\n${pr.comments.findLast(comment => LOCAL_STATE.test(comment.body))!.body}\nFix the real ones and push, then rerun.`,
 					);
 				}
 			}

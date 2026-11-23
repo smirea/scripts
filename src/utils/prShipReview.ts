@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { run } from './shell';
@@ -48,8 +48,16 @@ function alive(pid: number) {
 export function localReviewStatus(pr: number): LocalReviewStatus {
 	const pidFile = file(pr, 'pid');
 	if (!existsSync(pidFile)) return { kind: 'idle' };
-	// Once it posted, the next PR read shows its marker, so until then it still counts as running.
-	if (alive(Number(readFileSync(pidFile, 'utf8'))) || existsSync(file(pr, 'done'))) return { kind: 'running' };
+	if (alive(Number(readFileSync(pidFile, 'utf8')))) return { kind: 'running' };
+	// A review that just posted shows on the next PR read. Past that, a missing marker (deleted, or a reopened PR) means
+	// it should run again.
+	const done = file(pr, 'done');
+	if (existsSync(done) && Date.now() - statSync(done).mtimeMs < 2 * 60_000) return { kind: 'running' };
+	if (existsSync(done)) {
+		rmSync(done);
+		rmSync(pidFile, { force: true });
+		return { kind: 'idle' };
+	}
 	const log = existsSync(file(pr, 'log')) ? readFileSync(file(pr, 'log'), 'utf8') : '';
 	rmSync(pidFile, { force: true });
 	return { kind: 'failed', reason: `${log.trim().split('\n').slice(-15).join('\n')}\nFull log: ${file(pr, 'log')}` };
@@ -70,7 +78,7 @@ export function startLocalReview(target: ReviewTarget) {
 			`--base=${target.base}`,
 			`--sha=${target.sha}`,
 		],
-		{ detached: true, stdio: ['ignore', log, log] },
+		{ detached: true, stdio: ['ignore', log, log], cwd: run(['git', 'rev-parse', '--show-toplevel']) },
 	);
 	writeFileSync(file(target.number, 'pid'), String(child.pid));
 	child.unref();
