@@ -1,7 +1,18 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
 import { checkout } from './utils/shell';
-import { claim, devices, ensure, gc, ownedBy, remove, shutdown, status, waitForRoom } from './utils/simulators';
+import {
+	claim,
+	devices,
+	ensure,
+	gc,
+	ownedBy,
+	pairedWatches,
+	remove,
+	shutdown,
+	status,
+	waitForRoom,
+} from './utils/simulators';
 
 function here() {
 	const current = checkout(process.cwd());
@@ -47,7 +58,12 @@ await createScript('agent-simulator')
 		},
 	)
 	.command('stop', "Shut down this worktree's simulators", {}, () => {
-		const own = ownedBy(here().root).filter(device => device.state !== 'Shutdown');
+		const all = devices();
+		const booted = new Set(all.filter(device => device.state !== 'Shutdown').map(device => device.udid));
+		// A phone already shut down (T3's device_close) still owns a booted paired watch.
+		const own = ownedBy(here().root, all).filter(
+			device => booted.has(device.udid) || pairedWatches(device).some(udid => booted.has(udid)),
+		);
 		for (const device of own) {
 			shutdown(device);
 			console.log(`Shut down ${device.name}.`);

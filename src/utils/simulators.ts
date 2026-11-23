@@ -76,7 +76,7 @@ function drivenRecently(udid: string): boolean {
 export const simulatorName = (worktree: string, n?: number) =>
 	`${basename(worktree).replaceAll(/[^\w.-]/g, '-')}${n ? `-${n}` : ''}`;
 
-function pairedWatches(phone: Device): string[] {
+export function pairedWatches(phone: Device): string[] {
 	const { pairs } = JSON.parse(simctl('list', 'pairs', '--json')) as {
 		pairs: Record<string, { watch: { udid: string }; phone: { udid: string } }>;
 	};
