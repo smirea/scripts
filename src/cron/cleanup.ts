@@ -1,6 +1,7 @@
 import {
 	closeSync,
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -19,6 +20,7 @@ import { allocated, human, LOG_FILE, STATE_DIR, type Step } from './steps';
 
 const home = homedir();
 const TRASH = path.join(home, '.Trash');
+const TMP = '/private/tmp';
 const TCC_DATABASE = path.join(home, 'Library/Application Support/com.apple.TCC/TCC.db');
 const CONTAINER_ROOT = path.join(home, 'Library/Application Support/com.apple.container/containers');
 const CONTAINER_LOGS = path.join(home, 'Library/Logs/repo-containers');
@@ -30,9 +32,16 @@ const LOG_KEEP = 2 * 1024 * 1024;
 const BLOATED_CONTAINER = 4 * 1024 * 1024 * 1024;
 
 export const CLEANUP_STEPS: Step[] = [
-	{ name: 't3 worktrees', action: dryRun => [...pruneAbandoned({ dryRun }), ...simulatorGc({ dryRun })] },
+	{
+		name: 't3 worktrees',
+		action: dryRun => [...pruneAbandoned({ dryRun }), ...simulatorGc({ dryRun })],
+	},
 	{ name: 'repo containers', action: containers },
-	{ name: 'logs', action: dryRun => [...trimLogs(CONTAINER_LOGS, dryRun), ...trimLog(LOG_FILE, dryRun)] },
+	{
+		name: 'logs',
+		action: dryRun => [...trimLogs(CONTAINER_LOGS, dryRun), ...trimLog(LOG_FILE, dryRun)],
+	},
+	{ name: '/tmp', action: cleanTmp },
 	{ name: 'trash', action: emptyTrash },
 	{ name: 'package caches (weekly)', action: packageCaches },
 ];
@@ -109,6 +118,55 @@ function packageCaches(dryRun: boolean): string[] {
 	return [
 		`pruned the pnpm store, ${oldStores.length} old pnpm stores, and the bun cache: ${human(before)} → ${human(after)}`,
 	];
+}
+
+/**
+ * Removes each top-level /tmp entry as a whole once nothing inside it was modified or changed in the last day.
+ * ctime counts because extracted archives keep old mtimes; sockets and FIFOs keep their entry because a live process owns them.
+ */
+function cleanTmp(dryRun: boolean): string[] {
+	const uid = process.getuid!();
+	const stale = readdirSync(TMP)
+		.map(name => path.join(TMP, name))
+		.filter(entry => lstatSync(entry).uid === uid)
+		.filter(isStale);
+	if (!stale.length) return ['nothing in /tmp is over a day old'];
+	const bytes = stale.reduce((sum, entry) => sum + allocated(entry), 0);
+	const failed = dryRun
+		? []
+		: stale.filter(entry => !run(['rm', '-rf', entry], { allowFail: true }) && existsSync(entry));
+	return [
+		...(dryRun ? stale.map(entry => `would delete ${entry}`) : []),
+		`${dryRun ? 'would delete' : 'deleted'} ${stale.length - failed.length} /tmp entries over a day old (${human(bytes)})`,
+		...failed.map(entry => `could not fully delete ${entry}; check its permissions`),
+	];
+}
+
+// An unreadable subdirectory makes find fail, and an entry it could not fully check is kept.
+function isStale(entry: string): boolean {
+	const result = Bun.spawnSync(
+		[
+			'find',
+			entry,
+			'(',
+			'-mmin',
+			'-1440',
+			'-o',
+			'-cmin',
+			'-1440',
+			'-o',
+			'-type',
+			's',
+			'-o',
+			'-type',
+			'p',
+			')',
+			'-print',
+			'-quit',
+		],
+		{ stderr: 'ignore' },
+	);
+	return result.exitCode === 0 && !result.stdout.toString().trim();
 }
 
 // Without Full Disk Access macOS lists ~/.Trash as empty instead of failing, so a protected file is the probe.
