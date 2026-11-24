@@ -4,6 +4,8 @@ export type ScriptCommand =
 			source: string;
 			/** One-sentence description for `ai-files/GLOBAL_AGENTS.md`, or `null` if the name is self-explanatory. */
 			description: string | null;
+			/** Left out of `ai-files/GLOBAL_AGENTS.md` so agents aren't nudged toward a script meant only for Stefan. */
+			hiddenFromAgents?: true;
 	  }
 	| {
 			name: string;
@@ -16,6 +18,7 @@ export const SCRIPT_COMMANDS = [
 		name: 'gai',
 		source: 'src/git-commit-ai.ts',
 		description: 'Generate a conventional commit message with Gemini or commit with AI attribution.',
+		hiddenFromAgents: true,
 	},
 	{ name: 'git-ai-cim', source: 'src/git-commit-ai.ts', aliasOf: 'gai' },
 	{

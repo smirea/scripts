@@ -3,10 +3,17 @@ import { expect, test } from 'bun:test';
 import { SCRIPT_COMMANDS } from './scriptCommands';
 import { END_MARKER, renderScriptsFyi, START_MARKER, updateGlobalAgentsContent } from './sync-global-agents';
 
-test('every registered script has a valid description or alias pointing to a canonical command with the same source', () => {
+test('every registered script is listed with its aliases unless hidden from agents', () => {
 	const rendered = renderScriptsFyi(SCRIPT_COMMANDS);
+	const hidden = new Set(
+		SCRIPT_COMMANDS.filter(command => 'hiddenFromAgents' in command && command.hiddenFromAgents).map(
+			command => command.name,
+		),
+	);
 	for (const command of SCRIPT_COMMANDS) {
-		expect(rendered).toContain(`\`${command.name}\``);
+		const canonical = 'aliasOf' in command ? command.aliasOf : command.name;
+		if (hidden.has(canonical)) expect(rendered).not.toContain(`\`${command.name}\``);
+		else expect(rendered).toContain(`\`${command.name}\``);
 	}
 });
 

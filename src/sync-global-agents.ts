@@ -15,6 +15,7 @@ interface CanonicalEntry {
 	names: string[];
 	source: string;
 	description: string | null;
+	hidden: boolean;
 }
 
 export function renderScriptsFyi(commands: readonly ScriptCommand[] = SCRIPT_COMMANDS): string {
@@ -38,6 +39,7 @@ export function renderScriptsFyi(commands: readonly ScriptCommand[] = SCRIPT_COM
 			names: [command.name],
 			source: command.source,
 			description: command.description === null ? null : command.description.trim(),
+			hidden: command.hiddenFromAgents === true,
 		};
 		entries.push(entry);
 		byName.set(command.name, entry);
@@ -59,10 +61,12 @@ export function renderScriptsFyi(commands: readonly ScriptCommand[] = SCRIPT_COM
 		canonical.names.push(command.name);
 	}
 
-	const lines = entries.map(entry => {
-		const label = entry.names.map(name => `\`${name}\``).join(' / ');
-		return entry.description ? `- ${label} [${entry.description}]` : `- ${label}`;
-	});
+	const lines = entries
+		.filter(entry => !entry.hidden)
+		.map(entry => {
+			const label = entry.names.map(name => `\`${name}\``).join(' / ');
+			return entry.description ? `- ${label} [${entry.description}]` : `- ${label}`;
+		});
 
 	return [
 		START_MARKER,
