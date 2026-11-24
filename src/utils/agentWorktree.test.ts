@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { check, classify, setup, type Entry } from './agentWorktree';
+import { check, classify, reclaimDisk, setup, type Entry } from './agentWorktree';
 import { git } from './shell';
 
 const temporary: string[] = [];
@@ -116,4 +116,39 @@ test('gc removes a worktree only when a merged PR holds its commits and nothing 
 		remove: true,
 		why: 'its directory is gone',
 	});
+});
+
+test('reclaimDisk skips all stages at or above the watermark and stops once free space recovers', () => {
+	const ran: string[] = [];
+	const gb = 1024 ** 3;
+	reclaimDisk({
+		minFreeGb: 25,
+		freeSpace: () => 25 * gb,
+		stages: [{ name: 'first', run: () => (ran.push('first'), []) }],
+	});
+	expect(ran).toEqual([]);
+
+	let free = 12 * gb;
+	reclaimDisk({
+		minFreeGb: 25,
+		freeSpace: () => free,
+		stages: [
+			{
+				name: 'first',
+				run: () => {
+					ran.push('first');
+					free = 26 * gb;
+					return ['freed 14 GB'];
+				},
+			},
+			{
+				name: 'second',
+				run: () => {
+					ran.push('second');
+					return [];
+				},
+			},
+		],
+	});
+	expect(ran).toEqual(['first']);
 });

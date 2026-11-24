@@ -2,8 +2,10 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { run } from '../utils/shell';
+import { allocated, freeBytes, human } from '../utils/disk';
 import { gitEnvironment } from '../utils/worktreeCache';
+
+export { allocated, freeBytes, human };
 
 export const STATE_DIR = path.join(homedir(), '.local/state/cron');
 export const LOG_FILE = path.join(homedir(), 'Library/Logs/cron.log');
@@ -52,17 +54,4 @@ export function exec(cmd: string[], dryRun: boolean, env: Record<string, string>
 			`\`${cmd.join(' ')}\` ${result.error ? `failed: ${result.error.message}` : `exited ${result.status ?? result.signal}`}\n${output.split('\n').slice(-20).join('\n')}`,
 		);
 	for (const line of output.split('\n').filter(Boolean).slice(-3)) console.log(`  ${line}`);
-}
-
-export function allocated(target: string): number {
-	return Number(run(['du', '-sk', target], { allowFail: true }).split('\t')[0] || 0) * 1024;
-}
-
-export function freeBytes(): number {
-	return Number(run(['df', '-k', '/']).split('\n')[1]!.trim().split(/\s+/)[3]) * 1024;
-}
-
-export function human(bytes: number) {
-	const gb = bytes / 1024 ** 3;
-	return Math.abs(gb) >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2) || 0} MB`;
 }

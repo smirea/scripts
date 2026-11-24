@@ -14,10 +14,12 @@ import {
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { pruneAbandoned } from '../utils/agentWorktree';
+import { DEFAULT_RECLAIM_WATERMARK_GB, pruneAbandoned, reclaimDisk } from '../utils/agentWorktree';
 import { run } from '../utils/shell';
 import { gc as simulatorGc } from '../utils/simulators';
+import { cleanRepoBuildCaches, isPathStale } from '../utils/worktreeCache';
 import { allocated, human, LOG_FILE, STATE_DIR, type Step } from './steps';
+import { cleanT3Userdata } from './t3Userdata';
 
 const home = homedir();
 const TRASH = path.join(home, '.Trash');
@@ -39,6 +41,7 @@ export const CLEANUP_STEPS: Step[] = [
 		name: 't3 worktrees',
 		action: dryRun => [...pruneAbandoned({ dryRun }), ...simulatorGc({ dryRun })],
 	},
+	{ name: 'repo build caches', action: dryRun => cleanRepoBuildCaches({ dryRun }) },
 	{ name: 'repo containers', action: containers },
 	{
 		name: 'logs',
@@ -48,7 +51,12 @@ export const CLEANUP_STEPS: Step[] = [
 	{ name: 'xcode derived data', action: dryRun => removeStale(DERIVED_DATA, dryRun) },
 	{ name: 'playwright browsers', action: playwrightBrowsers },
 	{ name: 'trash', action: emptyTrash },
+	{ name: 't3 userdata', action: dryRun => cleanT3Userdata({ dryRun }) },
 	{ name: 'package caches (weekly)', action: packageCaches },
+	{
+		name: 'low-disk watermark',
+		action: dryRun => reclaimDisk({ minFreeGb: DEFAULT_RECLAIM_WATERMARK_GB, dryRun }),
+	},
 ];
 
 function containers(dryRun: boolean): string[] {
@@ -135,7 +143,7 @@ function removeStale(dir: string, dryRun: boolean): string[] {
 	const stale = readdirSync(dir)
 		.map(name => path.join(dir, name))
 		.filter(entry => lstatSync(entry).uid === uid)
-		.filter(isStale);
+		.filter(entry => isPathStale(entry));
 	if (!stale.length) return [`nothing in ${dir} is over a day old`];
 	const bytes = stale.reduce((sum, entry) => sum + allocated(entry), 0);
 	const failed = dryRun ? [] : removeAll(stale);
@@ -184,33 +192,6 @@ function playwrightBrowsers(dryRun: boolean): string[] {
 		`${dryRun ? 'would delete' : 'deleted'} ${unused.length} unused Playwright browsers (${human(bytes)}) and ${deadLinks.length} links to removed installs`,
 		...failed.map(entry => `could not delete ${entry}; check its permissions`),
 	];
-}
-
-// An unreadable subdirectory makes find fail, and an entry it could not fully check is kept.
-function isStale(entry: string): boolean {
-	const result = Bun.spawnSync(
-		[
-			'find',
-			entry,
-			'(',
-			'-mmin',
-			'-1440',
-			'-o',
-			'-cmin',
-			'-1440',
-			'-o',
-			'-type',
-			's',
-			'-o',
-			'-type',
-			'p',
-			')',
-			'-print',
-			'-quit',
-		],
-		{ stderr: 'ignore' },
-	);
-	return result.exitCode === 0 && !result.stdout.toString().trim();
 }
 
 // Without Full Disk Access macOS lists ~/.Trash as empty instead of failing, so a protected file is the probe.

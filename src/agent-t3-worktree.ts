@@ -1,6 +1,15 @@
 #!/usr/bin/env bun
 import { createScript } from './utils/createScript';
-import { check, gc, repositories, settle, setup, teardown } from './utils/agentWorktree';
+import {
+	check,
+	DEFAULT_RECLAIM_WATERMARK_GB,
+	gc,
+	reclaimDisk,
+	repositories,
+	settle,
+	setup,
+	teardown,
+} from './utils/agentWorktree';
 import { checkout } from './utils/shell';
 import { gc as simulatorGc, status as simulatorStatus } from './utils/simulators';
 
@@ -62,6 +71,31 @@ await createScript('agent-t3-worktree')
 				...simulatorGc({ dryRun: argv.dryRun }),
 				simulatorStatus(),
 			])
+				console.log(line);
+		},
+	)
+	.command(
+		'reclaim',
+		'Reclaim idle worktree build caches, unused simulators, and stale caches when free disk is below the watermark',
+		y =>
+			y
+				.option('min-free-gb', {
+					type: 'number',
+					default: DEFAULT_RECLAIM_WATERMARK_GB,
+					describe: 'skip when at least this many GB are free',
+				})
+				.option('keep', {
+					type: 'string',
+					describe: 'checkout root to preserve (defaults to the current checkout)',
+				})
+				.option('dry-run', { type: 'boolean', default: false }),
+		argv => {
+			const keep = argv.keep ?? checkout(process.cwd())?.root;
+			for (const line of reclaimDisk({
+				minFreeGb: argv.minFreeGb,
+				keep: keep ? [keep] : [],
+				dryRun: argv.dryRun,
+			}))
 				console.log(line);
 		},
 	)

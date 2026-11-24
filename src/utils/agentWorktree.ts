@@ -11,11 +11,20 @@ import {
 } from 'node:fs';
 import { createServer } from 'node:net';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
+import { pruneStaleT3Artifacts } from '../cron/t3Userdata';
+import { freeBytes, human } from './disk';
 import { checkout, git, run, type Checkout } from './shell';
 import { devices, gc as simulatorGc, ownedBy, remove as removeSimulator, shutdown, status } from './simulators';
-import { cleanWorktreeCache, runningT3Worktree } from './worktreeCache';
+import {
+	cleanIdleWorktreeCaches,
+	cleanStaleRepoCaches,
+	cleanWorktreeCache,
+	DAY_MS,
+	openFiles,
+	runningT3Worktree,
+} from './worktreeCache';
 
 const T3_WORKTREES = join(homedir(), '.t3/worktrees');
 const T3_DATABASE = join(homedir(), '.t3/userdata/statev2.sqlite');
@@ -619,8 +628,17 @@ const FRESH_MS = 60 * 60_000;
  * was deleted or never recorded it. Unlike gc it needs no merged PR. Branches stay, so committed work survives;
  * uncommitted changes are deleted with the directory.
  */
-export function pruneAbandoned({ dryRun = false } = {}): string[] {
+export function pruneAbandoned({ dryRun = false, keep = [] }: { dryRun?: boolean; keep?: string[] } = {}): string[] {
 	if (!existsSync(T3_WORKTREES)) return [];
+	const preserved = new Set(
+		keep.map(entry => {
+			try {
+				return realpathSync(entry);
+			} catch {
+				return resolve(entry);
+			}
+		}),
+	);
 	const report: string[] = [];
 	const cwds = processCwds({ skipIdleShells: true });
 	const sims = devices();
@@ -628,16 +646,22 @@ export function pruneAbandoned({ dryRun = false } = {}): string[] {
 		for (const dir of readdirSync(join(T3_WORKTREES, project.name), { withFileTypes: true })) {
 			if (!dir.isDirectory()) continue;
 			const path = join(T3_WORKTREES, project.name, dir.name);
-			const keep = openThread(path)
-				? 'a T3 thread on it is still open'
-				: runningT3Worktree(path)
-					? 'a T3 run is active in it'
-					: cwds.some(cwd => cwd === path || cwd.startsWith(`${path}/`))
-						? 'a process is running in it'
-						: // T3 records a thread's worktree only after creating it.
-							Date.now() - statSync(path).birthtimeMs < FRESH_MS
-							? 'created in the last hour'
-							: undefined;
+			let real = path;
+			try {
+				real = realpathSync(path);
+			} catch {}
+			const keep = preserved.has(real)
+				? 'preserved by caller'
+				: openThread(path)
+					? 'a T3 thread on it is still open'
+					: runningT3Worktree(path)
+						? 'a T3 run is active in it'
+						: cwds.some(cwd => cwd === path || cwd.startsWith(`${path}/`))
+							? 'a process is running in it'
+							: // T3 records a thread's worktree only after creating it.
+								Date.now() - statSync(path).birthtimeMs < FRESH_MS
+								? 'created in the last hour'
+								: undefined;
 			if (keep) {
 				report.push(`keep ${path}: ${keep}`);
 				continue;
@@ -701,5 +725,76 @@ export function settle(cwd: string, { dryRun = false } = {}): string[] {
 		}
 	}
 	report.push(...gc([current.main], { dryRun }), ...simulatorGc({ dryRun }), status());
+	return report;
+}
+
+export const DEFAULT_RECLAIM_WATERMARK_GB = 25;
+
+export type ReclaimDiskOptions = {
+	minFreeGb?: number;
+	keep?: string[];
+	dryRun?: boolean;
+	freeSpace?: () => number;
+	stages?: { name: string; run: () => string[] }[];
+};
+
+/**
+ * Reclaims local build caches and idle artifacts progressively whenever free disk falls below `minFreeGb`, stopping
+ * as soon as free space recovers. Uses only local checks (no GitHub API calls), so pre-build hooks stay fast offline.
+ */
+export function reclaimDisk(options: ReclaimDiskOptions = {}): string[] {
+	const minFreeGb = options.minFreeGb ?? DEFAULT_RECLAIM_WATERMARK_GB;
+	const minFreeBytes = minFreeGb * 1024 ** 3;
+	const dryRun = options.dryRun ?? false;
+	const keep = options.keep ?? [];
+	const freeSpace = options.freeSpace ?? freeBytes;
+
+	const before = freeSpace();
+	if (before >= minFreeBytes) {
+		return [`Disk space OK: ${human(before)} free (watermark ${minFreeGb} GB).`];
+	}
+
+	const report: string[] = [
+		`Low disk space: ${human(before)} free (below ${minFreeGb} GB watermark); ${dryRun ? 'checking' : 'reclaiming'} idle caches…`,
+	];
+
+	const stages =
+		options.stages ??
+		(() => {
+			const opened = openFiles();
+			const openPaths = () => opened;
+			return [
+				{
+					name: 'idle worktree build caches',
+					run: () => cleanIdleWorktreeCaches({ dryRun, minAgeMs: 0, keep, openPaths }),
+				},
+				{ name: 'unused simulators', run: () => simulatorGc({ dryRun }) },
+				{ name: 'abandoned T3 worktrees', run: () => pruneAbandoned({ dryRun, keep }) },
+				{
+					name: 'stale repo build caches (>24h)',
+					run: () => cleanStaleRepoCaches({ dryRun, minAgeMs: DAY_MS, keep, openPaths }),
+				},
+				{
+					name: 'stale T3 artifacts and logs (>24h)',
+					run: () => pruneStaleT3Artifacts({ dryRun, minAgeMs: DAY_MS, openPaths }),
+				},
+			];
+		})();
+
+	for (const stage of stages) {
+		try {
+			for (const line of stage.run()) report.push(`  [${stage.name}] ${line}`);
+		} catch (error) {
+			report.push(`  [${stage.name}] skipped: ${(error as Error).message}`);
+		}
+		if (!dryRun && freeSpace() >= minFreeBytes) break;
+	}
+
+	const after = freeSpace();
+	report.push(
+		dryRun
+			? `Dry run finished: ${human(before)} free now (watermark ${minFreeGb} GB).`
+			: `Reclaim finished: ${human(before)} → ${human(after)} free (${human(Math.max(0, after - before))} reclaimed).`,
+	);
 	return report;
 }
