@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 
 import { LOCAL_REVIEW_MARKER, type LocalReviewStatus, type ReviewTarget } from './prShipReview';
+import { gitEnvironment } from './worktreeCache';
 
 const POLL_MS = 20_000;
 const EXIT_RESERVE_MS = 2_000;
@@ -45,10 +46,23 @@ export type Verdict = { code: 0 | 1 | 2 | 3; message: string };
 
 export class TimeoutError extends Error {}
 
+/**
+ * Strips forced-color and TTY env vars so `gh --json` and `gh api` never emit ANSI escape sequences into captured
+ * stdout (which happens in harnesses that export `CLICOLOR_FORCE=1` or `GH_FORCE_TTY`).
+ */
+export function nonInteractiveEnv(base: NodeJS.ProcessEnv = gitEnvironment()): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = { ...base, NO_COLOR: '1', CLICOLOR: '0', GH_PAGER: '', GH_PROMPT_DISABLED: '1' };
+	delete env.CLICOLOR_FORCE;
+	delete env.GH_FORCE_TTY;
+	delete env.FORCE_COLOR;
+	return env;
+}
+
 /** Runs a command and answers its trimmed stdout, killing it after `timeoutMs` with a `TimeoutError`. */
 export function runBounded(cmd: string[], { timeoutMs }: { timeoutMs?: number } = {}): string {
 	const result = spawnSync(cmd[0]!, cmd.slice(1), {
 		encoding: 'utf8',
+		env: nonInteractiveEnv(),
 		timeout: timeoutMs,
 		killSignal: 'SIGKILL',
 		maxBuffer: 64 * 1024 * 1024,
@@ -57,6 +71,15 @@ export function runBounded(cmd: string[], { timeoutMs }: { timeoutMs?: number } 
 		throw new TimeoutError(`\`${cmd.join(' ')}\` ran past ${timeoutMs}ms`);
 	if (result.status !== 0) throw new Error(`\`${cmd.join(' ')}\` failed\n${result.stderr ?? ''}${result.stdout ?? ''}`);
 	return (result.stdout ?? '').trim();
+}
+
+function parseJson<T>(raw: string, context: string): T {
+	try {
+		return JSON.parse(raw) as T;
+	} catch (error) {
+		const preview = JSON.stringify(raw.slice(0, 200));
+		throw new Error(`${context} returned invalid JSON (${(error as Error).message}): ${preview}`, { cause: error });
+	}
 }
 
 class Exit extends Error {
@@ -135,8 +158,9 @@ export async function ship(
 
 	function view(): Pr {
 		try {
-			return JSON.parse(
+			return parseJson<Pr>(
 				gh(['pr', 'view', '--json', 'number,url,state,headRefOid,baseRefName,mergeable,statusCheckRollup,comments']),
+				'`gh pr view`',
 			);
 		} catch (error) {
 			if (error instanceof Error && error.message.includes('no pull requests found'))
@@ -147,7 +171,22 @@ export async function ship(
 
 	function unresolvedThreads(owner: string, repo: string, number: number) {
 		const query = `query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved path line comments(first:1){nodes{author{login} body url}}}}}}}`;
-		const data = JSON.parse(
+		const data = parseJson<{
+			data: {
+				repository: {
+					pullRequest: {
+						reviewThreads: {
+							nodes: {
+								isResolved: boolean;
+								path: string;
+								line: number | null;
+								comments: { nodes: { author: { login: string }; body: string; url: string }[] };
+							}[];
+						};
+					};
+				};
+			};
+		}>(
 			gh([
 				'api',
 				'graphql',
@@ -160,14 +199,9 @@ export async function ship(
 				'-F',
 				`number=${number}`,
 			]),
+			'`gh api graphql`',
 		);
-		type Thread = {
-			isResolved: boolean;
-			path: string;
-			line: number | null;
-			comments: { nodes: { author: { login: string }; body: string; url: string }[] };
-		};
-		return (data.data.repository.pullRequest.reviewThreads.nodes as Thread[])
+		return data.data.repository.pullRequest.reviewThreads.nodes
 			.filter(thread => !thread.isResolved)
 			.map(thread => {
 				const comment = thread.comments.nodes[0]!;

@@ -6,10 +6,19 @@ export type RunOptions = { allowFail?: boolean; cwd?: string; inherit?: boolean;
 
 /** Runs a command to completion and returns its trimmed stdout. A failure names the command and shows its output. */
 export function run(cmd: string[], { allowFail = false, cwd, inherit = false, env }: RunOptions = {}): string {
+	const childEnv: NodeJS.ProcessEnv = { ...gitEnvironment(), ...env };
+	if (!inherit) {
+		// Prevent `gh --json` and similar CLIs from emitting ANSI escapes when a parent harness exports CLICOLOR_FORCE or GH_FORCE_TTY.
+		delete childEnv.CLICOLOR_FORCE;
+		delete childEnv.GH_FORCE_TTY;
+		delete childEnv.FORCE_COLOR;
+		childEnv.NO_COLOR = '1';
+		childEnv.CLICOLOR = '0';
+	}
 	const result = spawnSync(cmd[0]!, cmd.slice(1), {
 		cwd,
 		encoding: 'utf8',
-		env: { ...gitEnvironment(), ...env },
+		env: childEnv,
 		maxBuffer: 64 * 1024 * 1024,
 		stdio: inherit ? ['ignore', 'inherit', 'inherit'] : 'pipe',
 	});

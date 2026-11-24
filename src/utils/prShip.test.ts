@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { type Io, type Pr, ship, TimeoutError } from './prShip';
+import { type Io, nonInteractiveEnv, type Pr, ship, TimeoutError } from './prShip';
 import { LOCAL_REVIEW_MARKER } from './prShipReview';
 
 const HEAD = 'abc1234def';
@@ -167,4 +167,22 @@ test('a PR that conflicts with its base exits 2 without merging', async () => {
 	const github = fakeGitHub({ mergeable: 'CONFLICTING' });
 	expect((await ship(github.io, { merge: true, budgetMs: BUDGET_MS })).code).toBe(2);
 	expect(merged(github.calls)).toBe(false);
+});
+
+test('nonInteractiveEnv strips forced color and TTY variables so gh JSON output never contains ANSI escapes', () => {
+	const env = nonInteractiveEnv({
+		PATH: '/usr/bin',
+		CLICOLOR_FORCE: '1',
+		GH_FORCE_TTY: '1',
+		FORCE_COLOR: '1',
+		GH_TOKEN: 'keep-me',
+	});
+	expect(env.CLICOLOR_FORCE).toBeUndefined();
+	expect(env.GH_FORCE_TTY).toBeUndefined();
+	expect(env.FORCE_COLOR).toBeUndefined();
+	expect(env.NO_COLOR).toBe('1');
+	expect(env.CLICOLOR).toBe('0');
+	expect(env.GH_PAGER).toBe('');
+	expect(env.GH_PROMPT_DISABLED).toBe('1');
+	expect(env.GH_TOKEN).toBe('keep-me');
 });
