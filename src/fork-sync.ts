@@ -27,7 +27,7 @@ export const FORKS: Fork[] = [
 		dir: path.join(home, 'code', 'tinybar'),
 		branch: 'main',
 		upstream: 'upstream',
-		install: ['Scripts/install-fork.sh'],
+		install: ['Scripts/install.sh'],
 	},
 ];
 
