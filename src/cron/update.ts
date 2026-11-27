@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -10,6 +10,20 @@ const BREW_ENV = { HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_ENV_HINTS: '1', HOM
 const TAILSCALE_SERVICE = 'system/homebrew.mxcl.tailscale';
 const CODEX_APP = '/Applications/Codex.app';
 const SKILLS_SETUP = path.join(home, 'code/ai-files/setup-skills.ts');
+
+/**
+ * A global `bun` package links over ~/.bun/bin/bun, the binary launchd starts this job with. On 2026-11-22 its
+ * postinstall failed inside `bun update --global`, deleted that binary, and launchd silently stopped running the job.
+ */
+function assertNoGlobalBunPackage() {
+	const manifest = path.join(home, '.bun/install/global/package.json');
+	if (!existsSync(manifest)) return;
+	const { dependencies = {} } = JSON.parse(readFileSync(manifest, 'utf8')) as { dependencies?: Record<string, string> };
+	if ('bun' in dependencies)
+		throw new Error(
+			'`bun` is a global package, which replaces ~/.bun/bin/bun; run `bun remove --global bun`, reinstall bun with `curl -fsSL https://bun.sh/install | bash`, then `cron install`.',
+		);
+}
 
 /** Formulae `brew upgrade` must not touch: each needs a restart the bulk upgrade doesn't do. */
 const HELD: Record<string, string> = {
@@ -24,6 +38,7 @@ export const UPDATE_STEPS: Step[] = [
 	{
 		name: 'bun',
 		action: dryRun => {
+			assertNoGlobalBunPackage();
 			exec(['bun', 'upgrade'], dryRun);
 			exec(['bun', 'update', '--global', '--latest'], dryRun);
 		},
