@@ -26,6 +26,7 @@ export interface Repo {
 	path: string;
 	key: RepoKey;
 	cloneUrl: string;
+	upstreamUrl?: string;
 }
 export interface Inventory {
 	machine: string;
@@ -37,10 +38,26 @@ interface Issue {
 	kind: string;
 	detail: string;
 }
+interface UpstreamReport {
+	added: string[];
+	issues: Issue[];
+}
 interface CloneReport {
 	cloned: string[];
 	registered: string[];
 	issues: Issue[];
+}
+
+/**
+ * The repos in `target` that lack the `upstream` remote their copy in `source` has, carrying that URL.
+ * T3 Code groups a fork's projects by its upstream remote, so a copy without one lands in a separate project group.
+ */
+export function missingUpstreams(source: Repo[], target: Repo[]): Repo[] {
+	const upstreamByKey = new Map(source.flatMap(repo => (repo.upstreamUrl ? [[repo.key, repo.upstreamUrl]] : [])));
+	return target.flatMap(repo => {
+		const upstreamUrl = upstreamByKey.get(repo.key);
+		return upstreamUrl && !repo.upstreamUrl ? [{ ...repo, upstreamUrl }] : [];
+	});
 }
 
 /** Normalizes a remote so ssh/https spellings and `github.com-<alias>` ssh hosts of one repo compare equal. */
@@ -58,12 +75,12 @@ export function parseRemote(url: string): { key: RepoKey; cloneUrl: string } | u
 if (import.meta.main) {
 	void createScript('repo-sync')
 		.usage(
-			'$0 <command>\n\nKeeps every git repo in ~/code that has a remote cloned, registered as a T3 Code project, and fast-forwarded on this machine and its peer.',
+			'$0 <command>\n\nKeeps every git repo in ~/code that has a remote cloned (with the same upstream remote), registered as a T3 Code project, and fast-forwarded on this machine and its peer.',
 		)
 		.parserConfiguration({ 'strip-aliased': true, 'strip-dashed': true })
 		.command(
 			'run',
-			'Exchange missing repos with --peer, register unregistered repos in T3 Code, and fast-forward repos that are behind.',
+			'Exchange missing repos and upstream remotes with --peer, register unregistered repos in T3 Code, and fast-forward repos that are behind.',
 			command =>
 				command
 					.option('peer', {
@@ -79,7 +96,8 @@ if (import.meta.main) {
 					.option('dry-run', {
 						type: 'boolean',
 						default: false,
-						describe: 'Read both machines and print the clones, registrations, and pulls without making them.',
+						describe:
+							'Read both machines and print the clones, upstream remotes, registrations, and pulls without making them.',
 					}),
 			argv => runSync({ peer: argv.peer, exclude: argv.exclude as string[], dryRun: argv.dryRun }),
 		)
@@ -98,6 +116,20 @@ if (import.meta.main) {
 			async argv => {
 				const repos = JSON.parse(await Bun.stdin.text()) as Repo[];
 				process.stdout.write(`${JSON.stringify(await cloneRepos(repos, argv.dryRun))}\n`);
+			},
+		)
+		.command(
+			'upstream',
+			'Add the `upstream` remote to each repo in the JSON Repo[] on stdin that has none. Prints a JSON report.',
+			command =>
+				command.option('dry-run', {
+					type: 'boolean',
+					default: false,
+					describe: 'Print which repos would get an upstream remote without adding it.',
+				}),
+			async argv => {
+				const repos = JSON.parse(await Bun.stdin.text()) as Repo[];
+				process.stdout.write(`${JSON.stringify(await addUpstreams(repos, argv.dryRun))}\n`);
 			},
 		)
 		.command(
@@ -162,6 +194,30 @@ async function runSync(options: { peer?: string; exclude: string[]; dryRun: bool
 					issues.push(...report.issues.map(issue => ({ ...issue, repo: `${peer.machine}:${issue.repo}` })));
 				}
 			}
+
+			const localUpstreams = await addUpstreams(missingUpstreams(peer.repos, local.repos), options.dryRun);
+			for (const name of localUpstreams.added) log(`${prefix}added upstream remote from ${peer.machine}: ${name}`);
+			issues.push(...localUpstreams.issues);
+
+			const peerUpstreams = missingUpstreams(local.repos, peer.repos);
+			if (peerUpstreams.length) {
+				const result = await callPeer(
+					options.peer,
+					['upstream', ...(options.dryRun ? ['--dry-run'] : [])],
+					JSON.stringify(peerUpstreams),
+				);
+				if (result === 'unreachable' || result.code !== 0) {
+					issues.push({
+						repo: options.peer,
+						kind: 'peer upstream failed',
+						detail: result === 'unreachable' ? 'unreachable' : result.output,
+					});
+				} else {
+					const report = JSON.parse(result.output) as UpstreamReport;
+					for (const name of report.added) log(`${prefix}added upstream remote on ${peer.machine}: ${name}`);
+					issues.push(...report.issues.map(issue => ({ ...issue, repo: `${peer.machine}:${issue.repo}` })));
+				}
+			}
 		}
 	}
 
@@ -195,7 +251,9 @@ async function inventory(): Promise<Inventory> {
 		const name = path.basename(root);
 		const remote = await exec(['git', '-C', root, 'remote', 'get-url', 'origin']);
 		const parsed = remote.code === 0 ? parseRemote(remote.stdout) : undefined;
-		if (parsed) repos.push({ name, path: root, ...parsed });
+		const upstream = await exec(['git', '-C', root, 'remote', 'get-url', 'upstream']);
+		if (parsed)
+			repos.push({ name, path: root, ...parsed, ...(upstream.code === 0 ? { upstreamUrl: upstream.stdout } : {}) });
 		else remoteless.push({ name, path: root });
 	});
 	return {
@@ -233,6 +291,10 @@ async function cloneRepos(repos: Repo[], dryRun: boolean): Promise<CloneReport> 
 		}
 		report.cloned.push(repo.name);
 		toRegister.push({ name: repo.name, path: destination });
+		if (repo.upstreamUrl) {
+			const upstream = await addUpstreams([{ ...repo, path: destination }], dryRun);
+			report.issues.push(...upstream.issues);
+		}
 	}
 	const registered = await registerAll(toRegister, dryRun);
 	report.registered.push(...registered.registered);
@@ -260,6 +322,21 @@ async function registerAll(
 		}
 	}
 	return result;
+}
+
+async function addUpstreams(repos: Repo[], dryRun: boolean): Promise<UpstreamReport> {
+	const report: UpstreamReport = { added: [], issues: [] };
+	for (const repo of repos) {
+		if (!repo.upstreamUrl) continue;
+		if (dryRun) {
+			report.added.push(repo.name);
+			continue;
+		}
+		const added = await exec(['git', '-C', repo.path, 'remote', 'add', 'upstream', repo.upstreamUrl]);
+		if (added.code === 0) report.added.push(repo.name);
+		else report.issues.push({ repo: repo.name, kind: 'adding upstream remote failed', detail: added.output });
+	}
+	return report;
 }
 
 async function fastForward(repo: Repo, dryRun: boolean): Promise<{ repo: string; updated?: string; issue?: Issue }> {

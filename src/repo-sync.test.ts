@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 
-import { parseRemote, pruneLogText } from './repo-sync';
+import { missingUpstreams, parseRemote, pruneLogText, type RepoKey } from './repo-sync';
 
 test('ssh, https, and ssh-alias remotes of one GitHub repo share a key and clone over ssh', () => {
 	const remotes = [
@@ -35,4 +35,22 @@ test('log pruning drops entries older than the cutoff along with their detail li
 	].join('\n');
 	expect(pruneLogText(log, new Date('2026-10-15T00:00:00Z'))).toBe(log.split('\n').slice(2).join('\n'));
 	expect(pruneLogText(log, new Date('2026-12-01T00:00:00Z'))).toBe('');
+});
+
+const repo = (name: string, upstreamUrl?: string, path = `/source/${name}`) => ({
+	name,
+	path,
+	key: `github.com/smirea/${name}` as RepoKey,
+	cloneUrl: `git@github.com:smirea/${name}.git`,
+	...(upstreamUrl ? { upstreamUrl } : {}),
+});
+
+test("a repo gets the peer's upstream remote only when it has none of its own", () => {
+	const source = [
+		repo('fork', 'git@github.com:owner/fork.git'),
+		repo('own', 'git@github.com:owner/own.git'),
+		repo('plain'),
+	];
+	const target = [repo('fork', undefined, '/target/fork'), repo('own', 'git@github.com:other/own.git'), repo('plain')];
+	expect(missingUpstreams(source, target)).toEqual([repo('fork', 'git@github.com:owner/fork.git', '/target/fork')]);
 });
