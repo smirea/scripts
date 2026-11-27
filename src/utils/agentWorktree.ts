@@ -476,28 +476,39 @@ type Facts = {
 	open: boolean;
 	pr?: Pr;
 	prsKnown: boolean;
+	landed: boolean;
+	fresh: boolean;
 };
 
-/** Pure: whether gc may remove a linked worktree. Removing needs a merged PR holding all its commits, and nothing in use. */
+const GONE = 'its directory is gone';
+
+/**
+ * Pure: whether gc may remove a linked worktree. Removing needs its commits safe, in a merged PR or already on the
+ * default branch, and nothing in use. A delegate's branch usually lands through its parent's PR, so it has none.
+ */
 export function classify(entry: Entry, facts: Facts): Verdict {
-	if (!facts.exists || entry.prunable) return { remove: true, why: 'its directory is gone' };
+	if (!facts.exists || entry.prunable) return { remove: true, why: GONE };
 	if (!facts.agent) return { remove: false, why: 'not an agent worktree' };
 	if (entry.locked) return { remove: false, why: 'locked' };
 	if (facts.dirty) return { remove: false, why: 'uncommitted or untracked files' };
 	if (facts.busy) return { remove: false, why: 'a process is running in it' };
 	if (facts.running) return { remove: false, why: 'a T3 run is active in it' };
 	if (facts.open) return { remove: false, why: 'a T3 thread on it is still open' };
+	if (facts.pr) return { remove: true, pr: facts.pr, why: `merged in ${facts.pr.url}` };
+	// A worktree T3 just made from the default branch looks landed before T3 records its thread.
+	if (facts.landed && !facts.fresh) return { remove: true, why: 'the default branch holds every commit' };
 	if (!facts.prsKnown) return { remove: false, why: 'gh could not list PRs' };
-	if (!facts.pr)
-		return {
-			remove: false,
-			why: entry.branch ? `no merged PR holds ${entry.branch}` : 'detached, with no merged PR holding its HEAD',
-		};
-	return { remove: true, pr: facts.pr, why: `merged in ${facts.pr.url}` };
+	return {
+		remove: false,
+		why: entry.branch ? `no merged PR holds ${entry.branch}` : 'detached, with no merged PR holding its HEAD',
+	};
 }
 
-/** Stops its servers, deletes its simulators, the worktree, and its branch locally and on origin. */
-function removeWorktree(main: string, entry: Entry, deleteBranch: boolean) {
+/**
+ * Stops its servers, deletes its simulators, the worktree, and its branch locally and on origin. Without a merged PR,
+ * the origin branch goes only when the default branch holds its tip, since it may carry commits pushed elsewhere.
+ */
+function removeWorktree(main: string, entry: Entry, deleteBranch: boolean, { merged = true } = {}) {
 	for (const pid of listeningPids(entry.path)) run(['kill', pid], { allowFail: true });
 	for (const device of ownedBy(entry.path)) removeSimulator(device);
 	if (existsSync(entry.path))
@@ -505,10 +516,20 @@ function removeWorktree(main: string, entry: Entry, deleteBranch: boolean) {
 	run(['git', '-C', main, 'worktree', 'prune']);
 	if (deleteBranch && entry.branch) {
 		run(['git', '-C', main, 'branch', '-D', entry.branch], { allowFail: true });
-		if (run(['git', '-C', main, 'ls-remote', '--heads', 'origin', entry.branch], { allowFail: true })) {
+		const remoteTip = run(['git', '-C', main, 'ls-remote', '--heads', 'origin', entry.branch], { allowFail: true })
+			.split('\t')[0]
+			?.trim();
+		if (remoteTip && (merged || landed(main, remoteTip))) {
 			run(['git', '-C', main, 'push', 'origin', '--delete', entry.branch], { allowFail: true });
 		}
 	}
+}
+
+/** Whether origin's default branch already holds `head`, below the local env-manager commits. */
+function landed(main: string, head: string | undefined): boolean {
+	if (!head) return false;
+	const tip = belowEnvManagerCommits(main, head);
+	return contains(main, `refs/remotes/origin/${defaultBranch(main)}`, tip);
 }
 
 function defaultBranch(main: string): string {
@@ -554,7 +575,8 @@ export function gc(mains: string[], { dryRun = false, includeOpenThreads = false
 		report.push(`${dryRun ? 'would ' : ''}${message}`);
 		if (!dryRun) action();
 	};
-	const cwds = processCwds();
+	// T3 reopens a terminal tab in every thread's worktree when it restarts, settled threads included.
+	const cwds = processCwds({ skipIdleShells: true });
 	const registered = new Set<string>();
 	for (const main of mains) {
 		const entries = worktreeEntries(main);
@@ -571,10 +593,14 @@ export function gc(mains: string[], { dryRun = false, includeOpenThreads = false
 				open: !includeOpenThreads && openThread(entry.path),
 				prsKnown: Boolean(prs),
 				pr: prs && mergedPrFor(main, prs, entry.head, [entry.branch, t3Branch(entry.path)]),
+				landed: exists && landed(main, entry.head),
+				fresh: exists && Date.now() - statSync(entry.path).birthtimeMs < FRESH_MS,
 			});
 			if (verdict.remove)
 				act(`remove ${entry.path} (${verdict.why})`, () =>
-					removeWorktree(main, entry, Boolean(verdict.pr) && !prs?.open.has(entry.branch ?? '')),
+					removeWorktree(main, entry, verdict.why !== GONE && !prs?.open.has(entry.branch ?? ''), {
+						merged: Boolean(verdict.pr),
+					}),
 				);
 			else report.push(`keep ${entry.path}: ${verdict.why}`);
 		}

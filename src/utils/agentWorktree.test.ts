@@ -83,7 +83,17 @@ test('setup in the main checkout changes nothing', async () => {
 });
 
 const entry: Entry = { path: '/w', head: 'abc', branch: 'feature', locked: false, prunable: false, main: false };
-const facts = { exists: true, agent: true, dirty: false, busy: false, running: false, open: false, prsKnown: true };
+const facts = {
+	exists: true,
+	agent: true,
+	dirty: false,
+	busy: false,
+	running: false,
+	open: false,
+	prsKnown: true,
+	landed: false,
+	fresh: false,
+};
 const pr = {
 	number: 7,
 	headRefName: 'feature',
@@ -92,13 +102,25 @@ const pr = {
 	url: 'https://github.com/o/r/pull/7',
 };
 
-test('gc removes a worktree only when a merged PR holds its commits and nothing uses it', () => {
+test('gc removes a worktree only when a merged PR or the default branch holds its commits and nothing uses it', () => {
 	expect(classify(entry, { ...facts, pr })).toEqual({
 		remove: true,
 		pr,
 		why: 'merged in https://github.com/o/r/pull/7',
 	});
 	expect(classify(entry, facts)).toEqual({ remove: false, why: 'no merged PR holds feature' });
+	expect(classify(entry, { ...facts, landed: true })).toEqual({
+		remove: true,
+		why: 'the default branch holds every commit',
+	});
+	expect(classify(entry, { ...facts, landed: true, fresh: true })).toEqual({
+		remove: false,
+		why: 'no merged PR holds feature',
+	});
+	expect(classify(entry, { ...facts, landed: true, open: true })).toEqual({
+		remove: false,
+		why: 'a T3 thread on it is still open',
+	});
 	expect(classify(entry, { ...facts, pr, dirty: true })).toEqual({
 		remove: false,
 		why: 'uncommitted or untracked files',
@@ -110,7 +132,7 @@ test('gc removes a worktree only when a merged PR holds its commits and nothing 
 		why: 'a T3 thread on it is still open',
 	});
 	expect(classify(entry, { ...facts, pr, agent: false })).toEqual({ remove: false, why: 'not an agent worktree' });
-	expect(classify(entry, { ...facts, pr, prsKnown: false })).toEqual({ remove: false, why: 'gh could not list PRs' });
+	expect(classify(entry, { ...facts, prsKnown: false })).toEqual({ remove: false, why: 'gh could not list PRs' });
 	expect(classify({ ...entry, locked: true }, { ...facts, pr })).toEqual({ remove: false, why: 'locked' });
 	expect(classify({ ...entry, prunable: true }, { ...facts, exists: false })).toEqual({
 		remove: true,
